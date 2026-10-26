@@ -7,6 +7,34 @@ import {pipeline} from 'node:stream/promises';
 import {randomUUID} from 'node:crypto';
 import {PrivateDocument} from './secrets.mjs';
 const call=(obj,method,...args)=>new Promise((resolve,reject)=>obj[method](...args,(err,...values)=>err?reject(err):resolve(values.length>1?values:values[0])));
+// Keep multiple SFTP writes in flight while retaining an exclusive temporary file.
+async function uploadPipelined(sftp, local, partial, size, entry, progress){
+ let file, handle, failure, offset=0;
+ try{
+  file=await fsp.open(local,'r');
+  if(entry.state==='cancelled')throw Error('Cancelled');
+  handle=await call(sftp,'open',partial,'wx',{mode:0o600});
+  const worker=async()=>{
+   while(!failure&&entry.state!=='cancelled'){
+    const start=offset; offset+=32768;
+    if(start>=size)return;
+    try{
+     const buffer=Buffer.allocUnsafe(Math.min(32768,size-start));
+     const {bytesRead}=await file.read(buffer,0,buffer.length,start);
+     if(bytesRead!==buffer.length)throw Error('Source file changed during transfer');
+     if(entry.state==='cancelled')return;
+     await call(sftp,'write',handle,buffer,0,bytesRead,start);
+     progress(bytesRead);
+    }catch(e){failure ||= e; return}
+   }
+  };
+  await Promise.all(Array.from({length:32},worker));
+  if(failure)throw failure;
+  if(entry.state==='cancelled')throw Error('Cancelled');
+ }finally{
+  try{if(handle)await call(sftp,'close',handle)}finally{if(file)await file.close()}
+ }
+}
 function safePath(value){if(typeof value!=='string'||!value||value.length>8192||value.includes('\0'))throw Error('Invalid path');return value}
 export class DesktopTools {
  constructor({ssh,knownHosts,directory,emit}){this.ssh=ssh;this.knownHosts=knownHosts;this.emit=emit;this.transfers=new Map();this.tunnels=new Map();this.history=new PrivateDocument(path.join(directory,'connections.json'),{version:1,entries:{}})}
@@ -22,6 +50,10 @@ export class DesktopTools {
  async fileAction(r){const target=safePath(r.path),remote=r.side==='remote',sftp=remote?await this.sftp(r.sessionId):null;
   if(r.operation==='mkdir')return remote?call(sftp,'mkdir',target):fsp.mkdir(this.local(target));
   if(r.operation==='rename'){safePath(r.destination);return remote?call(sftp,'rename',target,r.destination):fsp.rename(this.local(target),this.local(r.destination))}
+  if(r.operation==='delete'){
+   if(remote){if(path.posix.resolve(target)==='/')throw Error('Cannot delete the root directory');const stat=await call(sftp,'lstat',target);return stat.isDirectory()?call(sftp,'rmdir',target):call(sftp,'unlink',target)}
+   const resolved=this.local(target);if(resolved===path.parse(resolved).root)throw Error('Cannot delete the root directory');const stat=await fsp.lstat(resolved);return stat.isDirectory()?fsp.rmdir(resolved):fsp.unlink(resolved);
+  }
   if(r.operation==='chmod'){if(!/^[0-7]{3,4}$/.test(r.mode))throw Error('Use octal permissions, for example 644');return remote?call(sftp,'chmod',target,parseInt(r.mode,8)):fsp.chmod(this.local(target),parseInt(r.mode,8))}
   throw Error('Unsupported file action');
  }
@@ -34,11 +66,13 @@ export class DesktopTools {
   const entry={id,name:path.basename(local),direction:r.direction,state:'queued',bytes:0,total:size,sessionId:r.sessionId};this.transfers.set(id,entry);
   let last=0;const send=()=>this.emit({type:'transfer',id,sessionId:r.sessionId,name:entry.name,direction:entry.direction,state:entry.state,bytes:entry.bytes,total:size,message:entry.message});
   entry.run=()=>{
-   entry.state='active';
-   const source=r.direction==='upload'?fs.createReadStream(local):sftp.createReadStream(remote);
-   const dest=r.direction==='upload'?sftp.createWriteStream(partial,{flags:'wx',mode:0o600}):fs.createWriteStream(partial,{flags:'wx',mode:0o600});
-   entry.source=source;entry.dest=dest;source.on('data',chunk=>{entry.bytes+=chunk.length;if(Date.now()-last>100){last=Date.now();send()}});send();
-   pipeline(source,dest).then(async()=>{if(entry.state==='cancelled')throw Error('Cancelled');if(r.direction==='upload'){
+   entry.state='active';entry.runStarted=true;
+   const progress=bytes=>{entry.bytes+=bytes;if(Date.now()-last>100){last=Date.now();send()}};
+   let copying;
+   if(r.direction==='upload')copying=uploadPipelined(sftp,local,partial,size,entry,progress);
+   else{const source=sftp.createReadStream(remote),dest=fs.createWriteStream(partial,{flags:'wx',mode:0o600});entry.source=source;entry.dest=dest;source.on('data',chunk=>progress(chunk.length));copying=pipeline(source,dest)}
+   send();
+   copying.then(async()=>{if(entry.state==='cancelled')throw Error('Cancelled');if(r.direction==='upload'){
      if(r.replace&&typeof sftp.ext_openssh_rename==='function'){
       try{await call(sftp,'ext_openssh_rename',partial,remote)}catch(e){if(e.code!==8)throw e;await call(sftp,'rename',partial,remote)}
      }else await call(sftp,'rename',partial,remote);
@@ -48,7 +82,7 @@ export class DesktopTools {
   return {id};
  }
  drainTransfers(){let active=[...this.transfers.values()].filter(t=>t.state==='active').length;for(const t of this.transfers.values())if(active<2&&t.state==='queued'){active++;try{this.session(t.sessionId);t.run()}catch(e){t.state='failed';t.message=e.message;this.emit({type:'transfer',id:t.id,sessionId:t.sessionId,name:t.name,direction:t.direction,state:t.state,bytes:0,total:t.total,message:t.message});this.transfers.delete(t.id);active--}}}
- cancel(id){const t=this.transfers.get(id);if(t){t.state='cancelled';if(t.source){t.source.destroy(Error('Cancelled'));t.dest.destroy(Error('Cancelled'))}else{this.emit({type:'transfer',id:t.id,sessionId:t.sessionId,name:t.name,direction:t.direction,state:'cancelled',bytes:0,total:t.total});this.transfers.delete(id)}}}
+ cancel(id){const t=this.transfers.get(id);if(t){t.state='cancelled';if(t.source){t.source.destroy(Error('Cancelled'));t.dest.destroy(Error('Cancelled'))}else if(!t.runStarted){this.emit({type:'transfer',id:t.id,sessionId:t.sessionId,name:t.name,direction:t.direction,state:'cancelled',bytes:0,total:t.total});this.transfers.delete(id)}}}
 
  async startForward(rule,sessionId){
   if(this.tunnels.has(rule.id))return {running:true};const s=this.session(sessionId),sockets=new Set();

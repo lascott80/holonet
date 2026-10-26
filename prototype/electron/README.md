@@ -51,8 +51,7 @@ overwrite confirmation, progress, a two-transfer queue, and cancellation. Data
 first writes to uniquely named temporary files. Failed/cancelled transfers remove
 those partial files when the process and connection remain available. Abrupt app
 termination or a lost server connection can leave a `.holonet-<id>` temporary
-file; there is no automatic resume. Directory recursion, external editing, and
-file deletion are not implemented in this version.
+file; there is no automatic resume. File deletion and removal of empty directories require confirmation. Directory recursion and external editing are not implemented in this version.
 
 Local and remote TCP forwarding and dynamic SOCKS5 CONNECT forwarding use ssh2
 channels with explicit start/stop and connection cleanup. Bind defaults to

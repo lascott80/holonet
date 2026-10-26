@@ -24,7 +24,7 @@ export async function toolsServer(root){
  on('READ',async(id,b,offset,length)=>{const buf=Buffer.alloc(length),{bytesRead}=await get(b).file.read(buf,0,length,offset);if(bytesRead)sftp.data(id,buf.subarray(0,bytesRead));else sftp.status(id,1)});
  on('WRITE',async(id,b,offset,data)=>{await get(b).file.write(data,0,data.length,offset);status(id)});
  on('CLOSE',async(id,b)=>{await get(b)?.file?.close();handles.delete(b.readUInt32BE());status(id)});
- on('MKDIR',async(id,p)=>{await fs.mkdir(local(p));status(id)});on('RENAME',async(id,a,b)=>{await fs.rename(local(a),local(b));status(id)});on('REMOVE',async(id,p)=>{await fs.unlink(local(p));status(id)});on('SETSTAT',async(id,p,a)=>{if(a.mode!=null)await fs.chmod(local(p),a.mode);status(id)});
+ on('MKDIR',async(id,p)=>{await fs.mkdir(local(p));status(id)});on('RMDIR',async(id,p)=>{await fs.rmdir(local(p));status(id)});on('RENAME',async(id,a,b)=>{await fs.rename(local(a),local(b));status(id)});on('REMOVE',async(id,p)=>{await fs.unlink(local(p));status(id)});on('SETSTAT',async(id,p,a)=>{if(a.mode!=null)await fs.chmod(local(p),a.mode);status(id)});
  sftp.on('close',()=>{for(const h of handles.values())h.file?.close().catch(()=>{})});
  })});
  });

@@ -14,3 +14,31 @@ test('dynamic SOCKS5 negotiates a domain target and carries bytes through SSH',a
 test('cancelling an active transfer removes partial files and leaves destination untouched',async t=>{const f=await fixture(t),source=path.join(f.dir,'large.bin');await fs.writeFile(source,Buffer.alloc(8*1024*1024,7));const result=await f.tools.transfer({sessionId:'one',direction:'upload',local:source,remote:'/cancelled.bin',replace:false});f.tools.cancel(result.id);await wait(()=>f.events.some(e=>e.id===result.id&&e.state==='cancelled'));await wait(()=>!f.tools.transfers.has(result.id));assert.deepEqual(await fs.readdir(f.remote),[])});
 test('an occupied forwarding port fails without recording a running rule',async t=>{const f=await fixture(t),occupied=net.createServer();const port=await listen(occupied);t.after(()=>occupied.close());await assert.rejects(f.tools.startForward({id:'occupied',type:'local',bind:'127.0.0.1',port,destination:'127.0.0.1',destinationPort:80},'one'),/EADDRINUSE/);assert.equal(f.tools.tunnels.has('occupied'),false)});
 test('quick connection parsing supports SSH syntax, ports and IPv6 without interpreting shell commands',async()=>{const {parseConnection}=await import('../shared/model.mjs');assert.equal(parseConnection('ssh user@example.test -p 2222').port,2222);assert.equal(parseConnection('ssh root@[::1]:2200').address,'::1');assert.equal(parseConnection('search text'),null);assert.equal(parseConnection('ssh host; rm -rf /'),null);assert.equal(parseConnection('ssh user@host:70000'),null)});
+
+test('SFTP deletion removes files and empty folders without recursively deleting contents',async t=>{
+ const f=await fixture(t);
+ for(const side of ['local','remote']){
+  const base=side==='local'?f.dir:'/';
+  const target=name=>side==='local'?path.join(base,name):'/'+name;
+  const disk=name=>side==='local'?path.join(f.dir,name):path.join(f.remote,name);
+  await fs.writeFile(disk('delete-me'),'test');
+  await f.tools.fileAction({side,sessionId:'one',operation:'delete',path:target('delete-me')});
+  await assert.rejects(fs.stat(disk('delete-me')), {code:'ENOENT'});
+  await fs.mkdir(disk('empty'));
+  await f.tools.fileAction({side,sessionId:'one',operation:'delete',path:target('empty')});
+  await assert.rejects(fs.stat(disk('empty')), {code:'ENOENT'});
+  await fs.mkdir(disk('occupied'));await fs.writeFile(path.join(disk('occupied'),'keep'),'safe');
+  await assert.rejects(f.tools.fileAction({side,sessionId:'one',operation:'delete',path:target('occupied')}));
+  assert.equal(await fs.readFile(path.join(disk('occupied'),'keep'),'utf8'),'safe');
+ }
+});
+
+test('permission changes support special mode bits on local and remote files',async t=>{
+ const f=await fixture(t);
+ for(const side of ['local','remote']){
+  const disk=path.join(side==='local'?f.dir:f.remote,'permissions-test');
+  await fs.writeFile(disk,'test');
+  await f.tools.fileAction({side,sessionId:'one',operation:'chmod',path:side==='local'?disk:'/permissions-test',mode:'1744'});
+  assert.equal((await fs.stat(disk)).mode&0o7777,0o1744);
+ }
+});

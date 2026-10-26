@@ -56,7 +56,7 @@ export function sanitizeState(input) {
   });
   const settings = object(source.settings, 'settings');
   const cleanSettings = {};
-  const enums = {font:['JetBrains Mono','monospace'], lineHeight:['1.2','1.4','1.6','1.8'], cursor:['Block','Bar','Underline'], launch:['Hosts','Last visited screen'], dropped:['Keep tab open','Close tab'], remote:['Home directory','Last visited folder'], conflicts:['Ask each time','Replace existing'], queue:['When transfers are active','Always']};
+  const enums = {font:['JetBrains Mono','monospace'], lineHeight:['1.0','1.2','1.4','1.6','1.8'], cursor:['Block','Bar','Underline'], launch:['Hosts','Last visited screen'], dropped:['Keep tab open','Close tab'], remote:['Home directory','Last visited folder'], conflicts:['Ask each time','Replace existing'], queue:['When transfers are active','Always']};
   for (const [name, options] of Object.entries(enums)) cleanSettings[name] = enumSetting(settings[name], name, options);
   for (const name of ['blink','reopen','login','confirmClose','window','confirmQuit','hidden','folders']) {
     if (typeof settings[name] !== 'boolean') throw new Error(`Invalid ${name}`);
@@ -64,7 +64,7 @@ export function sanitizeState(input) {
   }
   for (const [name,min,max] of [['fontSize',10,28],['scrollback',100,100000],['concurrent',1,8]]) cleanSettings[name] = number(settings[name],name,min,max);
   cleanSettings.local = text(settings.local, 'local folder', 4096);
-  for(const name of ['selectCopy','rightPaste','optionMeta','autoReconnect'])if(settings[name]!=null){if(typeof settings[name]!=='boolean')throw Error('Invalid '+name);cleanSettings[name]=settings[name]}
+  for(const name of ['selectCopy','rightPaste','optionMeta','autoReconnect','showGroupedHosts'])if(settings[name]!=null){if(typeof settings[name]!=='boolean')throw Error('Invalid '+name);cleanSettings[name]=settings[name]}
   const bindings = list(source.bindings, 'bindings', 100).map(binding => {
     if (!Array.isArray(binding) || binding.length !== 3) throw new Error('Invalid shortcut');
     return binding.map(value => text(value, 'shortcut', 120));

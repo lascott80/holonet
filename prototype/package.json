@@ -1,6 +1,6 @@
 {
   "name": "holonet",
-  "version": "0.2.3",
+  "version": "0.5.0-beta.0",
   "private": true,
   "type": "module",
   "scripts": {
