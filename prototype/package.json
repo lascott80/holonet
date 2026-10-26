@@ -1,0 +1,90 @@
+{
+  "name": "holonet",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "preview": "vite preview",
+    "test:sites": "node --test tests/sites-worker.test.mjs",
+    "desktop": "npm run build && electron .",
+    "desktop:dev": "HOLONET_DEV_URL=http://127.0.0.1:4173 electron .",
+    "desktop:smoke": "npm run build && electron . --smoke-test",
+    "test:storage": "node --test tests/state-store.test.mjs tests/persistence.test.mjs",
+    "pack:mac": "npm run build && electron-builder --mac --arm64 --dir",
+    "dist:mac": "npm run build && electron-builder --mac --arm64",
+    "dist:windows": "npm run build && node scripts/package-windows.mjs",
+    "test:ssh": "node --test --test-timeout=15000 tests/ssh.test.mjs",
+    "test:terminal": "node --test tests/terminal-edit.test.mjs",
+    "pack:mac:local": "npm run build && electron-builder --mac --arm64 --dir -c.mac.type=development -c.forceCodeSigning=true -c.directories.output=release/signed-local",
+    "test:macos-identity": "node --test tests/macos-identity.test.mjs",
+    "test:revamp": "node --test --test-timeout=20000 tests/revamp.test.mjs",
+    "test": "node --test --test-timeout=20000 tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@vitejs/plugin-react": "5.0.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "ssh2": "^1.17.0",
+    "vite": "6.4.2"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "productName": "Holonet",
+  "description": "Personal SSH and SFTP desktop client",
+  "author": "Holonet",
+  "main": "electron/main.mjs",
+  "build": {
+    "appId": "app.holonet.desktop",
+    "productName": "Holonet",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/client/**/*",
+      "electron/**/*",
+      "shared/**/*",
+      "src/data.js",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "Holonet connects to SSH and SFTP servers on your local network."
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "afterPack": "scripts/macos-identity.mjs"
+  }
+}
