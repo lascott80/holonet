@@ -19,7 +19,6 @@ The browser preview uses simulated SSH and file operations. Jump hosts, SSH agen
 Requires Node.js and npm, plus an OS supported by Electron.
 
 ```sh
-cd prototype
 npm ci
 npm run desktop
 ```
@@ -44,14 +43,14 @@ npm run pack:mac:local
 npm run dist:windows
 ```
 
-The macOS local packaging command requires an existing Apple Development signing identity and produces `prototype/release/signed-local/mac-arm64/Holonet.app`. The packaging hook assigns a stable app-specific executable UUID before signing to preserve the identity used by macOS Local Network privacy. Development builds are not notarized.
+The macOS local packaging command requires an existing Apple Development signing identity and produces `release/signed-local/mac-arm64/Holonet.app`. The packaging hook assigns a stable app-specific executable UUID before signing to preserve the identity used by macOS Local Network privacy. Development builds are not notarized.
 
-The Windows command cross-builds an ARM64 NSIS installer in `prototype/release/windows-arm64/`. It omits optional platform-native SSH acceleration and uses Node crypto. The installer is unsigned unless signing is configured; validate it on Windows ARM64 before relying on that platform.
+The Windows command cross-builds an ARM64 NSIS installer in `release/windows-arm64/`. It omits optional platform-native SSH acceleration and uses Node crypto. The installer is unsigned unless signing is configured; validate it on Windows ARM64 before relying on that platform.
 
 Tests cover storage, credential exclusion, clipboard routing, font loading, renderer lifecycle/fallback, real loopback SSH/SFTP/tunnels, disconnect behavior, group inheritance, macOS identity, and Sites-compatible packaging. Native smoke testing checks that the bundled renderer loads through the isolated bridge and saves initial state.
 
-See [desktop runtime details](prototype/electron/README.md) and [project decisions](prototype/AGENTS.md). Keep active SSH sessions running while testing replacement builds with disposable profiles.
+See [desktop runtime details](electron/README.md) and [project decisions](AGENTS.md). Keep active SSH sessions running while testing replacement builds with disposable profiles.
 
-For a disposable local performance baseline, run `npm run benchmark` from `prototype`. It measures a 1,000-entry local folder, loopback SSH setup and terminal output, a loopback SFTP upload, and Node memory. Results vary by machine and do not include real-network performance. Run `npm run benchmark:renderer` for isolated Electron startup, renderer working-set, and JavaScript-heap measurements with zero and ten restored tabs.
+For a disposable local performance baseline, run `npm run benchmark` from the project root. It measures a 1,000-entry local folder, loopback SSH setup and terminal output, a loopback SFTP upload, and Node memory. Results vary by machine and do not include real-network performance. Run `npm run benchmark:renderer` for isolated Electron startup, renderer working-set, and JavaScript-heap measurements with zero and ten restored tabs.
 
 Run `npm run test:desktop-ui` for an isolated Electron UI test using a temporary profile and a loopback server. It exercises saved identity selection, first-use host trust, history clearing, and the default restart behavior; it never uses the installed application's profile.

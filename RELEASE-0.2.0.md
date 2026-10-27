@@ -22,7 +22,7 @@ JetBrains Mono, groups and single-terminal tabs.
 When ready to switch, quit the current Holonet and launch the new Mac build:
 
 ```sh
-open "/Users/lascott/Development/Holonet/prototype/release/termius-revamp/mac-arm64/Holonet.app"
+open "/Users/lascott/Development/Holonet/release/termius-revamp/mac-arm64/Holonet.app"
 ```
 
 Windows installer:

@@ -15,7 +15,7 @@ was refreshed without reconnecting, and its original 14px setting was restored.
 Signed macOS build:
 
 ```sh
-open "/Users/lascott/Development/Holonet/prototype/release/font-metrics/mac-arm64/Holonet.app"
+open "/Users/lascott/Development/Holonet/release/font-metrics/mac-arm64/Holonet.app"
 ```
 
 The currently connected session can stay open; use the new build when switching

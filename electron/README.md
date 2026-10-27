@@ -95,3 +95,16 @@ borders and block graphics across rows. Hidden terminals release GPU resources
 while keeping their buffers and SSH sessions mounted. Initialization failure or
 context loss falls back to the DOM renderer; ordinary text stays usable, though
 font-rendered borders can show gaps at larger line heights.
+
+## Checking for updates
+
+Public releases can be checked without a token. Optionally add a GitHub token
+under Settings > General > Updates to increase API rate limits. The token is
+stored in the OS-encrypted vault, not in state.json; it can be replaced or removed there.
+Help > Check for Updates queries GitHub when selected. Beta builds include
+prereleases, while stable builds select stable releases. The first 100 published
+releases are considered; an available installer opens in the browser for manual
+installation.
+Checking does not quit Holonet or interrupt SSH sessions. Downloads and
+installation are manual: the existing macOS DMG is development signed, not
+notarized, and the Windows ARM64 installer is unsigned.

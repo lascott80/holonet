@@ -23,7 +23,7 @@ other tabs. Temporary test metadata was removed and preview preferences restored
 Launch the new signed macOS build after quitting the current app:
 
 ```sh
-open "/Users/lascott/Development/Holonet/prototype/release/session-behavior/mac-arm64/Holonet.app"
+open "/Users/lascott/Development/Holonet/release/session-behavior/mac-arm64/Holonet.app"
 ```
 
 Windows ARM64 installer: `release/windows-arm64/Holonet Setup 0.2.1.exe`.

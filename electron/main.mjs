@@ -1,4 +1,4 @@
-import {app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, clipboard} from 'electron';
+import {app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, clipboard, shell} from 'electron';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {CredentialVault,KnownHosts,PrivateDocument} from './secrets.mjs';
@@ -7,6 +7,7 @@ import {effectiveHost,accelerator} from '../shared/model.mjs';
 import {SSHSessions} from './ssh.mjs';
 import {generateKey,importKey,publicKey} from './keys.mjs';
 import {StateStore} from './store.mjs';
+import {checkForUpdates,updateTokenStatus,saveUpdateToken,removeUpdateToken} from './updates.mjs';
 import {initialGroups, initialSettings, bindingsForPlatform} from '../src/data.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const smoke = process.argv.includes('--smoke-test');
@@ -111,6 +112,21 @@ ipcMain.handle('holonet:forget-host',async(event,id)=>{authorized(event);if(type
 ipcMain.handle('holonet:key-import',(event,data)=>{authorized(event);return importKey(vault,data)});
 ipcMain.handle('holonet:key-generate',(event,data)=>{authorized(event);return generateKey(vault,data)});
 ipcMain.handle('holonet:key-public',(event,id)=>{authorized(event);if(typeof id!=='string'||id.length>512)throw new Error('Invalid key');return publicKey(vault,id)});
+let updateCheckPending=false;
+const updateDialog=options=>window&&!window.isDestroyed()?dialog.showMessageBox(window,options):dialog.showMessageBox(options);
+async function showUpdateCheck(){
+ if(updateCheckPending)return;updateCheckPending=true;
+ try{
+  const result=await checkForUpdates({vault,currentVersion:app.getVersion(),platform:process.arch==='arm64'?process.platform:''});
+  if(!result.available){await updateDialog({type:'info',title:'Check for Updates',message:'Holonet is up to date',detail:`Current version: ${result.currentVersion}`,buttons:['OK']});return}
+  const detail=result.hasInstaller?'Open GitHub to download the installer. Quit Holonet before installing; active SSH sessions will disconnect.':'The latest release does not have an installer for this platform yet. You can review the release on GitHub.';
+  const choice=await updateDialog({type:'info',title:'Check for Updates',message:`Holonet ${result.version} is available`,detail,buttons:['Open release','Cancel'],defaultId:0,cancelId:1,noLink:true});
+  if(choice.response===0)await shell.openExternal(result.url);
+ }catch(error){await updateDialog({type:'error',title:'Update check failed',message:'Could not check for updates',detail:error.message,buttons:['OK']})}finally{updateCheckPending=false}
+}
+ipcMain.handle('holonet:update-token-status',event=>{authorized(event);return updateTokenStatus(vault)});
+ipcMain.handle('holonet:update-token-save',(event,token)=>{authorized(event);return saveUpdateToken(vault,token)});
+ipcMain.handle('holonet:update-token-remove',event=>{authorized(event);return removeUpdateToken(vault)});
 function refreshMenu(bindings){
  const mac=process.platform==='darwin';
  const shortcut=(action,fallback)=>{const found=bindings.find(b=>b[1]===action)?.[2];return found?accelerator(found):fallback};
@@ -120,7 +136,8 @@ function refreshMenu(bindings){
  {label:'Copy',accelerator:shortcut('Copy selection',mac?'Cmd+C':'Ctrl+Shift+C'),click:()=>terminalEdit('copy')},
  {label:'Paste',accelerator:shortcut('Paste',mac?'Cmd+V':'Ctrl+Shift+V'),click:()=>terminalEdit('paste')},
  {label:'Select All',accelerator:shortcut('Select all',mac?'Cmd+A':'Ctrl+Shift+A'),click:()=>terminalEdit('selectAll')}]},
- {role:'viewMenu'},{role:'windowMenu'}]));
+ {role:'viewMenu'},{role:'windowMenu'},
+ {role:'help',submenu:[{label:'Check for Updates…',click:()=>showUpdateCheck()}]}]));
 }
 ipcMain.handle('holonet:tool',async(event,r)=>{
  authorized(event);if(!r||typeof r!=='object')throw Error('Invalid tool request');

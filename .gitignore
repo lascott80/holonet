@@ -16,5 +16,7 @@
 *.p12
 *.pfx
 *.mobileprovision
-prototype/design/
-prototype/design-qa.md
+/design/
+/design-qa.md
+
+/.holonet-ssh-test/

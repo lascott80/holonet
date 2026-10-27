@@ -1,6 +1,9 @@
 const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('holonetDesktop', {
   platform: process.platform,
+  updateTokenStatus:()=>ipcRenderer.invoke('holonet:update-token-status'),
+  updateTokenSave:token=>ipcRenderer.invoke('holonet:update-token-save',token),
+  updateTokenRemove:()=>ipcRenderer.invoke('holonet:update-token-remove'),
   tool: request=>ipcRenderer.invoke('holonet:tool',request),
   onToolEvent: callback=>{const handler=(_event,data)=>callback(data);ipcRenderer.on('holonet:tool-event',handler);return()=>ipcRenderer.removeListener('holonet:tool-event',handler)},
   clipboardRead: () => ipcRenderer.invoke('holonet:clipboard-read'),

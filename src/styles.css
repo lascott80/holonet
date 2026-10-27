@@ -268,3 +268,7 @@ input[type=checkbox]:checked::before { transform: rotate(-45deg) scale(1); }
 
 /* Fixed row size keeps large file lists virtualized without scroll jumps. */
 .file-items .file-row { height:38px; min-height:38px; }
+
+.updates-settings { margin-top: 28px; }
+.updates-settings .field { margin-top: 14px; }
+.updates-actions { display: flex; gap: 8px; margin-top: 10px; }
