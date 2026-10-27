@@ -64,7 +64,7 @@ export function sanitizeState(input) {
   }
   for (const [name,min,max] of [['fontSize',10,28],['scrollback',100,100000],['concurrent',1,8]]) cleanSettings[name] = number(settings[name],name,min,max);
   cleanSettings.local = text(settings.local, 'local folder', 4096);
-  for(const name of ['selectCopy','rightPaste','optionMeta','autoReconnect','showGroupedHosts'])if(settings[name]!=null){if(typeof settings[name]!=='boolean')throw Error('Invalid '+name);cleanSettings[name]=settings[name]}
+  for(const name of ['selectCopy','rightPaste','optionMeta','autoReconnect','showGroupedHosts','rememberTabs'])if(settings[name]!=null){if(typeof settings[name]!=='boolean')throw Error('Invalid '+name);cleanSettings[name]=settings[name]}
   const bindings = list(source.bindings, 'bindings', 100).map(binding => {
     if (!Array.isArray(binding) || binding.length !== 3) throw new Error('Invalid shortcut');
     return binding.map(value => text(value, 'shortcut', 120));

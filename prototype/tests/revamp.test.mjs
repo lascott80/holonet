@@ -3,6 +3,12 @@ import {effectiveHost,accelerator} from '../shared/model.mjs';import {sanitizeSt
 const wait=async check=>{for(let i=0;i<300;i++){if(check())return;await new Promise(r=>setTimeout(r,15))}throw Error('Timed out')};
 test('group inheritance ignores empty defaults and applies explicit overrides / reusable identity',()=>{const groups=[{id:'root',name:'Lab',defaults:{user:'root',port:'2222',identity:'shared'}},{id:'child',name:'Servers',parent:'Lab',parentId:'root',defaults:{user:'',port:''}}],identity={id:'shared',name:'Shared',user:'deploy',auth:'SSH key',key:'key1'};const h=effectiveHost({id:'h',groupId:'child',user:'',port:''},groups,[identity]);assert.equal(h.port,2222);assert.equal(h.user,'root');assert.equal(h.key,'key1');assert.equal(effectiveHost({...h,user:'override',port:2200},groups,[identity]).port,2200);assert.equal(accelerator('⌃ ⇧ V'),'Control+Shift+V')});
 test('new metadata survives sanitization without exposing secrets; distinct session IDs are preserved',()=>{const state=sanitizeState({version:1,hosts:[{id:'h',name:'Host',address:'example.test',user:'',port:'',groupId:'Lab',password:'secret'}],groups:initialGroups,keyMetadata:[],settings:initialSettings,bindings:defaultBindings,identities:[{id:'i',name:'Identity',user:'u',auth:'Password',password:'secret'}],snippets:[{id:'s',name:'Script',script:'pwd'}],forwardings:[],sessionTabs:[{id:'one',host:'h',mode:'terminal'},{id:'two',host:'h',mode:'terminal'}]});assert.equal(state.sessionTabs.length,2);assert.doesNotMatch(JSON.stringify(state),/secret|password/);assert.equal(state.hosts[0].port,'')});
+test('a saved identity supplies username and key to a new host without explicit credentials',()=>{
+ const identity={id:'shared',name:'Personal',user:'lascott',auth:'SSH key',key:'key1'};
+ const resolved=effectiveHost({id:'new',address:'example.test',user:'',identity:'shared'},[],[identity]);
+ assert.equal(resolved.user,'lascott');assert.equal(resolved.auth,'SSH key');assert.equal(resolved.key,'key1');
+ assert.equal(effectiveHost({...resolved,user:'override'},[],[identity]).user,'override');
+});
 async function fixture(t){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'holonet-tools-'));const remote=path.join(dir,'remote');await fs.mkdir(remote);const server=await toolsServer(remote),events=[],knownHosts=new KnownHosts(dir);const secrets=new Map(),vault={get:async id=>secrets.get(id),put:async(id,value)=>secrets.set(id,value)};const ssh=new SSHSessions({vault,knownHosts,emit:e=>{events.push(e);if(e.type==='host-key')ssh.respond(e.requestId,true,true)}});const tools=new DesktopTools({ssh,knownHosts,directory:dir,emit:e=>events.push(e)});t.after(async()=>{tools.dispose();ssh.dispose();await server.close();await fs.rm(dir,{recursive:true,force:true})});const host={id:'saved',name:'Fixture',address:'127.0.0.1',port:server.port,user:'tester',auth:'Password'};await ssh.connect(host,{password:'fixture',sessionId:'one',remember:true});return {dir,remote,events,ssh,tools,host}}
 test('independent live sessions for a saved host reuse its encrypted-vault credential reference',async t=>{const f=await fixture(t);await f.ssh.connect(f.host,{sessionId:'two'});assert.equal(f.ssh.sessions.size,2);f.ssh.disconnect('one');assert.equal(f.ssh.sessions.get('two').state,'connected')});
 test('real SFTP lists, uploads/downloads, prompts on conflict and applies rename / permissions',async t=>{const f=await fixture(t),source=path.join(f.dir,'source.txt'),dest=path.join(f.dir,'download.txt');await fs.writeFile(source,'transfer fixture\n'.repeat(10000));const listing=await f.tools.list({side:'remote',sessionId:'one',path:'.'});assert.equal(listing.path,'/');await f.tools.fileAction({side:'remote',sessionId:'one',operation:'mkdir',path:'/folder'});const result=await f.tools.transfer({sessionId:'one',direction:'upload',local:source,remote:'/folder/upload.txt',replace:false});await wait(()=>f.events.some(e=>e.id===result.id&&e.state==='completed'));assert.equal(await fs.readFile(path.join(f.remote,'folder/upload.txt'),'utf8'),await fs.readFile(source,'utf8'));assert.deepEqual(await f.tools.transfer({sessionId:'one',direction:'upload',local:source,remote:'/folder/upload.txt',replace:false}),{conflict:true});await f.tools.fileAction({side:'remote',sessionId:'one',operation:'rename',path:'/folder/upload.txt',destination:'/folder/renamed.txt'});await f.tools.fileAction({side:'remote',sessionId:'one',operation:'chmod',path:'/folder/renamed.txt',mode:'640'});const download=await f.tools.transfer({sessionId:'one',direction:'download',local:dest,remote:'/folder/renamed.txt',replace:false});await wait(()=>f.events.some(e=>e.id===download.id&&e.state==='completed'));assert.equal(await fs.readFile(dest,'utf8'),await fs.readFile(source,'utf8'));assert.equal((await fs.stat(path.join(f.remote,'folder/renamed.txt'))).mode&0o777,0o640);assert.deepEqual((await fs.readdir(f.remote)).sort(),['folder'])});
@@ -41,4 +47,20 @@ test('permission changes support special mode bits on local and remote files',as
   await f.tools.fileAction({side,sessionId:'one',operation:'chmod',path:side==='local'?disk:'/permissions-test',mode:'1744'});
   assert.equal((await fs.stat(disk)).mode&0o7777,0o1744);
  }
+});
+test('clearing connection history persists and does not recreate records for existing sessions',async t=>{
+ const f=await fixture(t),session=f.ssh.sessions.get('one');
+ await f.tools.record({type:'state',host:'one',state:'connected'});
+ assert.equal(Object.keys((await f.tools.history.read()).entries).length,1);
+ const queued=f.tools.record({type:'state',host:'one',state:'connected'});
+ await Promise.all([queued,f.tools.clearHistory()]);
+ await f.tools.record({type:'state',host:'one',state:'disconnected'});
+ assert.deepEqual((await f.tools.history.read()).entries,{});
+ const reloaded=new DesktopTools({ssh:f.ssh,knownHosts:f.knownHosts,directory:f.dir,emit:()=>{}});
+ assert.deepEqual((await reloaded.history.read()).entries,{});
+ const fresh={...session,host:{...session.host},historyCleared:false};delete fresh.logId;
+ f.ssh.sessions.set('new-session',fresh);
+ await reloaded.record({type:'state',host:'new-session',state:'connected'});
+ assert.equal(Object.keys((await reloaded.history.read()).entries).length,1);
+ f.ssh.sessions.delete('new-session');
 });

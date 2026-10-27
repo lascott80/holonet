@@ -265,3 +265,6 @@ input[type=checkbox]:checked::before { transform: rotate(-45deg) scale(1); }
 .group-card.host-drop-target, .sidebar-groups button.host-drop-target { background: #3d5364; outline: 2px solid #79b7ed; outline-offset: -2px; }
 .show-grouped-toggle { border-color: #5b6268; background: #3d4145; color: #dce5ed; }
 .show-grouped-toggle[aria-pressed=true] { border-color: #638cb0; background: #40586c; }
+
+/* Fixed row size keeps large file lists virtualized without scroll jumps. */
+.file-items .file-row { height:38px; min-height:38px; }

@@ -9,8 +9,13 @@ test('rapid change then revert persists the final value; failed writes retry on 
  await saveState(defaults);
  await Promise.all([saveState({...defaults,settings:{...initialSettings,fontSize:17}}),saveState(defaults)]);
  assert.equal(writes.at(-1).settings.fontSize,15);
- assert.deepEqual(writes.map(s=>s.settings.fontSize),[15,17,15]);
+ assert.deepEqual(writes.map(s=>s.settings.fontSize),[15,15]);
  fail=true;await assert.rejects(saveState({...defaults,settings:{...initialSettings,fontSize:18}}),/disk unavailable/);
  fail=false;await flushState();assert.equal(writes.at(-1).settings.fontSize,18);
+ const openTabs=[{id:'tab',host:'saved',mode:'terminal'}],host={id:'saved',name:'Saved',address:'example.test'};
+ const profile={...defaults,hosts:[host],sessionTabs:openTabs};
+ await saveState({...profile,settings:{...initialSettings,reopen:true}});assert.deepEqual(writes.at(-1).sessionTabs,[]);
+ await saveState({...profile,settings:{...initialSettings,rememberTabs:true}});assert.deepEqual(writes.at(-1).sessionTabs,openTabs);
+ await saveState(profile);assert.deepEqual(writes.at(-1).sessionTabs,[]);
  delete globalThis.window;
 });

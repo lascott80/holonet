@@ -6,6 +6,7 @@ import {randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import ssh2 from 'ssh2';
 import {CredentialVault,KnownHosts} from '../electron/secrets.mjs';
 import {SSHSessions,passwordReference,fingerprint} from '../electron/ssh.mjs';
+import {effectiveHost} from '../shared/model.mjs';
 import {generateKey,publicKey} from '../electron/keys.mjs';
 import {startSSHServer} from './helpers/ssh-server.mjs';
 function encryption(){const key=randomBytes(32);return {available:async()=>true,encrypt:async text=>{const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,iv);const body=Buffer.concat([cipher.update(text),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body])},decrypt:async buffer=>{const decipher=createDecipheriv('aes-256-gcm',key,buffer.subarray(0,12));decipher.setAuthTag(buffer.subarray(12,28));return Buffer.concat([decipher.update(buffer.subarray(28)),decipher.final()]).toString()}}}
@@ -44,4 +45,21 @@ test('typing exit reports one intentional shell exit for the tab-disconnect poli
  await waitFor(()=>events.some(e=>e.type==='state'&&e.state==='disconnected'));
  assert.equal(events.filter(e=>e.type==='state'&&e.state==='disconnected').length,1);
  assert.equal(events.find(e=>e.type==='state'&&e.state==='disconnected').reason,'shell-exit');
+});
+
+test('a newly saved host using an unencrypted SSH key prompts for trust before public-key authentication',async t=>{
+ const f=await fixture(t),metadata=await generateKey(f.vault,{name:'Unencrypted key'});
+ const key=JSON.parse(await f.vault.get('key:'+metadata.id)),parsed=ssh2.utils.parseKey(key.privateKey);
+ const server=await startSSHServer({publicKey:parsed});t.after(()=>server.close());
+ const h=effectiveHost({...host(server.port),user:'',auth:'',identity:'saved-identity'},[],[{id:'saved-identity',user:'integration-user',auth:'SSH key',key:metadata.id}]),events=[];
+ const manager=new SSHSessions({...f,emit:event=>{events.push(event);if(event.type==='host-key'){assert.equal(event.host,'new-session');assert.equal(server.stats.auth,0);manager.respond(event.requestId,true,true)}}});t.after(()=>manager.dispose());
+ await manager.connect(h,{sessionId:'new-session'});
+ assert.equal(events.filter(e=>e.type==='host-key').length,1);
+ assert.equal((await f.knownHosts.get(h)).fingerprint,events.find(e=>e.type==='host-key').fingerprint);
+ assert.equal(manager.snapshot('new-session').state,'connected');
+});
+
+test('a host without an SSH username reports how to fix it before connecting',async t=>{
+ const f=await fixture(t),manager=new SSHSessions({...f,emit:()=>{}});t.after(()=>manager.dispose());
+ await assert.rejects(manager.connect({...host(22),user:''}),/SSH username is missing.*Edit the host/);
 });

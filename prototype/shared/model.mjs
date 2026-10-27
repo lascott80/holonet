@@ -7,7 +7,7 @@ export function effectiveHost(host,groups=[],identities=[]){
  const defaults={...nonempty(parent?.defaults),...nonempty(g?.defaults)};
  const merged={...defaults,...Object.fromEntries(Object.entries(host).filter(([,v])=>v!==''&&v!==undefined))};
  const identity=identities.find(x=>x.id===merged.identity);
- return {...merged,...(identity?{user:merged.user||identity.user,auth:identity.auth,key:identity.key,credentialIdentity:identity.id}:{}),port:Number(merged.port||22),user:merged.user||'',auth:merged.auth||'Password'};
+ return {...merged,...(identity?{user:merged.user||identity.user,auth:identity.auth,key:identity.key,credentialIdentity:identity.id}:{}),port:Number(merged.port||22),user:merged.user||identity?.user||'',auth:identity?.auth||merged.auth||'Password'};
 }
 // Removing organization must not remove hosts or change how they authenticate.
 // Keep child groups, promoting them to the top level with their inherited defaults.

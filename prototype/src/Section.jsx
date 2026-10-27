@@ -1,0 +1,3 @@
+import React from 'react';
+import {Key,ArrowsLeftRight,Code,ShieldCheck,Folder} from '@phosphor-icons/react';
+export function Section({title,items,empty,render}){const EmptyIcon=({Keys:Key,Identities:Key,'Forwarding rules':ArrowsLeftRight,Snippets:Code,'Trusted servers':ShieldCheck})[title]||Folder;return <section><div className="section-label"><h2>{title}</h2><span>{items.length}</span></div>{items.length?<div className="resource-grid">{items.map(i=><React.Fragment key={i.id}>{render(i)}</React.Fragment>)}</div>:<div className="empty-state"><EmptyIcon size={30}/><h3>No {title.toLowerCase()} to show</h3><p>{empty}</p></div>}</section>}

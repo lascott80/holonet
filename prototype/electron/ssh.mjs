@@ -7,7 +7,8 @@ export class SSHSessions {
   constructor({vault,knownHosts,emit,clientFactory=()=>new Client()}){this.vault=vault;this.knownHosts=knownHosts;this.emit=emit;this.clientFactory=clientFactory;this.sessions=new Map();this.verifications=new Map()}
   state(id,state,message='',reason){const session=this.sessions.get(id);if(session){session.state=state;session.message=message}this.emit({type:'state',host:id,state,message,...(reason?{reason}:{})})}
   async connect(host,{password,keyPassphrase,remember=false,cols=100,rows=30,sessionId=host.id}={}){
-    if(!host?.id||!host.address||!host.user)throw new Error('Host identity is incomplete');
+    if(!host?.id||!host.address)throw new Error('Host identity is incomplete. Edit the host and check its address.');
+    if(typeof host.user!=='string'||!host.user.trim())throw new Error('SSH username is missing. Edit the host or its identity and enter a username.');
     host={...host,credentialHostId:host.id,id:sessionId};
     if(host.jump)throw new Error('Jump-host connections are not available in this build yet.');
     const previous=this.sessions.get(host.id);

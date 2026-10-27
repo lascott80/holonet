@@ -135,6 +135,7 @@ ipcMain.handle('holonet:tool',async(event,r)=>{
  case 'forward-status':return [...tools.tunnels.keys()];
  case 'known-list':{await knownHosts.doc.flush();return Object.entries((await knownHosts.doc.read()).entries).map(([id,key])=>({id,address:JSON.parse(id)[0],port:JSON.parse(id)[1],...key}))}
  case 'known-remove':if(typeof r.id!=='string'||r.id.length>1024)throw Error('Invalid trust record');return knownHosts.doc.update(d=>{delete d.entries[r.id]});
+ case 'history-clear':return tools.clearHistory();
  case 'history':await tools.history.flush();return Object.values((await tools.history.read()).entries).sort((a,b)=>b.updated-a.updated);
  default:throw Error('Unsupported tool');
  }

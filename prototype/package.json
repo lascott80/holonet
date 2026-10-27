@@ -1,6 +1,6 @@
 {
   "name": "holonet",
-  "version": "0.5.0-beta.0",
+  "version": "0.5.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -20,7 +20,10 @@
     "pack:mac:local": "npm run build && electron-builder --mac --arm64 --dir -c.mac.type=development -c.forceCodeSigning=true -c.directories.output=release/signed-local",
     "test:macos-identity": "node --test tests/macos-identity.test.mjs",
     "test:revamp": "node --test --test-timeout=20000 tests/revamp.test.mjs",
-    "test": "node --test --test-timeout=20000 tests/*.test.mjs"
+    "test": "node --test --test-timeout=20000 tests/*.test.mjs",
+    "test:desktop-ui": "npm run build && node scripts/test-desktop-ui.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "benchmark:renderer": "npm run build && node scripts/benchmark-renderer.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
@@ -38,7 +41,8 @@
   },
   "devDependencies": {
     "electron": "^45.0.0",
-    "electron-builder": "^26.18.0"
+    "electron-builder": "^26.18.0",
+    "playwright-core": "^1.64.1"
   },
   "productName": "Holonet",
   "description": "Personal SSH and SFTP desktop client",
