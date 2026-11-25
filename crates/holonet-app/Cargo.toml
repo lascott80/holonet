@@ -12,4 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 alacritty_terminal = "0.26"
+anyhow = "1.0.105"
 gpui.workspace = true
+holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }

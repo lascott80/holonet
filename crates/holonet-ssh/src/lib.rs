@@ -6,6 +6,8 @@
 //! bounded, so a slow reader pushes back on the SSH window instead of
 //! buffering without limit.
 
+pub mod dev;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

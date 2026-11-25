@@ -1,21 +1,33 @@
-//! GPUI view that paints a `TerminalModel` snapshot cell by cell.
+//! GPUI view that paints a `TerminalModel` snapshot cell by cell, and (spike 4)
+//! drives it from an SSH shell.
 //!
 //! Each styled run is shaped on its own and placed at its column, with glyph
 //! advances forced to the cell width, so the grid stays aligned whatever the
 //! font does. Backgrounds are quads painted before the text.
+//!
+//! SSH runs on a Tokio runtime on its own threads. Output reaches this view
+//! through a tokio channel drained by a GPUI task; keystrokes go back through
+//! an unbounded channel. Neither side blocks the other.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{
-    Bounds, Context, Font, FontStyle, FontWeight, Hsla, IntoElement, Pixels, Render, ScrollWheelEvent,
-    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px,
-    rgb, size,
-};
-
-use crate::terminal::{GridSize, Snapshot, TerminalModel, palette};
+use alacritty_terminal::selection::SelectionType;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
+use anyhow::anyhow;
+use gpui::{
+    Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
+    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb,
+    size,
+};
+use holonet_ssh::{ConnectOptions, PtySize, Session, ShellEvent, ShellInput};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::input;
+use crate::terminal::{GridSize, Snapshot, TerminalModel, palette};
 
 const FONT_SIZE: f32 = 13.0;
 /// Line height from the design: 13px at 1.6.
@@ -23,21 +35,46 @@ const LINE_HEIGHT: f32 = FONT_SIZE * 1.6;
 const PADDING: f32 = 12.0;
 const STATUS_HEIGHT: f32 = 28.0;
 const SCROLLBACK: usize = 10_000;
+/// Most output parsed per update while output floods, so frames keep coming.
+const MAX_BATCH_BYTES: usize = 1 << 20;
 
 // Design tokens.
 const PANEL: u32 = 0x171717;
 const LINE: u32 = 0x2C2C2C;
 const INK_DIM: u32 = 0x8A8A8A;
+const WARN: u32 = 0xF2A65A;
+
+enum Connection {
+    /// Canned output only (spike 3).
+    Offline,
+    Connecting(String),
+    Connected(String),
+    Failed(String),
+    Ended(String),
+}
 
 pub struct TerminalView {
     model: TerminalModel,
     font: Font,
     cell_width: Pixels,
     line_height: Pixels,
+    focus: FocusHandle,
+    /// Top-left of the grid in window coordinates, set at paint time.
+    grid_origin: Rc<Cell<Point<Pixels>>>,
     scroll_remainder: f32,
     snapshot_us: u128,
     paint_us: Rc<Cell<u128>>,
     stream: Option<StreamBench>,
+
+    connection: Connection,
+    session: Option<Session>,
+    input: Option<UnboundedSender<ShellInput>>,
+    sent_size: Option<GridSize>,
+    /// When the last keystroke was sent, until the first output after it.
+    echo_pending: Option<Instant>,
+    last_echo_ms: Option<f64>,
+    selecting: bool,
+    dragged: bool,
 }
 
 /// Feeds a large buffer a slice per frame, the way output from `cat` of a
@@ -59,7 +96,7 @@ struct StreamBench {
 const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 impl TerminalView {
-    pub fn new(window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = window.text_system();
         let family = crate::pick_font(&text.all_font_names());
         let font = font(family);
@@ -68,20 +105,242 @@ impl TerminalView {
             .advance(font_id, px(FONT_SIZE), 'M')
             .map(|s| s.width)
             .unwrap_or(px(FONT_SIZE * 0.6));
-        Self {
+        let focus = cx.focus_handle();
+        window.focus(&focus);
+        let mut view = Self {
             model: TerminalModel::new(GridSize { cols: 80, rows: 24 }, SCROLLBACK),
             font,
             cell_width,
             line_height: px(LINE_HEIGHT),
+            focus,
+            grid_origin: Rc::new(Cell::new(point(px(0.), px(0.)))),
             scroll_remainder: 0.0,
             snapshot_us: 0,
             paint_us: Rc::new(Cell::new(0)),
             stream: None,
-        }
+            connection: Connection::Offline,
+            session: None,
+            input: None,
+            sent_size: None,
+            echo_pending: None,
+            last_echo_ms: None,
+            selecting: false,
+            dragged: false,
+        };
+        // Size the grid to the window now, so the PTY opens at the right size.
+        let grid = view.grid_for(window.viewport_size());
+        view.model.resize(grid);
+        view
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.model.advance(bytes);
+    }
+
+    /// Connect and open a shell on the Tokio runtime, then stream its output here.
+    pub fn connect(&mut self, runtime: tokio::runtime::Handle, opts: ConnectOptions, cx: &mut Context<Self>) {
+        let target = format!("{}@{}:{}", opts.user, opts.host, opts.port);
+        self.connection = Connection::Connecting(target.clone());
+        let size = self.model.size();
+        self.sent_size = Some(size);
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            let result = async {
+                let session = Session::connect(opts).await?;
+                let shell = session.open_shell(PtySize::cells(size.cols as u16, size.rows as u16)).await?;
+                anyhow::Ok((session, shell))
+            }
+            .await;
+            let _ = ready_tx.send(result);
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = ready_rx.await.unwrap_or_else(|_| Err(anyhow!("connection task stopped")));
+            let mut events = match result {
+                Ok((session, shell)) => {
+                    let attached = this.update(cx, |view, cx| {
+                        view.session = Some(session);
+                        view.input = Some(shell.input);
+                        view.connection = Connection::Connected(target);
+                        cx.notify();
+                    });
+                    if attached.is_err() {
+                        return;
+                    }
+                    shell.events
+                }
+                Err(err) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.connection = Connection::Failed(format!("{err:#}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            while let Some(first) = events.recv().await {
+                // Take whatever else is already waiting, up to a budget.
+                let mut batch = vec![first];
+                let mut bytes = 0;
+                while bytes < MAX_BATCH_BYTES {
+                    match events.try_recv() {
+                        Ok(event) => {
+                            if let ShellEvent::Output(b) = &event {
+                                bytes += b.len();
+                            }
+                            batch.push(event);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if this.update(cx, |view, cx| view.apply(batch, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn apply(&mut self, batch: Vec<ShellEvent>, cx: &mut Context<Self>) {
+        for event in batch {
+            match event {
+                ShellEvent::Output(bytes) => {
+                    if let Some(sent) = self.echo_pending.take() {
+                        self.last_echo_ms = Some(sent.elapsed().as_secs_f64() * 1e3);
+                    }
+                    self.model.advance(&bytes);
+                }
+                ShellEvent::Exit(code) => self.connection = Connection::Ended(format!("shell exited with {code}")),
+                ShellEvent::Closed => {
+                    if !matches!(self.connection, Connection::Ended(_)) {
+                        self.connection = Connection::Ended("connection closed".into());
+                    }
+                    self.input = None;
+                    self.session = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let Some(input) = &self.input else { return };
+        if input.send(ShellInput::Data(bytes)).is_ok() {
+            self.echo_pending.get_or_insert_with(Instant::now);
+            self.model.scroll_to_bottom();
+            self.model.clear_selection();
+            cx.notify();
+        }
+    }
+
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.model.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let bracketed = self.model.mode().contains(TermMode::BRACKETED_PASTE);
+            self.send(input::paste(&text, bracketed), cx);
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        let m = &ks.modifiers;
+        // App shortcuts use Ctrl Shift so shell keys always reach the shell.
+        if m.control && m.shift && !m.alt {
+            match ks.key.as_str() {
+                "c" => return self.copy(cx),
+                "v" => return self.paste(cx),
+                _ => {}
+            }
+        }
+        // Shift Page Up/Down scroll the history instead of going to the shell.
+        if m.shift && !m.control && !m.alt {
+            let page = self.model.size().rows.saturating_sub(1).max(1) as i32;
+            match ks.key.as_str() {
+                "pageup" => return self.scroll_lines(page, cx),
+                "pagedown" => return self.scroll_lines(-page, cx),
+                _ => {}
+            }
+        }
+        let app_cursor = self.model.mode().contains(TermMode::APP_CURSOR);
+        if let Some(bytes) = input::encode(ks, app_cursor) {
+            cx.stop_propagation();
+            self.send(bytes, cx);
+        }
+    }
+
+    fn scroll_lines(&mut self, lines: i32, cx: &mut Context<Self>) {
+        self.model.scroll(lines);
+        cx.notify();
+    }
+
+    fn grid_for(&self, viewport: gpui::Size<Pixels>) -> GridSize {
+        let width = f32::from(viewport.width) - 2.0 * PADDING;
+        let height = f32::from(viewport.height) - 2.0 * PADDING - STATUS_HEIGHT;
+        GridSize {
+            cols: (width / f32::from(self.cell_width)).floor().max(2.0) as usize,
+            rows: (height / f32::from(self.line_height)).floor().max(1.0) as usize,
+        }
+    }
+
+    /// Screen cell under a window position, and whether it is the cell's right half.
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize, bool) {
+        let origin = self.grid_origin.get();
+        let x = f32::from(position.x - origin.x).max(0.0);
+        let y = f32::from(position.y - origin.y).max(0.0);
+        let cell = f32::from(self.cell_width);
+        let col = (x / cell) as usize;
+        let row = (y / f32::from(self.line_height)) as usize;
+        (row, col, x - col as f32 * cell > cell / 2.0)
+    }
+
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let (row, col, right) = self.cell_at(event.position);
+        let ty = match event.click_count {
+            2 => SelectionType::Semantic,
+            3 => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
+        self.model.start_selection(ty, row, col, right);
+        self.selecting = true;
+        // A double or triple click selects without dragging.
+        self.dragged = event.click_count > 1;
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+            let (row, col, right) = self.cell_at(event.position);
+            self.model.update_selection(row, col, right);
+            self.dragged = true;
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
+        self.selecting = false;
+        if !self.dragged {
+            // A plain click clears the selection.
+            self.model.clear_selection();
+        }
+        cx.notify();
+    }
+
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let line = f32::from(self.line_height);
+        self.scroll_remainder += f32::from(event.delta.pixel_delta(self.line_height).y);
+        let lines = (self.scroll_remainder / line).trunc();
+        if lines != 0.0 {
+            self.scroll_remainder -= lines * line;
+            self.model.scroll(lines as i32);
+            cx.notify();
+        }
     }
 
     pub fn stream(&mut self, data: Vec<u8>, quit_when_done: bool) {
@@ -146,30 +405,47 @@ impl TerminalView {
         }
     }
 
-    fn grid_for(&self, viewport: gpui::Size<Pixels>) -> GridSize {
-        let width = f32::from(viewport.width) - 2.0 * PADDING;
-        let height = f32::from(viewport.height) - 2.0 * PADDING - STATUS_HEIGHT;
-        GridSize {
-            cols: (width / f32::from(self.cell_width)).floor().max(2.0) as usize,
-            rows: (height / f32::from(self.line_height)).floor().max(1.0) as usize,
+    fn status_text(&self, snapshot: &Snapshot) -> (String, bool) {
+        if let Some(result) = self.stream.as_ref().and_then(|b| b.result.clone()) {
+            return (result, false);
         }
-    }
-
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let line = f32::from(self.line_height);
-        self.scroll_remainder += f32::from(event.delta.pixel_delta(self.line_height).y);
-        let lines = (self.scroll_remainder / line).trunc();
-        if lines != 0.0 {
-            self.scroll_remainder -= lines * line;
-            self.model.scroll(lines as i32);
-            cx.notify();
-        }
+        let (state, warn) = match &self.connection {
+            Connection::Offline => ("canned output".to_string(), false),
+            Connection::Connecting(target) => (format!("connecting to {target}…"), false),
+            Connection::Connected(target) => (target.clone(), false),
+            Connection::Failed(err) => (format!("failed: {err}"), true),
+            Connection::Ended(why) => (why.clone(), true),
+        };
+        let scrolled = if snapshot.display_offset > 0 {
+            format!("  ·  scrolled up {}", snapshot.display_offset)
+        } else {
+            String::new()
+        };
+        let echo = self.last_echo_ms.map(|ms| format!("  ·  echo {ms:.1} ms")).unwrap_or_default();
+        (
+            format!(
+                "{state}  ·  {} × {}  ·  history {}{scrolled}{echo}  ·  snapshot {} µs  ·  paint {} µs",
+                snapshot.size.cols,
+                snapshot.size.rows,
+                snapshot.history,
+                self.snapshot_us,
+                self.paint_us.get(),
+            ),
+            warn,
+        )
     }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.model.resize(self.grid_for(window.viewport_size()));
+        let grid = self.grid_for(window.viewport_size());
+        self.model.resize(grid);
+        if let Some(input) = &self.input
+            && self.sent_size != Some(grid)
+        {
+            let _ = input.send(ShellInput::Resize(PtySize::cells(grid.cols as u16, grid.rows as u16)));
+            self.sent_size = Some(grid);
+        }
         self.step_stream(window, cx);
 
         let started = Instant::now();
@@ -178,37 +454,31 @@ impl Render for TerminalView {
         if let Some(bench) = self.stream.as_mut().filter(|b| b.result.is_none()) {
             bench.snapshot_us_total += self.snapshot_us;
         }
-
-        let status = match self.stream.as_ref().and_then(|b| b.result.clone()) {
-            Some(result) => result,
-            None => format!(
-            "{} × {}  ·  {}  ·  history {} lines{}  ·  snapshot {} µs  ·  last paint {} µs",
-            snapshot.size.cols,
-            snapshot.size.rows,
-            self.font.family,
-            snapshot.history,
-            if snapshot.display_offset > 0 { format!(" (scrolled up {})", snapshot.display_offset) } else { String::new() },
-            self.snapshot_us,
-            self.paint_us.get(),
-            ),
-        };
+        let (status, warn) = self.status_text(&snapshot);
 
         let font = self.font.clone();
         let cell_width = self.cell_width;
         let line_height = self.line_height;
         let paint_us = self.paint_us.clone();
+        let grid_origin = self.grid_origin.clone();
 
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(palette::BACKGROUND))
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| this.on_scroll(event, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| this.on_mouse_move(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)))
             .child(
                 div().flex_1().p(px(PADDING)).child(
                     canvas(
                         |_, _, _| {},
                         move |bounds, _, window, cx| {
+                            grid_origin.set(bounds.origin);
                             let started = Instant::now();
                             paint_grid(bounds, &snapshot, &font, cell_width, line_height, window, cx);
                             paint_us.set(started.elapsed().as_micros());
@@ -226,7 +496,7 @@ impl Render for TerminalView {
                     .bg(rgb(PANEL))
                     .border_t_1()
                     .border_color(rgb(LINE))
-                    .text_color(rgb(INK_DIM))
+                    .text_color(rgb(if warn { WARN } else { INK_DIM }))
                     .text_size(px(12.))
                     .child(status),
             )
@@ -290,7 +560,22 @@ fn paint_grid(
             CursorShape::HollowBlock => {
                 window.paint_quad(gpui::outline(Bounds::new(at, size(cell_width, line_height)), cursor, gpui::BorderStyle::Solid))
             }
-            _ => window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor)),
+            _ => {
+                window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));
+                if !snap.cursor_char.is_whitespace() {
+                    let text: gpui::SharedString = snap.cursor_char.to_string().into();
+                    let run = TextRun {
+                        len: text.len(),
+                        font: base.clone(),
+                        color: rgb(palette::BACKGROUND).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(text, font_size, &[run], Some(cell_width));
+                    let _ = shaped.paint(at, line_height, window, cx);
+                }
+            }
         }
     }
 }

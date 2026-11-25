@@ -4,9 +4,10 @@
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 
 /// Terminal size in cells.
@@ -35,6 +36,8 @@ pub mod palette {
     pub const FOREGROUND: u32 = 0xCFCFCF; // ink-soft
     pub const BACKGROUND: u32 = 0x101010; // terminal
     pub const CURSOR: u32 = 0xEDEDED; // ink
+    /// `accent` at about 30% over `terminal`. Provisional, like the ANSI set.
+    pub const SELECTION: u32 = 0x274758;
     pub const ANSI: [u32; 16] = [
         0x2A2A2A, 0xF0776C, 0x7FD6B5, 0xF2A65A, 0x5CC8FF, 0xB9A5FF, 0x6FD3D6, 0xCFCFCF,
         0x666666, 0xFF9A90, 0xA3EBCF, 0xFFC285, 0x8FDBFF, 0xD3C6FF, 0x9AE6E8, 0xEDEDED,
@@ -62,6 +65,8 @@ pub struct Snapshot {
     pub lines: Vec<Vec<Run>>,
     /// Cursor cell, if it is visible on screen.
     pub cursor: Option<(usize, usize, CursorShape)>,
+    /// Character under the cursor, redrawn on top of a block cursor.
+    pub cursor_char: char,
     pub display_offset: usize,
     pub history: usize,
 }
@@ -98,6 +103,44 @@ impl TerminalModel {
         self.term.scroll_display(Scroll::Delta(lines));
     }
 
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    pub fn mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
+    /// Grid point for a cell on screen, accounting for scrollback position.
+    fn grid_point(&self, row: usize, col: usize) -> Point {
+        let row = row.min(self.size.rows.saturating_sub(1));
+        let col = col.min(self.size.cols.saturating_sub(1));
+        viewport_to_point(self.term.grid().display_offset(), Point::new(row, Column(col)))
+    }
+
+    /// Start a selection at a screen cell. `right_half` is which half of the
+    /// cell the pointer is in, so a selection can start between characters.
+    pub fn start_selection(&mut self, ty: SelectionType, row: usize, col: usize, right_half: bool) {
+        let side = if right_half { Side::Right } else { Side::Left };
+        self.term.selection = Some(Selection::new(ty, self.grid_point(row, col), side));
+    }
+
+    pub fn update_selection(&mut self, row: usize, col: usize, right_half: bool) {
+        let point = self.grid_point(row, col);
+        let side = if right_half { Side::Right } else { Side::Left };
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let content = self.term.renderable_content();
         let colors = content.colors;
@@ -115,6 +158,7 @@ impl TerminalModel {
         };
 
         let display_offset = content.display_offset;
+        let selection = content.selection;
         let mut lines: Vec<Vec<Run>> = vec![Vec::new(); self.size.rows];
         for indexed in content.display_iter {
             let cell = indexed.cell;
@@ -132,7 +176,11 @@ impl TerminalModel {
             if flags.contains(Flags::DIM) {
                 fg = dim(fg);
             }
-            let bg = (bg != palette::BACKGROUND).then_some(bg);
+            let bg = if selection.is_some_and(|s| s.contains(indexed.point)) {
+                Some(palette::SELECTION)
+            } else {
+                (bg != palette::BACKGROUND).then_some(bg)
+            };
             let ch = if flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
             let wide = flags.contains(Flags::WIDE_CHAR);
             let run = Run {
@@ -169,7 +217,8 @@ impl TerminalModel {
         }
 
         let cursor = content.cursor;
-        let cursor = (content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden)
+        let cursor_char = self.term.grid()[cursor.point].c;
+        let cursor =(content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden)
             .then(|| {
                 let row = cursor.point.line.0 + display_offset as i32;
                 (row >= 0 && (row as usize) < self.size.rows)
@@ -181,6 +230,7 @@ impl TerminalModel {
             size: self.size,
             lines,
             cursor,
+            cursor_char,
             display_offset,
             history: self.term.grid().history_size(),
         }
@@ -286,6 +336,34 @@ mod tests {
         let mut t = TerminalModel::new(GridSize { cols: 40, rows: 2 }, 100);
         t.advance(b"\x1b[?2004h\x1b]3008;start=abc;type=shell;user=holotest\x1b\\$ ls\x1b[?2004l");
         assert_eq!(t.screen_text().lines().next().unwrap(), "$ ls");
+    }
+
+    #[test]
+    fn selection_text_and_highlight() {
+        let mut t = TerminalModel::new(GridSize { cols: 20, rows: 3 }, 100);
+        t.advance(b"hello world\r\nsecond line");
+        t.start_selection(SelectionType::Simple, 0, 6, false);
+        t.update_selection(1, 5, true);
+        assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
+        let s = t.snapshot();
+        let highlighted: String = s.lines[0]
+            .iter()
+            .filter(|r| r.bg == Some(palette::SELECTION))
+            .map(|r| r.text.as_str())
+            .collect();
+        assert!(highlighted.starts_with("world"));
+        t.clear_selection();
+        assert_eq!(t.selection_text(), None);
+    }
+
+    #[test]
+    fn selection_follows_scrollback() {
+        let mut t = TerminalModel::new(GridSize { cols: 10, rows: 2 }, 100);
+        t.advance(b"one\r\ntwo\r\nthree\r\nfour");
+        t.scroll(2); // screen now shows "one", "two"
+        t.start_selection(SelectionType::Simple, 0, 0, false);
+        t.update_selection(0, 2, true);
+        assert_eq!(t.selection_text().as_deref(), Some("one"));
     }
 
     #[test]

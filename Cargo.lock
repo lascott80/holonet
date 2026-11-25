@@ -2930,7 +2930,10 @@ name = "holonet-app"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "gpui",
+ "holonet-ssh",
+ "tokio",
 ]
 
 [[package]]

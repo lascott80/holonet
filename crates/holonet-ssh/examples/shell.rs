@@ -7,40 +7,11 @@
 //! resizes, then times 10 MB of output.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
-use holonet_ssh::{Auth, ConnectOptions, HostKeyCheck, PtySize, Session, Shell, ShellEvent, ShellInput};
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn load_env() -> Result<HashMap<String, String>> {
-    let path = root().join(".dev/test-server.env");
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(text
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect())
-}
-
-fn auth_for(mode: &str, env: &HashMap<String, String>) -> Result<Auth> {
-    let key = |name: &str| root().join(&env[name]);
-    Ok(match mode {
-        "password" => Auth::Password(env["HOLONET_TEST_PASSWORD"].clone()),
-        "ed25519" => Auth::KeyFile { path: key("HOLONET_TEST_KEY_ED25519"), passphrase: None },
-        "rsa" => Auth::KeyFile { path: key("HOLONET_TEST_KEY_RSA"), passphrase: None },
-        "passphrase" => Auth::KeyFile {
-            path: key("HOLONET_TEST_KEY_ED25519_PASS"),
-            passphrase: Some(env["HOLONET_TEST_KEY_PASSPHRASE"].clone()),
-        },
-        other => bail!("unknown mode {other}"),
-    })
-}
+use anyhow::{Result, bail};
+use holonet_ssh::dev::{auth_for, load_env, options_from, root};
+use holonet_ssh::{ConnectOptions, HostKeyCheck, PtySize, Session, Shell, ShellEvent, ShellInput};
 
 /// Send a command and collect output until `marker` appears.
 async fn run_until(shell: &mut Shell, command: &str, marker: &str) -> Result<(String, usize)> {
@@ -79,13 +50,7 @@ fn last_line_with<'a>(text: &'a str, needle: &str) -> &'a str {
 }
 
 async fn check(mode: &str, env: &HashMap<String, String>) -> Result<()> {
-    let opts = ConnectOptions {
-        host: env["HOLONET_TEST_HOST"].clone(),
-        port: env["HOLONET_TEST_PORT"].parse()?,
-        user: env["HOLONET_TEST_USER"].clone(),
-        auth: auth_for(mode, env)?,
-        host_key: HostKeyCheck::KnownHostsFile(root().join(".dev/known_hosts")),
-    };
+    let opts = options_from(mode, env)?;
 
     let started = Instant::now();
     let session = Session::connect(opts).await?;

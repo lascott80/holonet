@@ -1,11 +1,14 @@
 //! Holonet prototype (milestone 1).
 //!
 //!   holonet                 spike 3: terminal grid from canned output
+//!   holonet --ssh [mode]    spike 4: shell on the WSL test server; mode is
+//!                           password, ed25519 (default), rsa or passphrase
 //!   holonet --fonts         spike 1: font and glyph width check
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
 
 mod font_check;
+mod input;
 mod sample;
 mod terminal;
 mod terminal_view;
@@ -65,6 +68,26 @@ fn main() {
     let fonts = arg.as_deref() == Some("--fonts");
     // --stream-bench: feed 10 MB a frame at a time, print the timing and quit.
     let stream = arg.as_deref() == Some("--stream-bench");
+    let ssh = if arg.as_deref() == Some("--ssh") {
+        let mode = std::env::args().nth(2).unwrap_or_else(|| "ed25519".into());
+        match holonet_ssh::dev::options(&mode) {
+            Ok(opts) => Some(opts),
+            Err(err) => {
+                eprintln!("holonet: {err:#}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+    // SSH runs on its own Tokio threads; GPUI keeps the main thread.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("holonet-ssh")
+        .enable_all()
+        .build()
+        .expect("failed to start Tokio runtime");
+    let handle = runtime.handle().clone();
 
     Application::new().run(move |cx: &mut App| {
         let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1000.), px(640.)), cx);
@@ -79,6 +102,10 @@ fn main() {
             cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
                     let mut view = terminal_view::TerminalView::new(window, cx);
+                    if let Some(opts) = ssh.clone() {
+                        view.connect(handle.clone(), opts, cx);
+                        return view;
+                    }
                     view.feed(&sample::showcase());
                     if stream {
                         view.stream(sample::bulk(10_000_000), true);

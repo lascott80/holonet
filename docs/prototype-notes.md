@@ -84,3 +84,54 @@ Together with spike 2's 100+ MB/s over SSH, a `cat` of a 10 MB log should finish
 - **Ligatures**: still not drawn. `force_width` would also pull apart any ligature glyphs. Deciding whether to support ligatures, and how (shape runs freely and only snap glyph clusters), belongs to milestone 3's terminal settings.
 - **The 16-color ANSI palette is provisional.** The design defines foreground, background and cursor but no ANSI colors; the 16 used here are built from token hues. They need a design decision.
 - **Low-contrast default text on light backgrounds** (palette cells 10 to 14 in the showcase). That's the sample using default foreground on bright backgrounds, not a renderer bug.
+
+## Spike 4: GPUI terminal on a live SSH shell (25 Nov 2026), passed
+
+`holonet --ssh [password|ed25519|rsa|passphrase]` connects to the WSL test server with `holonet_ssh::dev::options` and runs the login shell in the window. Driven with real keyboard and mouse input (SendKeys and `mouse_event`), release build, 150% scale.
+
+### How it is wired
+
+- A two-thread Tokio runtime (`holonet-ssh` threads) owns the SSH session. GPUI keeps the main thread.
+- Connecting and opening the shell run on Tokio, and the result returns over a `oneshot` channel. A GPUI task then drains the shell's `mpsc` receiver: tokio's channels work from GPUI's executor without a Tokio reactor.
+- Output is batched: each update takes everything already waiting, up to 1 MB, parses it, and calls `notify` once, so GPUI draws at most once per frame however fast output arrives.
+- Keystrokes are encoded by `input.rs` (xterm sequences: modifiers on arrows and function keys, DECCKM application cursor, Alt as an ESC prefix, Ctrl letters, AltGr treated as a typed character) and sent on the unbounded input channel.
+- Resizes are sent as `window_change` when the grid size changes during render.
+
+### Results
+
+| Check from `CLAUDE.md` | Result |
+| --- | --- |
+| Input and output | Typing, Enter, Backspace, arrows, Ctrl+C (interrupted `sleep 30`), Escape all reach the shell. Colors and Nerd Font glyphs from `printf` render. |
+| Full-screen programs | `top` (inverse header) and `vim` (alternate screen, syntax colors, arrow keys, `/` search, `:q!` restoring the shell screen) work. The character under a block cursor stays readable. |
+| Resize | Window resized to 97×20; `stty size` in the shell reports `20 97`. |
+| Scrollback | The wheel scrolls 3 lines per notch; Shift Page Up/Down scroll a page; typing snaps back to the bottom. 10,000 lines kept. |
+| Selection and copy | Dragging selects exact cells (cols 0 to 5 gave `holote`), triple-click selects a line, and Ctrl Shift C copies. A plain click clears. |
+| Paste | Ctrl Shift V pastes; two lines arrived as one bracketed paste (the shell had enabled it) and ran together on Enter. |
+| Session end | `exit` shows "shell exited with 0" in amber in the status bar. |
+| **Typing latency** | Keystroke sent to first echoed byte back: **0.7 to 1.8 ms** on the WSL server. On-screen delay adds at most one frame. Feels immediate. |
+| **`cat` of a 10.4 MB log** | **0.42 s** by the shell's `time`, with the window drawing throughout. Paint about 1 ms per frame during the flood. |
+
+## Milestone 1 summary
+
+All checks in `CLAUDE.md` are done:
+
+| Check | Result |
+| --- | --- |
+| Builds and runs natively for `aarch64-pc-windows-msvc` | Yes. |
+| Typing feels immediate; `cat` of a 10 MB log stays responsive | Yes: echo under 2 ms; 10.4 MB in 0.42 s with the window responsive. |
+| Nerd Font glyphs and ligatures render at the right widths | Glyphs yes (every probe exactly one cell). **Ligatures no**; see open issues. |
+| Crypto backend for russh on ARM64 Windows | `aws-lc-rs` (russh's default) builds and works; `ring` also builds. Staying with `aws-lc-rs`. |
+
+GPUI, russh and alacritty_terminal work together on ARM64 Windows, so the Tauri fallback is not needed.
+
+### Carried forward
+
+For milestone 3 (sessions and terminal settings) unless noted:
+
+1. **Box drawing and block elements as geometry.** At the design's 1.6 line height, font glyphs leave gaps between rows.
+2. **Ligatures.** Decide whether to offer them; it would need run shaping that snaps glyph clusters instead of single glyphs.
+3. **ANSI palette and selection color.** Both are provisional here; they need design decisions.
+4. **Mouse reporting to programs** (`vim` mouse mode, `tmux`, `htop` clicks). Not wired; the mouse always selects. Shift should bypass reporting when it is added.
+5. **Not yet tested**: IME composition (Japanese and Chinese input), dead keys, focus in/out reporting, the kitty keyboard protocol, cursor blink, and window titles from `OSC 0/2`.
+6. **Host key prompt** (milestone 2): unknown keys are refused today, not offered as "Trust and connect".
+7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault.
