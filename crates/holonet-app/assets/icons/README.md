@@ -1,0 +1,1 @@
+Icons extracted from the design canvas sources in docs/design/screens (inline SVGs and the role icon table in Main.dc.html). 24-unit stroke icons at stroke width 1.8; window controls on a 10-unit grid. `eye` and `eye-off` are additions for password fields; `plus` and `check` match the stroke style.

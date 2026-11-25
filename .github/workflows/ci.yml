@@ -20,12 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The target platform. GitHub's hosted Windows ARM64 runner may not be
-          # available to private repositories; continue-on-error keeps that from
-          # blocking the x64 job while we find out.
+          # The target platform (GitHub-hosted Windows ARM64; confirmed available
+          # to this private repository on 25 Nov 2026).
           - name: windows-arm64
             runner: windows-11-arm
-            experimental: true
+            experimental: false
           - name: windows-x64
             runner: windows-latest
             experimental: false

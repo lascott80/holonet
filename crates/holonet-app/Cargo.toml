@@ -16,3 +16,4 @@ anyhow = "1.0.105"
 gpui.workspace = true
 holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+unicode-segmentation = "1.13.3"

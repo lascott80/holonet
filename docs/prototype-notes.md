@@ -180,3 +180,49 @@ The test server gained a second user, `holotest-kbd`, limited by a `Match User` 
 | Closed port, unresolvable name, non-routable address with a 1 s timeout | `Refused`, `Resolve`, `TimedOut` (within 3 s) |
 
 Tests: 3 unit tests for `hostkey`, plus 6 integration tests in `tests/wsl.rs` that skip unless `HOLONET_TEST_SERVER=1`, so CI passes without the server.
+
+## Milestone 2, phase 3: controls and shell (25 Nov 2026)
+
+`holonet --gallery` shows every shared control in every state inside the app shell. Checked with real keyboard and mouse input on the Snapdragon (release build, 150% scale).
+
+**Assets.** Inter 4.1 (Regular, Medium, SemiBold) and Space Grotesk 2.0.0 (Regular, Medium, Bold) are bundled under SIL OFL 1.1 (`assets/fonts`, about 1.6 MB). Space Grotesk ships no static SemiBold; weight 600 resolves to Bold, and titles look right. 34 stroke icons were extracted from the screen sources into `assets/icons`; `eye` and `eye-off` were added for password fields. The interface mono family resolves at startup: "JetBrains Mono" is not installed here, so the Nerd Font build is used.
+
+**Modules.**
+- `theme.rs`: every token from `tokens.json` under its own name, type styles as `Styled` extension methods, and the few off-token values from the screens, named.
+- `ui`: `Button` (five kinds, compact, header, icon, disabled), `TextField`, `Select`, `Segmented`, `Checkbox`, `Tag` (group, neutral, key), group square, field with label and help, fieldset, key-value table, code box, callouts, dialog (standard and warning) and modal backdrop.
+- `shell.rs`: `TitleBar` and `SideNav`.
+
+**`TextField`** is adapted from GPUI's `examples/input.rs` (Apache-2.0, attributed in the file), keeping its IME support, grapheme-aware editing and clipboard handling. It adds horizontal scrolling that keeps the caret in view, a password mask with show/hide (copy and cut disabled for passwords), the mono variant, a placeholder and problem border, Tab/Shift-Tab focus movement, and Enter/Escape events. It took well under a day, so owner decision 1 (own controls on `gpui` 0.2.2) stands.
+
+| Checked interactively | Result |
+| --- | --- |
+| Typing, Tab through Label → Group → Address → Port, Ctrl+A then retype | Works. Fields and selects need `focus_handle().tab_stop(true)` or `focus_next` skips them. |
+| Select: arrow keys while focused, click to open, popup flips up near the window edge | Works. |
+| Password: masked bullets, reveal toggle | Works. |
+| Segmented, checkboxes, dialog checkbox | Toggle on click. |
+| Warning dialog: layout matches Dialog.md; a backdrop click cancels | Works. The backdrop covers the body only, so the window buttons stay usable. |
+| Title bar: tab click selects; double-click on the empty area maximizes and restores; window buttons | Works after a fix: the first version made the whole bar a drag area, which swallowed tab clicks. Only the brand and a spacer after "+" are drag areas now. |
+| Events: text field `Changed` per keystroke, select `Changed(i)` | Delivered through `cx.subscribe`. |
+
+**Known gaps** (small, fix when the screens use them):
+- Tab names clip without an ellipsis.
+- The select popup is not matched to the field's width.
+- Buttons have no keyboard focus ring.
+- The caret does not blink.
+- Letter-spacing and uppercase transforms are not available in GPUI; section labels pass uppercase text.
+
+**CI**: the first run on `milestone-2` passed on both jobs, including `windows-11-arm`, so the hosted ARM64 runner works for this private repository. That job is no longer experimental.
+
+### Re-estimate (milestone 2 plan, phase 3 checkpoint)
+
+Measured against the work phase 3 took, the remaining phases come to about four times phase 3:
+
+| Phase | Relative size | Why |
+| --- | --- | --- |
+| 4 Vault flow | 0.5 | Two small screens on finished controls and a finished vault crate |
+| 5 Hosts and host form | 1.5 | Two drawn screens, cards and list views, key-file import, Test connection |
+| 6 Session tab | 1.25 | Wiring prompts across the Tokio and GPUI threads, the host key prompt, connection states, status bar |
+| 7 Known hosts | 0.75 | One screen with a table, filters and a detail panel |
+| 8 Wrap-up | 0.25 | Removing the dev paths, docs, PR |
+
+The largest risk left is phase 6's prompt round-trip: a russh callback waiting on a GPUI dialog. Nothing found so far changes the plan.

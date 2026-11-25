@@ -127,10 +127,10 @@ Each phase ends with a commit and a check.
 
 | # | Phase | Exit check |
 | --- | --- | --- |
-| 0 | **CI**: GitHub Actions runs `cargo build`, `test` and `clippy -D warnings`, and `cargo fmt --check`. The free `windows-11-arm` runner was limited to public repositories when last checked (2025) and this repository is private. Check its availability; otherwise use `windows-latest` (x64) for build, test and lint, and do ARM64 checks locally. | Green on the milestone 2 PR |
-| 1 | **Model and vault** crates, headless | Vault tests pass. Unlock time measured on the Snapdragon. |
-| 2 | **SSH extensions**: verifier callback, password plus keyboard-interactive, key from bytes, typed errors, session info | Integration tests pass against WSL for every sign-in method, unknown and changed keys, and wrong password |
-| 3 | **Controls and shell**: tokens module, fonts, icons, the controls above, title bar and side navigation, plus a hidden `--gallery` view showing every control in every state | Gallery screenshots match the guideline drawings. **Re-estimate the rest here.** |
+| 0 | **CI**: GitHub Actions runs `cargo build`, `test` and `clippy -D warnings`, and `cargo fmt --check`. Runs on both `windows-11-arm` (confirmed available to this private repository) and `windows-latest`. *Done.* | Green on the milestone 2 PR |
+| 1 | **Model and vault** *(done)* crates, headless | Vault tests pass. Unlock time measured on the Snapdragon. |
+| 2 | **SSH extensions** *(done)*: verifier callback, password plus keyboard-interactive, key from bytes, typed errors, session info | Integration tests pass against WSL for every sign-in method, unknown and changed keys, and wrong password |
+| 3 | **Controls and shell** *(done)*: tokens module, fonts, icons, the controls above, title bar and side navigation, plus a hidden `--gallery` view showing every control in every state | Gallery screenshots match the guideline drawings. **Re-estimate the rest here.** |
 | 4 | **Vault flow**: create vault (first start), Locked with password unlock, wrong password, "Lock now", change password | Fresh start → create → lock → wrong password → unlock, with data surviving a restart |
 | 5 | **Hosts and host form**: Hosts cards, list and detail, empty state, search filter; New and Edit host, Duplicate, delete dialog; key-file import into the vault; Test connection | Add, edit, duplicate and delete hosts, persisted; Test connection reports reachability and the fingerprint |
 | 6 | **Session**: one tab with the drawn chrome, connecting and failed states, the host key prompt (both variants), password and passphrase prompts, status bar | Connect to WSL by password and by key, trust the key, reconnect silently; a changed key is stopped and recorded |
