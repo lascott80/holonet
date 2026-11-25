@@ -75,6 +75,9 @@ pub struct HolonetApp {
     plus_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Horizontal scroll of the tab strip, so the active tab stays in view.
     tab_scroll: ScrollHandle,
+    /// A stopped pane whose "Edit host" opened the host form: "Save and
+    /// connect" retries there instead of opening another tab.
+    edit_origin: Option<gpui::WeakEntity<Pane>>,
     /// Holds keyboard focus when nothing inside does, so app shortcuts
     /// still dispatch (GPUI needs a focused element to start from).
     focus: gpui::FocusHandle,
@@ -99,6 +102,7 @@ impl HolonetApp {
             picker: None,
             plus_bounds: Rc::new(Cell::new(Bounds::default())),
             tab_scroll: ScrollHandle::new(),
+            edit_origin: None,
             focus: cx.focus_handle(),
         }
     }
@@ -240,6 +244,7 @@ impl HolonetApp {
             }
             SessionEvent::EditHost => {
                 let id = pane.read(cx).host.id;
+                this.edit_origin = Some(pane.downgrade());
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.edit_host(id, window, cx));
@@ -250,8 +255,29 @@ impl HolonetApp {
         Some(pane)
     }
 
-    /// Open a new tab connected to a saved host.
+    /// Open a new tab connected to a saved host, or retry in the stopped pane
+    /// the host was edited from.
     pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.edit_origin.take().and_then(|p| p.upgrade())
+            && pane.read(cx).host.id == id
+            && pane.read(cx).is_stopped()
+            && let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(&pane))
+            && let Some(data) = self.vault_data(cx)
+            && let Some(host) = data.host(id).cloned()
+        {
+            let key = match &host.auth {
+                holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
+                holonet_model::Auth::Password { .. } => None,
+            };
+            let limits = Limits {
+                connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
+                keep_alive: data.settings.connection.keep_alive_for(&host),
+                terminal: data.settings.terminal.clone(),
+            };
+            pane.update(cx, |p, cx| p.retry_with(host, key, limits, cx));
+            self.select(Some(index), window, cx);
+            return;
+        }
         // Estimate the terminal size from the window.
         let viewport = window.viewport_size();
         let size = GridSize {

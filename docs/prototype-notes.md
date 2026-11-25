@@ -662,3 +662,41 @@ Afterwards the throwaway vault was set back to the defaults.
 | `exit` in another pane | Ended bar with "Close pane"; clicking it closed the pane |
 | Ctrl Shift W twice more | The tab closed; the vault view came back |
 | Split down, then a click in the top pane, then typing | The text went to the top pane |
+
+## Milestone 3, phase 6: connection states (25 Nov 2026)
+
+The pane's states now follow `ConnectStates.dc.html`. Each has its log lines at the top, a centred message, buttons, and a matching word in the pane header and status bar.
+
+**Log lines.**
+- Each attempt starts a fresh log: "Resolving <name> …" (names only), then "Opening TCP connection to <address:port>".
+- Then the host key lines, then "Offering password for <user>" or "Offering key <name> for <user>" once the key is settled.
+- Failures add a warn line, such as "No response after 10 seconds", "Server: Permission denied (publickey,password,keyboard-interactive)", "The passphrase did not unlock <key>", or the network reason.
+
+**States** (header word in brackets):
+
+| State | Title | Body | Buttons |
+| --- | --- | --- | --- |
+| Connecting (Connecting) | Connecting to <name> | Trying <address>. (Tailscale wording waits for milestone 4) | Cancel |
+| Not reachable | Holonet could not reach <name> | The reason (refused, unresolved, network error) | Retry, Edit host |
+| Timed out | <name> did not answer | "<address> is a private address, so you may be away from its network.", or "The server may be down…" for public addresses | Retry, Edit host |
+| Sign-in refused (password) | The server refused the saved password (or "the password" when typed) | The password may have changed… | Enter password, Edit host |
+| Sign-in refused (key) | The server refused the key <name> | Not in authorized_keys for <user>, or key sign-in not allowed | Retry, Edit host |
+| Wrong passphrase | The key passphrase is wrong | Enter it again; the server was not contacted with this key | Enter passphrase, Edit host |
+
+- Every failure also has a quiet "Close tab", or "Close pane" in a split. The design draws none, but a pane needs a way out besides the tab's ✕.
+- The spinner is the design's: a 3 px `line` ring with an accent arc turning on it every 0.9 s. GPUI borders take one color, so the arc is an SVG over the ring.
+- New: after **Edit host** from a stopped pane, **Save and connect** retries in that pane instead of opening another tab. Testing showed failed tabs piling up without this.
+- Two unit tests: the private-address wording, and that every failure has a header word.
+
+**Reached on purpose against WSL:**
+
+| How | Result |
+| --- | --- |
+| A saved host on port 2223 (nothing listening) | Not reachable: "The host refused the connection. Check the port, and that SSH is running." |
+| Edit host on that pane, address 10.255.255.1 | Ring spinner and "Trying 10.255.255.1.", then after 10 s Timed out with the private-address text |
+| New host with a key, then a wrong passphrase at the prompt | Wrong passphrase |
+| Edit host to password sign-in, then a wrong password at the prompt | Sign-in refused: "The server refused the password", with the server's method list |
+| Edit host to the keyboard-interactive-only user, with the key | Sign-in refused: "The server refused the key holotest_ed25519_pass" |
+| Edit host back to `holotest`, Save and connect | Retried in the same pane and connected; still one tab |
+
+Not reached by hand: "the saved password" wording. That path depends only on whether the attempt used the vault's password, and the typed-password case above shows the shared code.

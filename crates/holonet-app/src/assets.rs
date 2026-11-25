@@ -50,6 +50,7 @@ icons![
     "win-maximize",
     "win-close",
     "close",
+    "spinner-arc",
 ];
 
 const FONTS: &[&[u8]] = &[

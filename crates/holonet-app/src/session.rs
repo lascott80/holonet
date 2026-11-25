@@ -65,16 +65,49 @@ pub struct KeyCheck {
 
 #[derive(Clone, Copy)]
 enum Failure {
-    /// Could not reach the host.
+    /// Could not reach the host (refused, unresolved, network error).
     Network,
+    /// The host never answered within the connect timeout.
+    TimedOut,
     /// The server refused the password (saved or typed).
     Password,
     /// The server refused the key.
-    Key,
+    KeyRefused,
+    /// The key's passphrase did not unlock it.
     Passphrase,
     /// "Refuse to connect" stopped an unknown key.
     RefusedUnknown,
     Other,
+}
+
+impl Failure {
+    /// The pane header's and status bar's word for this state
+    /// (ConnectStates.dc.html: "Timed out", "Sign-in refused").
+    fn state_word(&self) -> &'static str {
+        match self {
+            Failure::Network => "Not reachable",
+            Failure::TimedOut => "Timed out",
+            Failure::Password | Failure::KeyRefused => "Sign-in refused",
+            Failure::Passphrase => "Wrong passphrase",
+            Failure::RefusedUnknown => "Refused",
+            Failure::Other => "Not connected",
+        }
+    }
+}
+
+/// Why a host may not have answered, from its address (ConnectStates.dc.html,
+/// "Timed out"). Tailscale advice joins this in milestone 4.
+fn unanswered_reason(address: &str) -> String {
+    let private = match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || ip.is_unicast_link_local(),
+        Err(_) => address.ends_with(".local") || address.ends_with(".lan") || address.ends_with(".home.arpa"),
+    };
+    if private {
+        format!("{address} is a private address, so you may be away from its network.")
+    } else {
+        "The server may be down, or a firewall may be dropping the connection.".to_string()
+    }
 }
 
 enum State {
@@ -137,6 +170,9 @@ pub struct Pane {
     active: bool,
     /// The only pane in its tab: "Close tab" instead of "Close pane".
     alone: bool,
+    /// The attempt used a password saved in the vault (for the wording of
+    /// "The server refused the saved password").
+    used_saved_password: bool,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
@@ -201,6 +237,7 @@ impl Pane {
             focus_pending: false,
             active: true,
             alone: true,
+            used_saved_password: false,
             _subscriptions: subscriptions,
         };
         tab.start(cx);
@@ -234,6 +271,16 @@ impl Pane {
         }
     }
 
+    /// "Offering password for root", once the host key is settled.
+    fn note_offer(&mut self) {
+        let user = if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
+        let line = match (&self.host.auth, &self.key) {
+            (Auth::Key { .. }, Some(key)) => format!("Offering key {} for {user}", key.name),
+            _ => format!("Offering password for {user}"),
+        };
+        self.note(line, false);
+    }
+
     fn target(&self) -> String {
         format!("{}:{}", self.host.address.trim(), self.host.port)
     }
@@ -263,6 +310,23 @@ impl Pane {
         }
     }
 
+    /// Whether the pane stopped without a working session (failed or ended).
+    pub fn is_stopped(&self) -> bool {
+        matches!(self.state, State::Failed { .. } | State::Ended(_))
+    }
+
+    /// The host was edited from this pane's failure ("Edit host", then "Save
+    /// and connect"): try again here with the new details.
+    pub fn retry_with(&mut self, host: Host, key: Option<StoredKey>, limits: Limits, cx: &mut Context<Self>) {
+        self.host = host;
+        self.key = key;
+        self.limits = limits;
+        self.ask_password = false;
+        self.ask_passphrase = false;
+        self.start(cx);
+        cx.notify();
+    }
+
     /// Start (or restart) the connection.
     fn start(&mut self, cx: &mut Context<Self>) {
         self.attempt += 1;
@@ -270,7 +334,14 @@ impl Pane {
         self.pending_save = None;
         self.state = State::Connecting;
         self.session = None;
-        self.note(format!("Connecting to {} …", self.target()), false);
+        // Each attempt starts a fresh log (ConnectStates.dc.html).
+        self.log.clear();
+        let address = self.host.address.trim().to_string();
+        if address.parse::<std::net::IpAddr>().is_err() {
+            self.note(format!("Resolving {address} …"), false);
+        }
+        self.note(format!("Opening TCP connection to {}", self.target()), false);
+        self.used_saved_password = matches!(&self.host.auth, Auth::Password { saved: Some(_) }) && !self.ask_password;
 
         let credential = match (&self.host.auth, &self.key) {
             (Auth::Password { saved }, _) => Credential::Password(if self.ask_password { None } else { saved.clone() }),
@@ -355,6 +426,7 @@ impl Pane {
                 match check.status {
                     KeyStatus::Trusted => {
                         self.note("Host key verified against Known hosts", false);
+                        self.note_offer();
                         let _ = reply.send(HostKeyDecision::Continue);
                     }
                     KeyStatus::Unknown if check.policy == UnknownHostKeys::Refuse => {
@@ -410,6 +482,7 @@ impl Pane {
                     app.update(cx, |app, cx| app.trust_host_key(&key, cx));
                 }
                 self.note("Trusted: the key is saved in Known hosts", false);
+                self.note_offer();
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
@@ -417,6 +490,7 @@ impl Pane {
             }
             "once" => {
                 self.note("Connecting once: the key is not saved", false);
+                self.note_offer();
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
@@ -512,30 +586,55 @@ impl Pane {
                     if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
                 match &e {
                     ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) => {
+                        self.note(describe_error(&e), true);
                         self.fail(Failure::Network, format!("Holonet could not reach {name}"), describe_error(&e))
                     }
                     ConnectError::TimedOut(s) => {
-                        self.fail(Failure::Network, format!("{name} did not answer"), format!("No response after {s} seconds."))
+                        self.note(format!("No response after {s} seconds"), true);
+                        let body = unanswered_reason(self.host.address.trim());
+                        self.fail(Failure::TimedOut, format!("{name} did not answer"), body)
                     }
-                    ConnectError::SignInRefused { method: "publickey", .. } => self.fail(
-                        Failure::Key,
-                        format!("The server refused the key {}", self.key.as_ref().map(|k| k.name.as_str()).unwrap_or("")),
-                        format!("The key may not be in the server's authorized_keys for {user}."),
-                    ),
-                    ConnectError::SignInRefused { .. } => self.fail(
-                        Failure::Password,
-                        "The server refused the password",
-                        format!("The password for {user} may have changed, or the server may no longer allow password sign-in."),
-                    ),
-                    ConnectError::WrongPassphrase => self.fail(
-                        Failure::Passphrase,
-                        "The key passphrase is wrong",
-                        "Enter the passphrase again. Holonet has not contacted the server with this key.",
-                    ),
+                    ConnectError::SignInRefused { method, remaining } => {
+                        let offered = if remaining.is_empty() { method.to_string() } else { remaining.join(",") };
+                        self.note(format!("Server: Permission denied ({offered})"), true);
+                        if *method == "publickey" {
+                            let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
+                            self.fail(
+                                Failure::KeyRefused,
+                                format!("The server refused the key {key}"),
+                                format!(
+                                    "The key may not be in the server's authorized_keys for {user}, or the server may not allow key sign-in for this user."
+                                ),
+                            )
+                        } else {
+                            let title = if self.used_saved_password {
+                                "The server refused the saved password"
+                            } else {
+                                "The server refused the password"
+                            };
+                            self.fail(
+                                Failure::Password,
+                                title,
+                                format!("The password for {user} may have changed, or the server may no longer allow password sign-in."),
+                            )
+                        }
+                    }
+                    ConnectError::WrongPassphrase => {
+                        let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
+                        self.note(format!("The passphrase did not unlock {key}"), true);
+                        self.fail(
+                            Failure::Passphrase,
+                            "The key passphrase is wrong",
+                            "Enter the passphrase again. Holonet has not contacted the server with this key.",
+                        )
+                    }
                     ConnectError::Cancelled | ConnectError::HostKeyRejected => {
                         cx.emit(SessionEvent::Close);
                     }
-                    other => self.fail(Failure::Other, "The connection failed", other.to_string()),
+                    other => {
+                        self.note(other.to_string(), true);
+                        self.fail(Failure::Other, "The connection failed", other.to_string())
+                    }
                 }
             }
         }
@@ -543,9 +642,7 @@ impl Pane {
     }
 
     fn fail(&mut self, kind: Failure, title: impl Into<SharedString>, body: impl Into<SharedString>) {
-        let body = body.into();
-        self.note(body.clone(), true);
-        self.state = State::Failed { kind, title: title.into(), body };
+        self.state = State::Failed { kind, title: title.into(), body: body.into() };
     }
 
     fn replace_key_and_connect(&mut self, cx: &mut Context<Self>) {
@@ -614,17 +711,23 @@ impl Pane {
 
     fn connecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let name = self.name();
+        // The design's spinner: a `line` ring with an accent arc turning on it.
+        let spinner = div().size(px(28.)).relative().rounded_full().border(px(3.)).border_color(theme::line()).child(
+            div().absolute().top(px(-3.)).left(px(-3.)).child(
+                icon("spinner-arc", px(28.), theme::accent()).with_animation(
+                    "spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+                ),
+            ),
+        );
         self.center_card(
             div()
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap(theme::SPACE_3)
-                .child(icon("refresh", px(28.), theme::accent()).with_animation(
-                    "spin",
-                    Animation::new(Duration::from_millis(900)).repeat(),
-                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-                ))
+                .child(spinner)
                 .child(
                     div()
                         .text_heading()
@@ -635,7 +738,7 @@ impl Pane {
                     div()
                         .text_body()
                         .text_color(theme::ink_muted())
-                        .child(SharedString::from(format!("Opening a connection to {}.", self.target()))),
+                        .child(SharedString::from(format!("Trying {}.", self.host.address.trim()))),
                 )
                 .child(Button::secondary("connect-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
                     this.attempt += 1;
@@ -937,7 +1040,7 @@ impl Pane {
                 }),
             )),
             Failure::RefusedUnknown => buttons,
-            _ => {
+            Failure::Network | Failure::TimedOut | Failure::KeyRefused | Failure::Other => {
                 buttons.child(Button::primary("retry", "Retry").on_click(cx.listener(|this, _, _, cx| this.start(cx))))
             }
         };
@@ -971,7 +1074,8 @@ impl Pane {
         let (word, color): (&str, gpui::Rgba) = match self.state {
             State::Connected => ("Connected", theme::group_mint()),
             State::Ended(_) => ("Ended", theme::warn()),
-            State::Failed { .. } | State::KeyChanged { .. } => ("Not connected", theme::warn()),
+            State::Failed { kind, .. } => (kind.state_word(), theme::warn()),
+            State::KeyChanged { .. } => ("Host key changed", theme::warn()),
             _ => ("Connecting", theme::ink_muted()),
         };
         let auth = match self.info.auth_method.as_str() {
@@ -1018,7 +1122,7 @@ impl Render for Pane {
             State::Connected => format!("{} × {}", size.cols, size.rows).into(),
             State::Connecting | State::HostKey { .. } | State::Secret { .. } => "Connecting".into(),
             State::KeyChanged { .. } => "Host key changed".into(),
-            State::Failed { .. } => "Not connected".into(),
+            State::Failed { kind, .. } => kind.state_word().into(),
             State::Ended(_) => "Ended".into(),
         };
         let warn_word = matches!(self.state, State::KeyChanged { .. } | State::Failed { .. } | State::Ended(_));
@@ -1119,5 +1223,39 @@ impl Render for Pane {
                     ),
             )
             .child(div().flex_1().min_h_0().child(content))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unanswered_reason_spots_private_addresses() {
+        for private in ["192.168.1.51", "10.30.0.9", "172.20.1.1", "169.254.1.1", "fd00::1", "nas.local", "pi.lan"] {
+            assert!(unanswered_reason(private).contains("private address"), "{private}");
+        }
+        for public in ["198.51.100.7", "example.com", "2001:db8::1"] {
+            assert!(unanswered_reason(public).contains("may be down"), "{public}");
+        }
+    }
+
+    #[test]
+    fn every_failure_has_a_state_word() {
+        let words: Vec<&str> = [
+            Failure::Network,
+            Failure::TimedOut,
+            Failure::Password,
+            Failure::KeyRefused,
+            Failure::Passphrase,
+            Failure::RefusedUnknown,
+            Failure::Other,
+        ]
+        .iter()
+        .map(Failure::state_word)
+        .collect();
+        assert_eq!(words[1], "Timed out");
+        assert_eq!(words[2], "Sign-in refused");
+        assert!(words.iter().all(|w| !w.is_empty()));
     }
 }
