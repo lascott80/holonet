@@ -18,10 +18,12 @@ mod font_check;
 mod font_spike;
 mod gallery;
 mod host_form;
+mod host_picker;
 mod input;
 mod platform;
 mod sample;
 mod session;
+mod tab;
 // Design-system modules: parts are used by later phases of milestone 2.
 #[allow(dead_code)]
 mod shell;
@@ -135,6 +137,8 @@ fn main() {
         ui::text_field::bind_keys(cx);
         ui::select::bind_keys(cx);
         ui::slider::bind_keys(cx);
+        app::bind_keys(cx);
+        host_picker::bind_keys(cx);
         if font_spike {
             match font_spike::load(cx) {
                 Some((n, mb, read, add)) => {

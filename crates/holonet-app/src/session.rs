@@ -1,6 +1,7 @@
-//! A session tab: one host's connection, from connecting through the host key
+//! A pane: one host's connection, from connecting through the host key
 //! decision and sign-in to the terminal (Terminal.dc.html, HostKey.dc.html,
-//! ConnectStates.dc.html).
+//! ConnectStates.dc.html). A [`crate::tab::Tab`] holds one or more panes and
+//! draws the session header and status bar for its active pane.
 //!
 //! The SSH connection runs on Tokio. When russh needs a host key decision or
 //! a secret, [`UiPrompts`] sends the request over a channel to this entity and
@@ -105,7 +106,7 @@ enum State {
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    /// The tab should close (Cancel, Disconnect, Close tab).
+    /// The pane should close (Cancel, Disconnect, Close tab).
     Close,
     /// Open the host form for this host.
     EditHost,
@@ -113,7 +114,7 @@ pub enum SessionEvent {
     ReviewKnownHost,
 }
 
-pub struct SessionTab {
+pub struct Pane {
     app: WeakEntity<HolonetApp>,
     pub host: Host,
     key: Option<StoredKey>,
@@ -132,12 +133,15 @@ pub struct SessionTab {
     attempt: u64,
     /// A typed password (true) or passphrase to save after a successful sign-in.
     pending_save: Option<(bool, Secret)>,
+    /// Drawn with the stronger border of the tab's active pane (one pane
+    /// per tab until split panes, milestone 3 phase 5).
+    active: bool,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
-impl EventEmitter<SessionEvent> for SessionTab {}
+impl EventEmitter<SessionEvent> for Pane {}
 
 /// Settings read when the tab is created.
 #[derive(Clone)]
@@ -148,7 +152,7 @@ pub struct Limits {
     pub terminal: holonet_model::TerminalSettings,
 }
 
-impl SessionTab {
+impl Pane {
     /// Settings changed: show them in this tab's terminal.
     pub fn set_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
         self.limits.terminal = settings.clone();
@@ -194,6 +198,7 @@ impl SessionTab {
             attempt: 0,
             pending_save: None,
             focus_pending: false,
+            active: true,
             _subscriptions: subscriptions,
         };
         tab.start(cx);
@@ -229,6 +234,15 @@ impl SessionTab {
 
     fn target(&self) -> String {
         format!("{}:{}", self.host.address.trim(), self.host.port)
+    }
+
+    /// `user@address:port`, for the session header.
+    pub fn target_line(&self) -> SharedString {
+        if self.host.username.is_empty() {
+            self.target().into()
+        } else {
+            format!("{}@{}", self.host.username, self.target()).into()
+        }
     }
 
     /// Start (or restart) the connection.
@@ -934,7 +948,8 @@ impl SessionTab {
         .into_any_element()
     }
 
-    fn status_bar(&self) -> Div {
+    /// The status bar the tab shows for its active pane.
+    pub fn status_bar(&self) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
             State::Connected => ("Connected", theme::group_mint()),
             State::Ended(_) => ("Ended", theme::warn()),
@@ -974,7 +989,7 @@ impl SessionTab {
     }
 }
 
-impl Render for SessionTab {
+impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.focus_pending) {
             self.focus(window, cx);
@@ -1047,84 +1062,44 @@ impl Render for SessionTab {
                 .into_any_element(),
         };
 
-        let target = if self.host.username.is_empty() {
-            self.target()
-        } else {
-            format!("{}@{}", self.host.username, self.target())
-        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::ground())
-            // Session header bar.
+            .bg(theme::terminal())
+            .border_1()
+            .border_color(if self.active { theme::ink_muted() } else { theme::line() })
+            .rounded(theme::RADIUS_MD)
+            .overflow_hidden()
+            // 2px group-color top edge (GPUI borders are one color).
+            .child(div().h(px(2.)).flex_none().bg(color))
             .child(
                 div()
-                    .px(px(18.))
-                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(theme::SPACE_3)
+                    .py(theme::SPACE_2)
+                    .bg(theme::panel())
                     .border_b_1()
                     .border_color(theme::line())
-                    .flex()
-                    .flex_col()
+                    .text_meta()
                     .child(
                         div()
-                            .font_family(theme::DISPLAY)
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ink())
-                            .child(self.name()),
+                            .flex()
+                            .items_center()
+                            .gap(theme::SPACE_2)
+                            .child(crate::ui::group_square(color))
+                            .child(div().text_color(theme::ink()).font_weight(FontWeight::MEDIUM).child(self.name()))
+                            .child(div().text_color(color).child("No group")),
                     )
-                    .child(div().text_mono_small().text_color(theme::ink_muted()).child(SharedString::from(target))),
+                    .child(
+                        div()
+                            .text_mono_small()
+                            .text_color(if warn_word { theme::warn() } else { theme::ink_muted() })
+                            .child(state_word),
+                    ),
             )
-            // Gutter and pane.
-            .child(
-                div().flex_1().min_h_0().p(theme::SPACE_2).bg(theme::sunken()).child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .bg(theme::terminal())
-                        .border_1()
-                        .border_color(theme::ink_muted())
-                        .rounded(theme::RADIUS_MD)
-                        .overflow_hidden()
-                        // 2px group-color top edge (GPUI borders are one color).
-                        .child(div().h(px(2.)).flex_none().bg(color))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .px(theme::SPACE_3)
-                                .py(theme::SPACE_2)
-                                .bg(theme::panel())
-                                .border_b_1()
-                                .border_color(theme::line())
-                                .text_meta()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(theme::SPACE_2)
-                                        .child(crate::ui::group_square(color))
-                                        .child(
-                                            div()
-                                                .text_color(theme::ink())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(self.name()),
-                                        )
-                                        .child(div().text_color(color).child("No group")),
-                                )
-                                .child(
-                                    div()
-                                        .text_mono_small()
-                                        .text_color(if warn_word { theme::warn() } else { theme::ink_muted() })
-                                        .child(state_word),
-                                ),
-                        )
-                        .child(div().flex_1().min_h_0().child(content)),
-                ),
-            )
-            .child(self.status_bar())
+            .child(div().flex_1().min_h_0().child(content))
     }
 }

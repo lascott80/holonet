@@ -578,3 +578,43 @@ The Settings page is rebuilt from `Settings.dc.html` in `workspace/settings.rs`.
 Afterwards the throwaway vault was set back to the defaults.
 
 **Not on the page yet**, because those features don't exist: Appearance (milestone 7), SFTP (5), Updates (7), and the update notice.
+
+## Milestone 3, phase 4: tabs (25 Nov 2026)
+
+**Structure.**
+- `SessionTab` is now `Pane` (`session.rs`): one host's connection, prompts, states and terminal, drawn as the pane card (group edge, pane header, content).
+- The new `Tab` (`tab.rs`) holds the panes, one each until phase 5. It draws the session header and status bar for its active pane, and observes its panes so the header, status bar and title-bar dot follow them.
+- `HolonetApp` keeps a list of tabs and observes each. Closing a pane closes its tab when it was the last pane. The Locked screen counts panes.
+
+**Tab strip.**
+- The vault tab is pinned. Session tabs shrink to 130 px, then scroll sideways (Terminal.dc.html: `overflow-x: auto`). The active tab is scrolled into view whenever it changes.
+- Dots, as Tab.md specifies: solid when connected, a ring while connecting, `warn` when failed or ended.
+- "+" stays just after the strip.
+
+**New-tab host picker** (`host_picker.rs`, owner decision 3).
+- "+" or Ctrl Shift T opens a 380 px popup under "+", at the position recorded when "+" was painted. It holds a search field and the saved hosts, sorted by name, each with `user@address:port`.
+- Typing filters on the name, address, user and tags. Up and Down move the highlight, Enter connects in a new tab, and Esc clears the search and then closes.
+- An outside click closes it.
+- With no saved hosts it says so and offers "New host", which opens the host form.
+
+**Shortcuts.**
+- Ctrl Shift T (new tab), Ctrl Shift W (close the active pane, which is the tab for now), Ctrl Tab and Ctrl Shift Tab (next and previous, through the vault tab and the session tabs).
+- They are GPUI actions bound in the `HolonetApp` context. GPUI matches bindings before key-down handlers, so they win over the terminal while every other key still reaches the shell.
+- Settings, Keyboard now lists them.
+
+**Bugs found and fixed while testing:**
+1. **Ctrl Shift T did nothing right after unlocking.** Nothing had keyboard focus, so GPUI had no element to dispatch the binding from. The app root now has a focus handle and takes focus when nothing else holds it.
+2. **Ctrl Tab did nothing on the vault view.** Focus stayed on the hidden terminal of the tab just left. Selecting the vault view now focuses the app root.
+3. **The vault tab scrolled out of view** with many tabs. It now sits outside the scrolling part, as the design pins it.
+
+**Checked with real input against WSL** (two hosts: `wsl-test` by key, and `localhost`, trusted on first connect, with its passphrase saved):
+
+| Check | Result |
+| --- | --- |
+| Ten tabs from the keyboard (Ctrl Shift T, type, Enter), alternating hosts | All connected; strip scrolled to the newest; vault tab still visible |
+| Labelled each shell `TAB-n`, then Ctrl Tab through all of them | Correct order; wraps through the vault tab |
+| Ctrl Tab to tab 3, Ctrl Shift W | TAB-3 closed; TAB-4 active and focused |
+| ✕ on tab 1 | Closed; TAB-4 stayed active |
+| Ctrl Shift Tab | TAB-2 |
+| Lock now | "8 sessions are open"; after unlocking all 8 tabs are back |
+| Ctrl Shift W eight times, then Ctrl Shift T | All closed, the vault view shows, the picker opens |

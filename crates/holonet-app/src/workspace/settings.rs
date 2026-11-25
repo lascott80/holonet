@@ -35,7 +35,14 @@ const PREVIEW_ROWS: usize = 6;
 
 /// Shortcuts that work in this build (Settings.dc.html lists the full set;
 /// each joins this list when its feature lands).
-const SHORTCUTS: &[(&str, &str)] = &[("Copy", "Ctrl Shift C"), ("Paste", "Ctrl Shift V")];
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("New tab", "Ctrl Shift T"),
+    ("Close tab", "Ctrl Shift W"),
+    ("Next tab", "Ctrl Tab"),
+    ("Previous tab", "Ctrl Shift Tab"),
+    ("Copy", "Ctrl Shift C"),
+    ("Paste", "Ctrl Shift V"),
+];
 
 const LICENCES: &[(&str, &str)] = &[
     ("JetBrainsMono Nerd Font: notices", include_str!("../../assets/fonts/jetbrainsmono-nerd/NOTICE.md")),
