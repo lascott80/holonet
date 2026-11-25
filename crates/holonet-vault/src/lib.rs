@@ -415,7 +415,10 @@ impl UnlockedVault {
             self.slots = old;
             return Err(e);
         }
-        Ok(())
+        // Save once more so the backup also opens with the new password.
+        // Otherwise a damaged main file right after the change would need the
+        // old password to recover.
+        self.save()
     }
 
     /// Lock: wipe the key and contents, keeping only the path.
@@ -586,6 +589,23 @@ mod tests {
         let locked = LockedVault::open(&path).unwrap();
         assert!(matches!(locked.unlock("correct horse"), Err(VaultError::WrongPassword)));
         assert_eq!(locked.unlock("brand new pass").unwrap().data().hosts[0].address, "kept");
+    }
+
+    #[test]
+    fn backup_opens_with_new_password_after_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        vault.update(|d| d.hosts.push(Host::new("kept"))).unwrap();
+        vault.change_password_with("brand new pass", KdfParams::insecure_for_tests()).unwrap();
+        let path = vault.lock();
+        // Damage the main file straight after the change.
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&path, &bytes).unwrap();
+        let vault = LockedVault::open(&path).unwrap().unlock("brand new pass").unwrap();
+        assert!(vault.restored_from_backup);
+        assert_eq!(vault.data().hosts[0].address, "kept");
     }
 
     #[test]

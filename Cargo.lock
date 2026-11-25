@@ -2950,7 +2950,9 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "gpui",
+ "holonet-model",
  "holonet-ssh",
+ "holonet-vault",
  "tokio",
  "unicode-segmentation",
 ]

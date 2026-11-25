@@ -13,7 +13,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
+    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -531,8 +531,15 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
+        // Grow to fill the field as a flex item. A percentage width collapses
+        // when the parent's width comes from flex layout (measured 18px).
+        let mut style = Style {
+            flex_grow: 1.,
+            flex_shrink: 1.,
+            flex_basis: gpui::Length::Definite(px(0.).into()),
+            ..Default::default()
+        };
+        style.min_size.width = px(0.).into();
         style.size.height = window.line_height().into();
         (window.request_layout(style, [], cx), ())
     }
@@ -695,7 +702,7 @@ impl Render for TextField {
             .when(self.mono, |d| d.text_mono())
             .when(!self.mono, |d| d.text_body())
             .text_color(theme::ink())
-            .child(div().flex_1().overflow_hidden().child(TextElement { field: cx.entity() }))
+            .child(div().flex().flex_1().min_w_0().overflow_hidden().child(TextElement { field: cx.entity() }))
             .when(self.password, |d| {
                 d.child(
                     div()

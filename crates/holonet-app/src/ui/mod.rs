@@ -332,7 +332,7 @@ pub fn field_label(text: impl Into<SharedString>) -> Div {
 
 /// Help text below a control; `warn` when it reports a problem.
 pub fn field_help(text: impl Into<SharedString>, problem: bool) -> Div {
-    div().text_meta().text_color(if problem { theme::warn() } else { theme::ink_muted() }).child(text.into())
+    div().w_full().text_meta().text_color(if problem { theme::warn() } else { theme::ink_muted() }).child(text.into())
 }
 
 /// A labelled field: label, control, optional help line.
@@ -341,6 +341,9 @@ pub fn field(label: impl Into<SharedString>, control: impl IntoElement, help: Op
         .flex()
         .flex_col()
         .gap(theme::SPACE_2)
+        // Full width in a column (so help text wraps at the field's width);
+        // in a row, flex_1 sets the size instead.
+        .w_full()
         .min_w(px(180.))
         .flex_1()
         .child(field_label(label))
@@ -390,6 +393,51 @@ pub fn key_values(rows: Vec<(SharedString, AnyElement)>) -> Div {
                 .child(div().text_mono().text_color(theme::ink()).child(value))
         },
     ))
+}
+
+/// Settings card: rows inside `card` with `radius-lg`, divided by `line`
+/// (SettingRow.md).
+pub fn setting_card(rows: Vec<AnyElement>) -> Div {
+    let count = rows.len();
+    div().flex().flex_col().bg(theme::card()).rounded(theme::RADIUS_LG).children(
+        rows.into_iter()
+            .enumerate()
+            .map(|(i, row)| div().when(i + 1 < count, |d| d.border_b_1().border_color(theme::line())).child(row)),
+    )
+}
+
+/// One setting: name (and optional consequence line) on the left, control
+/// on the right; wraps on a narrow window.
+pub fn setting_row(name: impl Into<SharedString>, help: Option<SharedString>, control: impl IntoElement) -> Div {
+    setting_row_with(
+        name,
+        help.map(|h| div().text_meta().text_color(theme::ink_muted()).child(h).into_any_element()),
+        control,
+    )
+}
+
+/// [`setting_row`] with any element as the second line (e.g. a path).
+pub fn setting_row_with(name: impl Into<SharedString>, help: Option<AnyElement>, control: impl IntoElement) -> Div {
+    div()
+        .min_h(theme::CONTROL)
+        .px(theme::SPACE_4)
+        .py(theme::SPACE_2)
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(theme::SPACE_3)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(220.))
+                .overflow_hidden()
+                .child(div().text_body().text_color(theme::ink()).child(name.into()))
+                .children(help),
+        )
+        .child(control)
 }
 
 /// Code box: `sunken`, mono, for commands and fingerprints.

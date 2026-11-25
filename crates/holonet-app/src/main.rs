@@ -1,6 +1,8 @@
-//! Holonet prototype (milestone 1).
+//! Holonet.
 //!
-//!   holonet                 spike 3: terminal grid from canned output
+//!   holonet                 the app: create or unlock the vault, then the workspace.
+//!                           HOLONET_VAULT=<file> uses another vault file (testing).
+//!   holonet --showcase      spike 3: terminal grid from canned output
 //!   holonet --ssh [mode]    spike 4: shell on the WSL test server; mode is
 //!                           password, ed25519 (default), rsa or passphrase
 //!   holonet --gallery       milestone 2 phase 3: every shared control
@@ -8,6 +10,7 @@
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
 
+mod app;
 mod assets;
 mod font_check;
 mod gallery;
@@ -22,6 +25,8 @@ mod terminal_view;
 mod theme;
 #[allow(dead_code)]
 mod ui;
+mod vault_screens;
+mod workspace;
 
 use std::time::Instant;
 
@@ -73,6 +78,7 @@ fn main() {
     }
     let fonts = arg.as_deref() == Some("--fonts");
     let gallery = arg.as_deref() == Some("--gallery");
+    let showcase = arg.as_deref() == Some("--showcase");
     // --stream-bench: feed 10 MB a frame at a time, print the timing and quit.
     let stream = arg.as_deref() == Some("--stream-bench");
     let ssh = if arg.as_deref() == Some("--ssh") {
@@ -118,6 +124,29 @@ fn main() {
             cx.activate(true);
             return;
         }
+        if arg.is_none() {
+            let Some(path) = std::env::var_os("HOLONET_VAULT").map(Into::into).or_else(holonet_vault::default_path)
+            else {
+                eprintln!("holonet: no APPDATA folder to keep the vault in");
+                cx.quit();
+                return;
+            };
+            let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Holonet".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                window_min_size: Some(size(px(720.), px(520.))),
+                ..Default::default()
+            };
+            cx.open_window(options, |window, cx| cx.new(|cx| app::HolonetApp::new(path, window, cx)))
+                .expect("failed to open window");
+            cx.activate(true);
+            return;
+        }
         let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1000.), px(640.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         if fonts {
@@ -131,6 +160,7 @@ fn main() {
                         view.connect(handle.clone(), opts, cx);
                         return view;
                     }
+                    let _ = showcase;
                     view.feed(&sample::showcase());
                     if stream {
                         view.stream(sample::bulk(10_000_000), true);

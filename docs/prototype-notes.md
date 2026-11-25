@@ -226,3 +226,36 @@ Measured against the work phase 3 took, the remaining phases come to about four 
 | 8 Wrap-up | 0.25 | Removing the dev paths, docs, PR |
 
 The largest risk left is phase 6's prompt round-trip: a russh callback waiting on a GPUI dialog. Nothing found so far changes the plan.
+
+## Milestone 2, phase 4: vault flow (25 Nov 2026)
+
+`holonet` with no arguments is now the app. It shows Create vault on first start, Locked once a vault exists, then the workspace. `HOLONET_VAULT=<file>` points it at another vault for testing. The canned terminal demo moved to `--showcase`.
+
+**Screens.**
+- *Locked* follows Locked.dc.html (card, icon tile, title, body), with the vault password field in place of Windows Hello. It has two body texts: one at startup, one after "Lock now".
+- *Create vault* is not drawn; it uses the same card. It has password and confirm fields, the 8-character minimum, and a warning that the vault cannot be recovered.
+- *Workspace*: side navigation (Hosts, Settings, the vault card with Lock now) and a Hosts empty state (phase 5 replaces it).
+- *Settings → Vault and security*, following SettingRow.md:
+  - "Unknown host keys" (Ask every time / Refuse to connect), saved in the vault
+  - "Change password", a dialog asking for the current password, the new one and a confirmation
+  - "Vault file", with "Show in folder"
+
+**Behaviour.** Argon2 runs on GPUI's background executor, so the window never freezes during unlock or a password change. Wrong passwords: no delay for the first three, then 1, 2, 4 … seconds (at most 30), with a countdown on the button. Lock now drops the workspace, which drops the unlocked vault and wipes its key. Password fields are cleared after use. A notice says when the vault was opened from its backup, and another when a save fails (the change is kept in memory).
+
+**Checked with real input against a throwaway vault:**
+- Too-short and mismatched passwords are refused with field messages.
+- Create, then the workspace opens.
+- A setting changed, then a restart, then unlock: the setting persisted.
+- Lock now shows the manual-lock text.
+- Five wrong passwords: the countdown shows, and Enter during it is ignored.
+- Change password: a wrong current password is refused. After the change, the old password fails and the new one works.
+- A damaged main file opens from the backup, with the notice.
+
+**Bug found and fixed in `holonet-vault`.** Right after a password change, the backup (the previous save) still opened only with the old password. A damaged main file at that moment would have needed the old password. `change_password` now saves twice, so the backup uses the new password too. A test covers it (13 vault tests).
+
+### GPUI layout notes (taffy)
+
+- A child sized `relative(1.)` (100%) of a parent whose width comes from flex layout can collapse. The text field's text area measured 18 px. Make such children flex items (`flex_grow 1`, `flex_basis 0`) instead.
+- A `div` in a column needs `w_full()` for its text to wrap at the column's width. Without it, wrapping is computed at the intrinsic width ("Try / again in 3 s.").
+- A plain (non-flex) wrapper shrink-wraps flex content. Use `flex().flex_col()` wrappers in forms.
+- Text without spaces never wraps, so long paths are shortened in the middle (`short_path`).

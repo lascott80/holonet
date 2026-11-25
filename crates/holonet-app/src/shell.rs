@@ -223,21 +223,24 @@ impl RenderOnce for TitleBar {
                     .child(vault)
                     .child(div().w(px(1.)).h(px(20.)).mx(px(6.)).mb(px(9.)).bg(theme::tab_divider()))
                     .children(tabs)
-                    .child(
-                        div()
-                            .id("new-tab")
-                            .size(px(36.))
-                            .mb(px(1.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme::RADIUS_SM)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::card()))
-                            .child(icon("plus", px(18.), theme::ink_muted()))
-                            .when_some(self.on_new_tab, |d, f| d.on_click(move |e, w, cx| f(e, w, cx))),
-                    ),
+                    // "+" only where it does something (milestone 2: no idle controls).
+                    .when_some(self.on_new_tab, |d, f| {
+                        d.child(
+                            div()
+                                .id("new-tab")
+                                .size(px(36.))
+                                .mb(px(1.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme::RADIUS_SM)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::card()))
+                                .child(icon("plus", px(18.), theme::ink_muted()))
+                                .on_click(move |e, w, cx| f(e, w, cx)),
+                        )
+                    }),
             )
             .child(div().id("title-drag").flex_1().min_w(px(48.)).h_full().window_control_area(WindowControlArea::Drag))
             .child(
