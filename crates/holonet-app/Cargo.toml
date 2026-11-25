@@ -1,0 +1,14 @@
+[package]
+name = "holonet-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "holonet"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
