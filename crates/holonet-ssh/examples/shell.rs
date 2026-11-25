@@ -1,6 +1,8 @@
 //! Spike 2: sign in to the WSL test server without a window and drive a shell.
 //!
-//!   cargo run -p holonet-ssh --example shell --release -- <password|ed25519|rsa|passphrase|all>
+//!   cargo run -p holonet-ssh --example shell --release -- <mode|hostkey|all>
+//!
+//! Modes: password, password-ask, ed25519, rsa, passphrase, passphrase-ask.
 //!
 //! Reads `.dev/test-server.env` (see docs/milestone-1-plan.md). For each
 //! sign-in method it opens a PTY shell, checks the size reaches the server,
@@ -10,8 +12,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use holonet_ssh::dev::{auth_for, load_env, options_from, root};
-use holonet_ssh::{ConnectOptions, HostKeyCheck, PtySize, Session, Shell, ShellEvent, ShellInput};
+use holonet_ssh::dev::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
+use holonet_ssh::{ConnectError, PtySize, Session, Shell, ShellEvent, ShellInput};
 
 /// Send a command and collect output until `marker` appears.
 async fn run_until(shell: &mut Shell, command: &str, marker: &str) -> Result<(String, usize)> {
@@ -55,6 +57,7 @@ async fn check(mode: &str, env: &HashMap<String, String>) -> Result<()> {
     let started = Instant::now();
     let session = Session::connect(opts).await?;
     let connect_ms = started.elapsed().as_millis();
+    let info = session.info().clone();
     let mut shell = session.open_shell(PtySize::cells(120, 40)).await?;
 
     let (out, _) = run_until(&mut shell, "echo SIZE$((0+1)) $(stty size) $TERM\n", "SIZE1 ").await?;
@@ -76,7 +79,11 @@ async fn check(mode: &str, env: &HashMap<String, String>) -> Result<()> {
     shell.input.send(ShellInput::Close)?;
     session.close().await?;
     println!(
-        "{mode:<10} ok  connect+auth {connect_ms} ms | {size1} | after resize {size2} | {:.1} MB in {secs:.2}s ({:.0} MB/s)",
+        "{mode:<14} ok  {connect_ms} ms via {} ({}, {}, host key {}) | {size1} | resize {size2} | {:.1} MB in {secs:.2}s ({:.0} MB/s)",
+        info.auth_method,
+        info.kex,
+        info.cipher,
+        info.host_key_type,
         bytes as f64 / 1e6,
         bytes as f64 / 1e6 / secs
     );
@@ -97,19 +104,18 @@ async fn check_host_keys(env: &HashMap<String, String>) -> Result<()> {
     std::fs::write(&changed, format!("[{}]:{} {impostor}\n", env["HOLONET_TEST_HOST"], env["HOLONET_TEST_PORT"]))?;
 
     for (label, file, expect) in
-        [("unknown key", empty, "unknown host key"), ("changed key", changed, "HOST KEY CHANGED")]
+        [("unknown key", empty, FileKeyStatus::Unknown), ("changed key", changed, FileKeyStatus::Changed)]
     {
-        let opts = ConnectOptions {
-            host: env["HOLONET_TEST_HOST"].clone(),
-            port: env["HOLONET_TEST_PORT"].parse()?,
-            user: env["HOLONET_TEST_USER"].clone(),
-            auth: auth_for("ed25519", env)?,
-            host_key: HostKeyCheck::KnownHostsFile(file),
-        };
+        let mut opts = options_from("ed25519", env)?;
+        let prompts = FilePrompts::new(file);
+        opts.prompts = prompts.clone();
+        let status = || prompts.last_status.lock().unwrap().clone();
         match Session::connect(opts).await {
             Ok(_) => bail!("{label}: connected, but it must be refused"),
-            Err(e) if format!("{e:#}").contains(expect) => println!("{label:<10} ok  refused: {e:#}"),
-            Err(e) => bail!("{label}: refused for the wrong reason: {e:#}"),
+            Err(ConnectError::HostKeyRejected) if status() == Some(expect.clone()) => {
+                println!("{label:<14} ok  refused before sign-in ({expect:?})")
+            }
+            Err(e) => bail!("{label}: refused for the wrong reason: {e:#} ({:?})", status()),
         }
     }
     Ok(())
@@ -128,8 +134,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     }
-    let modes: Vec<&str> =
-        if mode == "all" { vec!["password", "ed25519", "rsa", "passphrase"] } else { vec![mode.as_str()] };
+    let modes: Vec<&str> = if mode == "all" { MODES.to_vec() } else { vec![mode.as_str()] };
     let mut failed = false;
     for m in modes {
         if let Err(e) = check(m, &env).await {

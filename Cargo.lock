@@ -2969,7 +2969,9 @@ name = "holonet-ssh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "holonet-model",
  "russh",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

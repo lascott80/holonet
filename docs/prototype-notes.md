@@ -155,3 +155,28 @@ For milestone 3 (sessions and terminal settings) unless noted:
 | Crash check: 60 kills at random moments during back-to-back saves | Vault opened with the right password every time: 57 from the main file, 3 from the backup (killed between the two renames), 0 damaged |
 
 The planned 64 MiB default unlocked far faster than the 0.5 s budget, so the default is 256 MiB, 3 passes. Parameters are stored per slot, so they can be raised later without migration.
+
+## Milestone 2, phase 2: SSH extensions (25 Nov 2026)
+
+`holonet-ssh` now has `hostkey` and `connect` modules, and `Session::connect` returns a typed `ConnectError`.
+
+- **`Prompts` trait**: the interface's side of a connection. `host_key(PresentedKey)` returns Continue or Stop, and is awaited inside russh's `check_server_key`, before any credential is sent. `secret(SecretRequest)` asks for a password, passphrase or keyboard-interactive challenge that is not saved (`None` cancels).
+- **`classify(known, presented)`**: Trusted, Unknown or Changed against a `KnownHost`. Comments are ignored. The app applies `decisions.md`: Changed always stops; Unknown asks, or stops under "Refuse to connect".
+- **`Credential`**: `Password(Option<Secret>)` or `Key { name, private_key, passphrase }`. Keys are decoded from the vault's text with the saved passphrase, or one asked on connect.
+- **Password sign-in falls back to keyboard-interactive** when the server lists it. Hidden "password" prompts get the password once; any other question is asked of the person.
+- **Own TCP connect** (`lookup_host`, then `TcpStream` with the timeout, then `connect_stream`) so failures are typed: `Resolve`, `Refused`, `TimedOut`, `Network`, `HostKeyRejected`, `SignInRefused { method, remaining }`, `Cancelled`, `WrongPassphrase`, `BadKey`, `Protocol`.
+- **`SessionInfo`** for the status bar: key exchange and cipher (from the `kex_done` hook), host key type and key, and the sign-in method used.
+- **`dev::FilePrompts`**: trusts an OpenSSH `known_hosts` file and answers secrets from a script, for the example, the tests and `holonet --ssh`.
+
+The test server gained a second user, `holotest-kbd`, limited by a `Match User` block to keyboard-interactive only (same password, `HOLONET_TEST_KBD_USER` in `.dev/test-server.env`).
+
+| Check against the WSL server | Result |
+| --- | --- |
+| Six sign-in modes: password saved or asked, ed25519, RSA, passphrase saved or asked | All connect (72 to 157 ms). The negotiated key exchange is **`mlkem768x25519-sha256`** (post-quantum hybrid) with `chacha20-poly1305@openssh.com`. |
+| Unknown key, changed key | Both stopped as `HostKeyRejected`, and no secret was requested before the decision |
+| Wrong password | `SignInRefused`, listing `publickey` among the remaining methods |
+| Keyboard-interactive-only user | Signs in through the fallback |
+| Wrong passphrase / cancelled prompt | `WrongPassphrase` / `Cancelled` |
+| Closed port, unresolvable name, non-routable address with a 1 s timeout | `Refused`, `Resolve`, `TimedOut` (within 3 s) |
+
+Tests: 3 unit tests for `hostkey`, plus 6 integration tests in `tests/wsl.rs` that skip unless `HOLONET_TEST_SERVER=1`, so CI passes without the server.
