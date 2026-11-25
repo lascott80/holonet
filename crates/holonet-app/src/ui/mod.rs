@@ -389,8 +389,8 @@ pub fn key_values(rows: Vec<(SharedString, AnyElement)>) -> Div {
                 .px(px(14.))
                 .py(theme::SPACE_3)
                 .when(i + 1 < count, |d| d.border_b_1().border_color(theme::line_soft()))
-                .child(div().text_meta().text_color(theme::ink_muted()).child(key))
-                .child(div().text_mono().text_color(theme::ink()).child(value))
+                .child(div().flex_none().text_meta().text_color(theme::ink_muted()).child(key))
+                .child(div().min_w_0().truncate().text_mono().text_color(theme::ink()).child(value))
         },
     ))
 }

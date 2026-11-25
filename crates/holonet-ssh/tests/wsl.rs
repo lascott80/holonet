@@ -147,3 +147,19 @@ async fn network_failures_are_classified() {
     assert!(matches!(result, Err(ConnectError::TimedOut(1)) | Err(ConnectError::Network(_))), "{:?}", result.err());
     assert!(started.elapsed() < Duration::from_secs(3));
 }
+
+#[tokio::test]
+async fn probe_returns_host_key_without_signing_in() {
+    if !enabled() {
+        return;
+    }
+    let env = env();
+    let port: u16 = env["HOLONET_TEST_PORT"].parse().unwrap();
+    let key = holonet_ssh::probe(&env["HOLONET_TEST_HOST"], port, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(key.key_type_label(), "ED25519");
+    assert!(key.fingerprint.starts_with("SHA256:"));
+    assert!(matches!(
+        holonet_ssh::probe(&env["HOLONET_TEST_HOST"], 2299, Duration::from_secs(5)).await,
+        Err(ConnectError::Refused)
+    ));
+}

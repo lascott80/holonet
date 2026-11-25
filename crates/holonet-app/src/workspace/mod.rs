@@ -1,18 +1,22 @@
-//! The unlocked workspace: side navigation and pages. Phase 4 has the Hosts
-//! empty state and Settings; phases 5 to 7 add the rest.
+//! The unlocked workspace: side navigation and pages (Hosts, the host form,
+//! Settings). Phases 6 and 7 add the session tab and Known hosts.
+
+mod hosts;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px};
-use holonet_model::UnknownHostKeys;
+use holonet_model::{Host, HostId, UnknownHostKeys};
 use holonet_vault::{LockedVault, MIN_PASSWORD_LEN, UnlockedVault, VaultError};
 
 use crate::app::HolonetApp;
+use crate::host_form::{HostForm, HostFormEvent};
 use crate::shell::{NavEntry, SideNav};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{
-    Button, CalloutKind, Select, SelectEvent, TextField, TextFieldEvent, callout, dialog, dialog_buttons, field, icon,
-    modal, setting_card, setting_row, setting_row_with,
+    Button, CalloutKind, Select, SelectEvent, TextField, TextFieldEvent, callout, dialog, dialog_buttons, field, modal,
+    setting_card, setting_row, setting_row_with,
 };
 
 /// Shorten a long Windows path in the middle, keeping the drive and as many
@@ -40,6 +44,12 @@ pub fn short_path(path: &str, max: usize) -> String {
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
 const PAGES: [NavEntry; 2] = [NavEntry::Hosts, NavEntry::Settings];
 
+pub(crate) enum Page {
+    Hosts,
+    Form(Entity<HostForm>),
+    Settings,
+}
+
 struct ChangePassword {
     current: Entity<TextField>,
     new: Entity<TextField>,
@@ -53,7 +63,12 @@ pub struct Workspace {
     /// `None` only while a background task (password change) holds it.
     vault: Option<UnlockedVault>,
     path: PathBuf,
-    page: NavEntry,
+    page: Page,
+    runtime: tokio::runtime::Handle,
+    /// Hosts page: search field, cards or list, selected host.
+    search: Entity<TextField>,
+    cards: bool,
+    selected: Option<HostId>,
     restored_from_backup: bool,
     save_error: Option<SharedString>,
     notice: Option<SharedString>,
@@ -67,22 +82,34 @@ impl Workspace {
         app: WeakEntity<HolonetApp>,
         vault: UnlockedVault,
         restored_from_backup: bool,
+        runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
         let refuse = vault.data().settings.unknown_host_keys == UnknownHostKeys::Refuse;
         let unknown_keys = cx
             .new(|cx| Select::new(cx, vec!["Ask every time".into(), "Refuse to connect".into()], usize::from(refuse)));
-        let subscriptions = vec![cx.subscribe(&unknown_keys, |this: &mut Self, _, event: &SelectEvent, cx| {
-            let SelectEvent::Changed(i) = event;
-            let policy = if *i == 1 { UnknownHostKeys::Refuse } else { UnknownHostKeys::Ask };
-            this.save(|d| d.settings.unknown_host_keys = policy, cx);
-        })];
+        let search = cx.new(|cx| TextField::new(cx, "Find a host"));
+        let subscriptions = vec![
+            cx.subscribe(&unknown_keys, |this: &mut Self, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = event;
+                let policy = if *i == 1 { UnknownHostKeys::Refuse } else { UnknownHostKeys::Ask };
+                this.save(|d| d.settings.unknown_host_keys = policy, cx);
+            }),
+            cx.subscribe(&search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+                _ => cx.notify(),
+            }),
+        ];
         let path = vault.path().to_path_buf();
         Self {
             app,
             vault: Some(vault),
             path,
-            page: NavEntry::Hosts,
+            page: Page::Hosts,
+            runtime,
+            search,
+            cards: true,
+            selected: None,
             restored_from_backup,
             save_error: None,
             notice: None,
@@ -101,6 +128,45 @@ impl Workspace {
                 format!("Holonet could not save the vault: {e}. Your change is kept until you close Holonet.").into(),
             ),
         };
+        cx.notify();
+    }
+
+    /// New host (`None`) or Edit host.
+    pub(crate) fn open_form(&mut self, host: Option<Host>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
+        let keys = data.keys.clone();
+        let known = data.known_hosts.clone();
+        let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
+        let runtime = self.runtime.clone();
+        let form = cx.new(|cx| HostForm::new(host, keys, known, timeout, runtime, window, cx));
+        self._subscriptions.push(cx.subscribe(&form, |this: &mut Self, _, event: &HostFormEvent, cx| {
+            match event {
+                HostFormEvent::Saved { host, new_keys } => {
+                    let (host, new_keys) = (host.clone(), new_keys.clone());
+                    let id = host.id;
+                    this.save(
+                        move |d| {
+                            d.keys.extend(new_keys);
+                            match d.host_mut(id) {
+                                Some(existing) => *existing = host,
+                                None => d.hosts.push(host),
+                            }
+                        },
+                        cx,
+                    );
+                    this.selected = Some(id);
+                }
+                HostFormEvent::Deleted { id, forget_key } => {
+                    let (id, forget) = (*id, *forget_key);
+                    this.save(move |d| drop(d.delete_host(id, forget)), cx);
+                    this.selected = None;
+                }
+                HostFormEvent::Cancelled => {}
+            }
+            this.page = Page::Hosts;
+            cx.notify();
+        }));
+        self.page = Page::Form(form);
         cx.notify();
     }
 
@@ -171,19 +237,6 @@ impl Workspace {
             .detach();
         }
         cx.notify();
-    }
-
-    fn hosts_page(&self) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(theme::SPACE_3)
-            .child(icon("hosts", px(40.), theme::ink_faint()))
-            .child(div().text_heading().text_color(theme::ink()).child("No hosts yet"))
-            .child(div().text_body().text_color(theme::ink_muted()).child("Hosts you add appear here."))
     }
 
     fn settings_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -278,7 +331,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut notices = Vec::new();
         if self.restored_from_backup {
             notices.push((
@@ -318,9 +371,19 @@ impl Render for Workspace {
             .collect::<Vec<_>>();
 
         let entity = cx.entity();
-        let page = match self.page {
-            NavEntry::Settings => self.settings_page(cx).into_any_element(),
-            _ => self.hosts_page().into_any_element(),
+        let active = match self.page {
+            Page::Settings => NavEntry::Settings,
+            _ => NavEntry::Hosts,
+        };
+        let page = match &self.page {
+            Page::Settings => div()
+                .id("settings-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.settings_page(cx))
+                .into_any_element(),
+            Page::Form(form) => form.clone().into_any_element(),
+            Page::Hosts => self.hosts_page(window, cx),
         };
         let app = self.app.clone();
         let dialog = self.change_password_dialog(cx);
@@ -330,11 +393,11 @@ impl Render for Workspace {
             .relative()
             .flex()
             .child(
-                SideNav::new(Some(self.page), PAGES.to_vec())
+                SideNav::new(Some(active), PAGES.to_vec())
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {
-                                this.page = entry;
+                                this.page = if entry == NavEntry::Settings { Page::Settings } else { Page::Hosts };
                                 cx.notify();
                             })
                         }
@@ -344,24 +407,27 @@ impl Render for Workspace {
                     }),
             )
             .child(
+                // Pages scroll themselves (Hosts and the form keep their
+                // detail panel fixed beside the scrolling list).
                 div()
-                    .id("page")
                     .flex_1()
+                    .min_w_0()
                     .h_full()
-                    .overflow_y_scroll()
                     .bg(theme::ground())
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .px(theme::SPACE_6)
-                            .pt(theme::SPACE_4)
-                            .flex()
-                            .flex_col()
-                            .gap(theme::SPACE_2)
-                            .children(notices),
-                    )
-                    .child(div().flex_1().child(page)),
+                    .when(!notices.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .px(theme::SPACE_6)
+                                .pt(theme::SPACE_4)
+                                .flex()
+                                .flex_col()
+                                .gap(theme::SPACE_2)
+                                .children(notices),
+                        )
+                    })
+                    .child(div().flex_1().min_h_0().child(page)),
             )
             .children(dialog)
     }

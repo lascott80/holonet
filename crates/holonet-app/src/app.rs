@@ -19,10 +19,12 @@ enum Stage {
 pub struct HolonetApp {
     path: PathBuf,
     stage: Stage,
+    /// Tokio runtime where SSH work runs.
+    runtime: tokio::runtime::Handle,
 }
 
 impl HolonetApp {
-    pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: PathBuf, runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app = cx.entity().downgrade();
         let stage = if holonet_vault::exists(&path) {
             let p = path.clone();
@@ -31,13 +33,14 @@ impl HolonetApp {
             let p = path.clone();
             Stage::Create(cx.new(|cx| CreateVault::new(app, p, window, cx)))
         };
-        Self { path, stage }
+        Self { path, stage, runtime }
     }
 
     /// The vault was created or unlocked.
     pub fn opened(&mut self, vault: UnlockedVault, restored_from_backup: bool, cx: &mut Context<Self>) {
         let app = cx.entity().downgrade();
-        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, cx)));
+        let runtime = self.runtime.clone();
+        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, cx)));
         cx.notify();
     }
 

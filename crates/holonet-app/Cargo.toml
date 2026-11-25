@@ -17,5 +17,6 @@ gpui.workspace = true
 holonet-model = { version = "0.1.0", path = "../holonet-model" }
 holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
 holonet-vault = { version = "0.1.0", path = "../holonet-vault" }
+jiff = "1.0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 unicode-segmentation = "1.13.3"

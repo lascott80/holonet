@@ -11,6 +11,7 @@
 mod connect;
 pub mod dev;
 pub mod hostkey;
+pub mod keys;
 
 use anyhow::Result;
 use russh::{ChannelMsg, Disconnect};
@@ -18,9 +19,10 @@ use tokio::sync::mpsc;
 
 pub use connect::{
     BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KEEPALIVE, Prompts, SecretRequest,
-    SessionInfo,
+    SessionInfo, probe,
 };
 pub use hostkey::{KeyStatus, PresentedKey, classify, fingerprint};
+pub use keys::{KeyFileError, KeyInfo, algorithm_label, inspect_private_key};
 
 /// Output chunks buffered before the reader applies back-pressure.
 const OUTPUT_BUFFER: usize = 256;

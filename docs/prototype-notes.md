@@ -259,3 +259,44 @@ The largest risk left is phase 6's prompt round-trip: a russh callback waiting o
 - A `div` in a column needs `w_full()` for its text to wrap at the column's width. Without it, wrapping is computed at the intrinsic width ("Try / again in 3 s.").
 - A plain (non-flex) wrapper shrink-wraps flex content. Use `flex().flex_col()` wrappers in forms.
 - Text without spaces never wraps, so long paths are shortened in the middle (`short_path`).
+
+## Milestone 2, phase 5: Hosts and the host form (25 Nov 2026)
+
+**Hosts page** (Main.dc.html):
+- Header with the host count, "Find a host" search (label, address, user and tags; Escape clears it) and New host.
+- "All hosts" with a Cards/List toggle. Cards use a grid whose column count follows the window width (GPUI grids take a fixed count).
+- The detail panel shows the role icon tile, last connected, address, port, user, sign-in, host key (fingerprint if trusted, otherwise "Not trusted yet") and tags, with Edit and Duplicate. Double-clicking a card or row edits the host.
+- An empty vault shows a welcome in FirstRun's layout, without the import cards (milestone 7). A search with no results shows "No hosts match" with Clear search.
+
+**Host form** (NewHost/EditHost.dc.html), with the milestone 2 fields:
+- General: label, primary address (required), port, tags.
+- Credentials: username; SSH key or Password. A key comes from a select of vault keys plus "Import key file…". An encrypted key adds a passphrase field with "Save passphrase in the encrypted vault". Password adds "Save in the encrypted vault".
+- Connection: keep connection alive.
+- The aside shows the live title, the equivalent `ssh` command, a summary, problems (after the first Save), Test connection, and Save / Delete host / Cancel. On a narrow window it stacks below the form.
+- The delete dialog has "Also forget its server key in Known hosts".
+- "Save and connect" and the detail panel's Connect arrive in phase 6.
+
+**`holonet-ssh` additions:**
+- `inspect_private_key` reads OpenSSH keys' public half and encryption flag without the passphrase, and decodes unencrypted PEM/PKCS#8. It refuses encrypted PEM (with a `ssh-keygen -p` hint) and public keys.
+- `probe(host, port, timeout)` runs TCP and the key exchange, captures the host key and stops before sign-in. This is "Test connection".
+- Tests: 2 unit tests for key inspection (the second reads the `.dev` keys when present), plus a `probe` integration test against WSL.
+
+**Checked with real input against a throwaway vault and the WSL server:**
+- New host from the welcome screen, with live updates to the title and equivalent command.
+- Test connection: "Reachable. Host key not yet trusted" with the server's real fingerprint.
+- Import of the passphrase key through the Windows file dialog: recognised as encrypted Ed25519, passphrase saved.
+- Save, then the card and detail panel.
+- Edit (label added; Enter saves), Duplicate (selected afterwards), List view, search.
+- Restart and unlock: both hosts and the key persisted.
+- Delete through the warning dialog.
+- Validation: `root@pi` refused with the address message.
+
+**Fixed during the pass:**
+- The key-value values overflowed the panel; they now shrink and clip.
+- The list's Address column was cut so `:2222` read as `:22`; it is wider now.
+- The Import button stretched to full width.
+
+**Known gaps:**
+- GPUI 0.2.2 clips truncated text but draws no "…", even with `text_ellipsis`.
+- Every host shows "No group" until milestone 6.
+- The role icon has no chooser yet (the design draws none); every host is a server.

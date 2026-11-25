@@ -329,3 +329,44 @@ async fn keyboard_interactive(
     }
     Err(ConnectError::SignInRefused { method: "keyboard-interactive", remaining: Vec::new() })
 }
+
+/// Records the presented key and stops the handshake: no credentials are sent.
+struct Capture(Mutex<Option<PresentedKey>>);
+
+impl Prompts for Capture {
+    fn host_key(&self, key: PresentedKey) -> BoxFuture<HostKeyDecision> {
+        *self.0.lock().unwrap() = Some(key);
+        Box::pin(async { HostKeyDecision::Stop })
+    }
+
+    fn secret(&self, _: SecretRequest) -> BoxFuture<Option<Secret>> {
+        Box::pin(async { None })
+    }
+}
+
+/// "Test connection": open TCP, run the key exchange, and return the host
+/// key the server presents. Stops before sign-in, so nothing is sent but the
+/// SSH handshake.
+pub async fn probe(host: &str, port: u16, timeout: Duration) -> Result<PresentedKey, ConnectError> {
+    let stream = open_tcp(host, port, timeout).await?;
+    let capture = Arc::new(Capture(Mutex::new(None)));
+    let handler = Handler {
+        host: host.to_string(),
+        port,
+        prompts: capture.clone(),
+        info: Arc::new(Mutex::new(SessionInfo::default())),
+        rejected: Arc::new(Mutex::new(false)),
+    };
+    let config = Arc::new(client::Config::default());
+    let handshake = client::connect_stream(config, stream, handler);
+    match tokio::time::timeout(timeout, handshake).await {
+        Err(_) => Err(ConnectError::TimedOut(timeout.as_secs())),
+        Ok(result) => {
+            if let Ok(handle) = result {
+                // Not expected: the capture always stops. Close politely.
+                let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+            }
+            capture.0.lock().unwrap().take().ok_or_else(|| ConnectError::Protocol("no host key was presented".into()))
+        }
+    }
+}

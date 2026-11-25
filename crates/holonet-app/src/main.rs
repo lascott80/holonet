@@ -14,6 +14,7 @@ mod app;
 mod assets;
 mod font_check;
 mod gallery;
+mod host_form;
 mod input;
 mod sample;
 // Design-system modules: parts are used by later phases of milestone 2.
@@ -142,7 +143,8 @@ fn main() {
                 window_min_size: Some(size(px(720.), px(520.))),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| cx.new(|cx| app::HolonetApp::new(path, window, cx)))
+            let runtime = handle.clone();
+            cx.open_window(options, |window, cx| cx.new(|cx| app::HolonetApp::new(path, runtime, window, cx)))
                 .expect("failed to open window");
             cx.activate(true);
             return;
