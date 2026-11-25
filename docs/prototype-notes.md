@@ -135,3 +135,23 @@ For milestone 3 (sessions and terminal settings) unless noted:
 5. **Not yet tested**: IME composition (Japanese and Chinese input), dead keys, focus in/out reporting, the kitty keyboard protocol, cursor blink, and window titles from `OSC 0/2`.
 6. **Host key prompt** (milestone 2): unknown keys are refused today, not offered as "Trust and connect".
 7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault.
+
+## Milestone 2, phases 0 and 1 (25 Nov 2026)
+
+**CI** (`.github/workflows/ci.yml`): `cargo fmt --check`, `clippy -D warnings` and tests on `windows-latest` (x64), plus the same on `windows-11-arm` marked experimental until we know whether this private repository can use that runner. `rustfmt.toml` sets a 120-column width.
+
+**`holonet-model`**: hosts, stored keys, known hosts and settings as serde data; `Secret` wipes itself and is redacted in `Debug`; address and port validation; delete-host keeps the server key unless asked and no other host shares it. 6 tests.
+
+**`holonet-vault`**: the file format in the crate docs (magic, version, JSON header with key slots, XChaCha20-Poly1305 body with the header as associated data). 12 tests: round trip, nothing readable on disk, wrong password, short password, no overwrite, tampering with body or header, newer format refused, backup fallback (missing, unreadable, or damaged main file), password change, slot parameters.
+
+| Measurement (Snapdragon X2 Plus, release) | Result |
+| --- | --- |
+| Argon2id unlock, 19 MiB t=2 (OWASP minimum) | 12 ms |
+| 64 MiB t=3 (planned default) | 78 ms |
+| 128 MiB t=3 | 154 ms |
+| **256 MiB t=3 (chosen default)** | **326 ms** |
+| 512 MiB t=2 | 520 ms |
+| `p=4` vs `p=1` at 64 MiB | No faster (the `argon2` crate runs lanes serially without its `parallel` feature) |
+| Crash check: 60 kills at random moments during back-to-back saves | Vault opened with the right password every time: 57 from the main file, 3 from the backup (killed between the two renames), 0 damaged |
+
+The planned 64 MiB default unlocked far faster than the 0.5 s budget, so the default is 256 MiB, 3 passes. Parameters are stored per slot, so they can be raised later without migration.

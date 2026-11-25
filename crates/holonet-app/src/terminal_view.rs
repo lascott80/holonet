@@ -20,8 +20,7 @@ use anyhow::anyhow;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
-    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb,
-    size,
+    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use holonet_ssh::{ConnectOptions, PtySize, Session, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
@@ -101,10 +100,7 @@ impl TerminalView {
         let family = crate::pick_font(&text.all_font_names());
         let font = font(family);
         let font_id = text.resolve_font(&font);
-        let cell_width = text
-            .advance(font_id, px(FONT_SIZE), 'M')
-            .map(|s| s.width)
-            .unwrap_or(px(FONT_SIZE * 0.6));
+        let cell_width = text.advance(font_id, px(FONT_SIZE), 'M').map(|s| s.width).unwrap_or(px(FONT_SIZE * 0.6));
         let focus = cx.focus_handle();
         window.focus(&focus);
         let mut view = Self {
@@ -470,9 +466,15 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| this.on_scroll(event, cx)))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| this.on_mouse_move(event, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)),
+            )
             .child(
                 div().flex_1().p(px(PADDING)).child(
                     canvas(
@@ -514,7 +516,8 @@ fn paint_grid(
 ) {
     let origin = bounds.origin;
     let font_size = px(FONT_SIZE);
-    let cell_at = |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
+    let cell_at =
+        |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
 
     for (row, runs) in snap.lines.iter().enumerate() {
         for run in runs {
@@ -537,7 +540,11 @@ fn paint_grid(
                 },
                 color,
                 background_color: None,
-                underline: run.underline.then_some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false }),
+                underline: run.underline.then_some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: false,
+                }),
                 strikethrough: run.strikeout.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
             };
             // Force one glyph per cell, except for runs holding a wide char
@@ -557,9 +564,11 @@ fn paint_grid(
                 Bounds::new(point(at.x, at.y + line_height - px(2.)), size(cell_width, px(2.))),
                 cursor,
             )),
-            CursorShape::HollowBlock => {
-                window.paint_quad(gpui::outline(Bounds::new(at, size(cell_width, line_height)), cursor, gpui::BorderStyle::Solid))
-            }
+            CursorShape::HollowBlock => window.paint_quad(gpui::outline(
+                Bounds::new(at, size(cell_width, line_height)),
+                cursor,
+                gpui::BorderStyle::Solid,
+            )),
             _ => {
                 window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));
                 if !snap.cursor_char.is_whitespace() {

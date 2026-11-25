@@ -39,8 +39,8 @@ pub mod palette {
     /// `accent` at about 30% over `terminal`. Provisional, like the ANSI set.
     pub const SELECTION: u32 = 0x274758;
     pub const ANSI: [u32; 16] = [
-        0x2A2A2A, 0xF0776C, 0x7FD6B5, 0xF2A65A, 0x5CC8FF, 0xB9A5FF, 0x6FD3D6, 0xCFCFCF,
-        0x666666, 0xFF9A90, 0xA3EBCF, 0xFFC285, 0x8FDBFF, 0xD3C6FF, 0x9AE6E8, 0xEDEDED,
+        0x2A2A2A, 0xF0776C, 0x7FD6B5, 0xF2A65A, 0x5CC8FF, 0xB9A5FF, 0x6FD3D6, 0xCFCFCF, 0x666666, 0xFF9A90, 0xA3EBCF,
+        0xFFC285, 0x8FDBFF, 0xD3C6FF, 0x9AE6E8, 0xEDEDED,
     ];
 }
 
@@ -218,11 +218,14 @@ impl TerminalModel {
 
         let cursor = content.cursor;
         let cursor_char = self.term.grid()[cursor.point].c;
-        let cursor =(content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden)
+        let cursor = (content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden)
             .then(|| {
                 let row = cursor.point.line.0 + display_offset as i32;
-                (row >= 0 && (row as usize) < self.size.rows)
-                    .then_some((row as usize, cursor.point.column.0, cursor.shape))
+                (row >= 0 && (row as usize) < self.size.rows).then_some((
+                    row as usize,
+                    cursor.point.column.0,
+                    cursor.shape,
+                ))
             })
             .flatten();
 
@@ -346,11 +349,8 @@ mod tests {
         t.update_selection(1, 5, true);
         assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
         let s = t.snapshot();
-        let highlighted: String = s.lines[0]
-            .iter()
-            .filter(|r| r.bg == Some(palette::SELECTION))
-            .map(|r| r.text.as_str())
-            .collect();
+        let highlighted: String =
+            s.lines[0].iter().filter(|r| r.bg == Some(palette::SELECTION)).map(|r| r.text.as_str()).collect();
         assert!(highlighted.starts_with("world"));
         t.clear_selection();
         assert_eq!(t.selection_text(), None);

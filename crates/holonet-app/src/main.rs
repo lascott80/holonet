@@ -30,11 +30,7 @@ pub const FONT_PREFERENCE: &[&str] = &[
 
 /// First preferred font that is installed.
 pub fn pick_font(installed: &[String]) -> &'static str {
-    FONT_PREFERENCE
-        .iter()
-        .find(|name| installed.iter().any(|f| f == *name))
-        .copied()
-        .unwrap_or("Consolas")
+    FONT_PREFERENCE.iter().find(|name| installed.iter().any(|f| f == *name)).copied().unwrap_or("Consolas")
 }
 
 fn parse_bench() {
@@ -91,10 +87,7 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1000.), px(640.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            ..Default::default()
-        };
+        let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         if fonts {
             cx.open_window(options, |window, cx| cx.new(|_| font_check::FontCheck::new(window)))
                 .expect("failed to open window");

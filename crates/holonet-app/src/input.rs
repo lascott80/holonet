@@ -25,14 +25,19 @@ pub fn encode(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let ss3_f = |letter: char| -> Vec<u8> {
         if param > 1 { format!("\x1b[1;{param}{letter}") } else { format!("\x1bO{letter}") }.into_bytes()
     };
-    let alt_prefixed = |bytes: Vec<u8>| -> Vec<u8> {
-        if m.alt { [b"\x1b".as_slice(), &bytes].concat() } else { bytes }
-    };
+    let alt_prefixed =
+        |bytes: Vec<u8>| -> Vec<u8> { if m.alt { [b"\x1b".as_slice(), &bytes].concat() } else { bytes } };
 
     let bytes = match ks.key.as_str() {
         "enter" => alt_prefixed(b"\r".to_vec()),
         "backspace" => alt_prefixed(if m.control { vec![0x08] } else { vec![0x7f] }),
-        "tab" => if m.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
+        "tab" => {
+            if m.shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }
+        }
         "escape" => alt_prefixed(b"\x1b".to_vec()),
         "space" if m.control => vec![0],
         "up" => csi_letter('A'),

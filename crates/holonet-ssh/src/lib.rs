@@ -107,30 +107,23 @@ pub struct Session {
 
 impl Session {
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(KEEPALIVE),
-            ..Default::default()
-        });
+        let config = Arc::new(client::Config { keepalive_interval: Some(KEEPALIVE), ..Default::default() });
         let status = Arc::new(Mutex::new(None));
-        let handler = Handler {
-            host: opts.host.clone(),
-            port: opts.port,
-            check: opts.host_key.clone(),
-            status: status.clone(),
-        };
+        let handler =
+            Handler { host: opts.host.clone(), port: opts.port, check: opts.host_key.clone(), status: status.clone() };
 
         let connected = client::connect(config, (opts.host.as_str(), opts.port), handler).await;
         let mut handle = match connected {
             Ok(handle) => handle,
             Err(err) => {
                 return Err(match status.lock().unwrap().clone() {
-                    Some(HostKeyStatus::Unknown { fingerprint }) => anyhow!(
-                        "unknown host key for {}:{} ({fingerprint}); not in known_hosts",
-                        opts.host, opts.port
-                    ),
+                    Some(HostKeyStatus::Unknown { fingerprint }) => {
+                        anyhow!("unknown host key for {}:{} ({fingerprint}); not in known_hosts", opts.host, opts.port)
+                    }
                     Some(HostKeyStatus::Changed { fingerprint, line }) => anyhow!(
                         "HOST KEY CHANGED for {}:{} (now {fingerprint}, known_hosts line {line}); connection stopped",
-                        opts.host, opts.port
+                        opts.host,
+                        opts.port
                     ),
                     _ => anyhow::Error::new(err).context(format!("connecting to {}:{}", opts.host, opts.port)),
                 });
@@ -138,10 +131,9 @@ impl Session {
         };
 
         let result = match &opts.auth {
-            Auth::Password(password) => handle
-                .authenticate_password(&opts.user, password)
-                .await
-                .context("password sign-in")?,
+            Auth::Password(password) => {
+                handle.authenticate_password(&opts.user, password).await.context("password sign-in")?
+            }
             Auth::KeyFile { path, passphrase } => {
                 let key = load_secret_key(path, passphrase.as_deref())
                     .with_context(|| format!("loading key {}", path.display()))?;

@@ -54,7 +54,9 @@ pub fn showcase() -> Vec<u8> {
     s.push_str("Wide: 日本語テキスト | 한국어 | emoji 🚀✨ | after\r\n");
     s.push_str("Ligatures: -> => != === <= >= :: |> <!-- -->\r\n");
     s.push_str("┌──────────┬────────┐\r\n│ host     │ status │\r\n├──────────┼────────┤\r\n");
-    s.push_str("│ pi-garage│ \x1b[32m● up\x1b[0m   │\r\n│ nas      │ \x1b[33m● warn\x1b[0m │\r\n└──────────┴────────┘\r\n");
+    s.push_str(
+        "│ pi-garage│ \x1b[32m● up\x1b[0m   │\r\n│ nas      │ \x1b[33m● warn\x1b[0m │\r\n└──────────┴────────┘\r\n",
+    );
     s.push_str(&prompt(""));
     // Leave the cursor after the final prompt, without the trailing newline.
     while s.ends_with("\r\n") {

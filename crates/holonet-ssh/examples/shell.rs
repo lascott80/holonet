@@ -96,7 +96,9 @@ async fn check_host_keys(env: &HashMap<String, String>) -> Result<()> {
     let changed = dir.join("changed_known_hosts");
     std::fs::write(&changed, format!("[{}]:{} {impostor}\n", env["HOLONET_TEST_HOST"], env["HOLONET_TEST_PORT"]))?;
 
-    for (label, file, expect) in [("unknown key", empty, "unknown host key"), ("changed key", changed, "HOST KEY CHANGED")] {
+    for (label, file, expect) in
+        [("unknown key", empty, "unknown host key"), ("changed key", changed, "HOST KEY CHANGED")]
+    {
         let opts = ConnectOptions {
             host: env["HOLONET_TEST_HOST"].clone(),
             port: env["HOLONET_TEST_PORT"].parse()?,
@@ -122,13 +124,12 @@ async fn main() -> Result<()> {
             println!("host keys FAILED: {e:#}");
             std::process::exit(1);
         }
-        if mode == "hostkey" { return Ok(()); }
+        if mode == "hostkey" {
+            return Ok(());
+        }
     }
-    let modes: Vec<&str> = if mode == "all" {
-        vec!["password", "ed25519", "rsa", "passphrase"]
-    } else {
-        vec![mode.as_str()]
-    };
+    let modes: Vec<&str> =
+        if mode == "all" { vec!["password", "ed25519", "rsa", "passphrase"] } else { vec![mode.as_str()] };
     let mut failed = false;
     for m in modes {
         if let Err(e) = check(m, &env).await {
@@ -136,6 +137,8 @@ async fn main() -> Result<()> {
             failed = true;
         }
     }
-    if failed { std::process::exit(1) }
+    if failed {
+        std::process::exit(1)
+    }
     Ok(())
 }
