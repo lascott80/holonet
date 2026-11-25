@@ -42,7 +42,7 @@ Each spike stands alone, so a failure points at one library.
 
 1. **GPUI window on ARM64.** *Passed 25 Nov 2026; see `docs/prototype-notes.md`.* An empty window with text drawn in JetBrainsMono Nerd Font. This proves the DirectX 11 renderer and font loading. If it fails, stop and re-assess against the Tauri fallback before doing anything else.
 2. **russh headless.** *Passed 25 Nov 2026; see `docs/prototype-notes.md`.* The `holonet-ssh` CLI example connects, signs in with a password and with a key, and runs a shell. Try `aws-lc-rs` (the default) first, then `ring`; record which one builds.
-3. **Terminal grid in GPUI.** `alacritty_terminal::Term` fed from a local byte source (canned ANSI output, no network). Render the grid cell by cell with colors, cursor and Nerd Font glyphs.
+3. **Terminal grid in GPUI.** *Passed 25 Nov 2026; see `docs/prototype-notes.md`.* `alacritty_terminal::Term` fed from a local byte source (canned ANSI output, no network). Render the grid cell by cell with colors, cursor and Nerd Font glyphs.
 4. **Wire together.** SSH channel bytes go into the terminal parser, and keystrokes are encoded and sent to the channel. Run SSH on a Tokio runtime and send updates into GPUI through a channel, so the network never blocks the UI thread.
 
 ## Step 3: terminal behaviour

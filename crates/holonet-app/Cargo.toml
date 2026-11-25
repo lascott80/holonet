@@ -11,4 +11,5 @@ name = "holonet"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal = "0.26"
 gpui.workspace = true
