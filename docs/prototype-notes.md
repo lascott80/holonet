@@ -300,3 +300,49 @@ The largest risk left is phase 6's prompt round-trip: a russh callback waiting o
 - GPUI 0.2.2 clips truncated text but draws no "…", even with `text_ellipsis`.
 - Every host shows "No group" until milestone 6.
 - The role icon has no chooser yet (the design draws none); every host is a server.
+
+## Milestone 2, phase 6: session tabs (25 Nov 2026)
+
+Connect from the Hosts detail panel, by double-clicking a card or row, or with "Save and connect" on the form. Each connection opens a session tab (`session.rs`).
+
+**How it fits together.**
+- `SessionTab` owns the `Session` and an embedded `TerminalView`. The SSH work runs on Tokio.
+- `UiPrompts` implements `holonet_ssh::Prompts` by sending each question (host key, password, passphrase, challenge) over a channel to the tab, and awaits the reply on a `oneshot`. Neither side blocks.
+- Sessions belong to `HolonetApp`, not the workspace, so "Lock now" (which drops the workspace and its vault) leaves them connected. The Locked screen says how many are open, and they reappear on unlock (decisions.md).
+- The title bar lists session tabs (state dot: ring while connecting, solid when connected, amber when failed or ended). "+" goes to Hosts, × disconnects. The session view has the 56 px icon rail (Hosts, Terminal, Settings).
+- The terminal view gained `attach(shell)`, an embedded mode, and sizing from its own canvas (measured at paint, applied next frame, sent to the server).
+
+**States drawn** (HostKey.dc.html, ConnectStates.dc.html, Terminal.dc.html):
+- Connecting: spinner, a log above it, and Cancel.
+- First-connection host key prompt: Trust and connect / Connect once / Cancel, with the fingerprint and Copy.
+- Changed key: trusted and presented fingerprints side by side and Disconnect. "I expected this change" opens "Replace trusted key and connect".
+- Secret prompts: password, passphrase or challenge, with "Save in the encrypted vault".
+- Failures: could not reach, did not answer, password refused (Enter password), key refused, wrong passphrase (Enter passphrase), refused by "Refuse to connect". Each offers Retry or Edit host and Close tab.
+- Session ended: the terminal dims, with Reconnect and Close tab.
+- Status bar: state, cipher, key exchange, sign-in; "xterm-256color · UTF-8".
+
+**Host key rules (decisions.md).**
+- A trusted key connects silently and updates "last matched".
+- An unknown key asks, or is refused under "Refuse to connect".
+- A changed key always stops the connection before credentials. The presented key is recorded as `mismatch` for Known hosts, and replacing it starts a fresh connection.
+
+**Checked with real input against the WSL server and a temporary second sshd** (port 2223, swapped between two throwaway host keys):
+
+| Check | Result |
+| --- | --- |
+| First connect | Prompt with the server's real fingerprint; Trust and connect; passphrase key from the vault; terminal 150×28, which matches `stty size` |
+| Lock with the session open, then unlock | The Locked screen lists 1 open session; a `sleep 4; echo` started before locking had printed when the tab came back |
+| `exit` | Session ended bar, then Reconnect with no prompt (key trusted) |
+| Password host, asked on connect | Trust; wrong password; "The server refused the password" (about 6 s: PAM delays failures, and the keyboard-interactive fallback tries once more); Enter password; connected; password saved only after success |
+| Host key swapped on the server | The changed-key view stops the connection; Replace trusted key and connect works and uses the saved password |
+| "Refuse to connect" with an unknown key | Refused before credentials, with the explanation |
+| Cancel at the prompt | The tab closes and Hosts shows again |
+
+**Bugs found and fixed during the pass:**
+1. **Crash on Connect.** The new tab read the app while the app was creating it (GPUI double-lease panic). The connect timeout is now passed in.
+2. **A mistyped password was saved** with "Save in the encrypted vault" ticked. Typed secrets are now saved only after the server accepts them.
+3. **Prompt fields and the terminal did not take focus**: they were created without a window. Focus is now applied at the next render.
+4. **Tall prompt cards were clipped.** The prompt area now scrolls, with spacers keeping cards centred.
+5. **Singular wording on the Locked screen.**
+
+**Not in milestone 2:** split panes, find, broadcast, snippets, automatic reconnect (milestone 3), and a dedicated key-refused screen variant.

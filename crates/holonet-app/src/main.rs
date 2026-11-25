@@ -17,6 +17,7 @@ mod gallery;
 mod host_form;
 mod input;
 mod sample;
+mod session;
 // Design-system modules: parts are used by later phases of milestone 2.
 #[allow(dead_code)]
 mod shell;

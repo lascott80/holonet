@@ -20,7 +20,7 @@ use crate::ui::{
 };
 
 pub enum HostFormEvent {
-    Saved { host: Host, new_keys: Vec<StoredKey> },
+    Saved { host: Host, new_keys: Vec<StoredKey>, connect: bool },
     Cancelled,
     Deleted { id: HostId, forget_key: bool },
 }
@@ -211,7 +211,11 @@ impl HostForm {
         problems
     }
 
-    fn save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_with(false, window, cx)
+    }
+
+    fn save_with(&mut self, connect: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_problems = true;
         if self.problems(cx).is_empty() {
             let host = self.build(cx);
@@ -221,7 +225,7 @@ impl HostForm {
                 Auth::Password { .. } => None,
             };
             let new_keys = self.new_keys.iter().filter(|k| Some(k.id) == used).cloned().collect();
-            cx.emit(HostFormEvent::Saved { host, new_keys });
+            cx.emit(HostFormEvent::Saved { host, new_keys, connect });
         }
         cx.notify();
     }
@@ -550,7 +554,12 @@ impl Render for HostForm {
                     .flex_col()
                     .gap(theme::SPACE_2)
                     .child(
-                        Button::primary("save", if editing { "Save changes" } else { "Save" })
+                        Button::primary("save-connect", "Save and connect")
+                            .full_width()
+                            .on_click(cx.listener(|this, _, window, cx| this.save_with(true, window, cx))),
+                    )
+                    .child(
+                        Button::secondary("save", if editing { "Save changes" } else { "Save" })
                             .full_width()
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     )

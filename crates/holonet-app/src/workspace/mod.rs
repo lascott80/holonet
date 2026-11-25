@@ -3,6 +3,8 @@
 
 mod hosts;
 
+pub use hosts::format_date;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -120,7 +122,7 @@ impl Workspace {
     }
 
     /// Change the vault and save it, reporting a failed save.
-    fn save(&mut self, change: impl FnOnce(&mut holonet_model::VaultData), cx: &mut Context<Self>) {
+    pub(crate) fn save(&mut self, change: impl FnOnce(&mut holonet_model::VaultData), cx: &mut Context<Self>) {
         let Some(vault) = self.vault.as_mut() else { return };
         self.save_error = match vault.update(change) {
             Ok(()) => None,
@@ -139,35 +141,60 @@ impl Workspace {
         let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
         let runtime = self.runtime.clone();
         let form = cx.new(|cx| HostForm::new(host, keys, known, timeout, runtime, window, cx));
-        self._subscriptions.push(cx.subscribe(&form, |this: &mut Self, _, event: &HostFormEvent, cx| {
-            match event {
-                HostFormEvent::Saved { host, new_keys } => {
-                    let (host, new_keys) = (host.clone(), new_keys.clone());
-                    let id = host.id;
-                    this.save(
-                        move |d| {
-                            d.keys.extend(new_keys);
-                            match d.host_mut(id) {
-                                Some(existing) => *existing = host,
-                                None => d.hosts.push(host),
-                            }
-                        },
-                        cx,
-                    );
-                    this.selected = Some(id);
+        self._subscriptions.push(cx.subscribe_in(
+            &form,
+            window,
+            |this: &mut Self, _, event: &HostFormEvent, window, cx| {
+                match event {
+                    HostFormEvent::Saved { host, new_keys, connect } => {
+                        let (host, new_keys) = (host.clone(), new_keys.clone());
+                        let id = host.id;
+                        this.save(
+                            move |d| {
+                                d.keys.extend(new_keys);
+                                match d.host_mut(id) {
+                                    Some(existing) => *existing = host,
+                                    None => d.hosts.push(host),
+                                }
+                            },
+                            cx,
+                        );
+                        this.selected = Some(id);
+                        if *connect {
+                            this.connect(id, window, cx);
+                        }
+                    }
+                    HostFormEvent::Deleted { id, forget_key } => {
+                        let (id, forget) = (*id, *forget_key);
+                        this.save(move |d| drop(d.delete_host(id, forget)), cx);
+                        this.selected = None;
+                    }
+                    HostFormEvent::Cancelled => {}
                 }
-                HostFormEvent::Deleted { id, forget_key } => {
-                    let (id, forget) = (*id, *forget_key);
-                    this.save(move |d| drop(d.delete_host(id, forget)), cx);
-                    this.selected = None;
-                }
-                HostFormEvent::Cancelled => {}
-            }
-            this.page = Page::Hosts;
-            cx.notify();
-        }));
+                this.page = Page::Hosts;
+                cx.notify();
+            },
+        ));
         self.page = Page::Form(form);
         cx.notify();
+    }
+
+    pub(crate) fn vault_data(&self) -> Option<&holonet_model::VaultData> {
+        self.vault.as_ref().map(|v| v.data())
+    }
+
+    pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.page = page;
+        cx.notify();
+    }
+
+    /// Ask the app to open a session tab. Deferred: the app reads this
+    /// workspace while connecting, which would clash with this update.
+    pub(crate) fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, cx| app.connect(id, window, cx));
+        });
     }
 
     fn open_change_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {

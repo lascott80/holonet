@@ -190,6 +190,8 @@ pub struct Locked {
     failures: u32,
     retry_at: Option<Instant>,
     busy: bool,
+    /// Sessions that stay connected while locked.
+    open_sessions: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -198,6 +200,7 @@ impl Locked {
         app: WeakEntity<HolonetApp>,
         path: PathBuf,
         reason: LockReason,
+        open_sessions: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -213,6 +216,7 @@ impl Locked {
             failures: 0,
             retry_at: None,
             busy: false,
+            open_sessions,
             _subscriptions: subscriptions,
         }
     }
@@ -312,7 +316,28 @@ impl Render for Locked {
                         .full_width()
                         .disabled(self.busy || waiting.is_some())
                         .on_click(cx.listener(|this, _, window, cx| this.unlock(window, cx))),
-                ),
+                )
+                .when(self.open_sessions > 0, |d| {
+                    let n = self.open_sessions;
+                    d.child(
+                        div()
+                            .w_full()
+                            .pt(theme::SPACE_3)
+                            .border_t_1()
+                            .border_color(theme::line())
+                            .text_meta()
+                            .text_color(theme::ink_muted())
+                            .text_center()
+                            .child(SharedString::from(if n == 1 {
+                                "1 session is open. It stays connected in the background and reappears when you unlock."
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "{n} sessions are open. They stay connected in the background and reappear when you unlock."
+                                )
+                            })),
+                    )
+                }),
         )
     }
 }

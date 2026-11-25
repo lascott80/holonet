@@ -299,7 +299,7 @@ impl Workspace {
             .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
                 this.selected = Some(id);
                 if e.click_count() >= 2 {
-                    this.edit_host(id, window, cx);
+                    this.connect(id, window, cx);
                 }
                 cx.notify();
             }))
@@ -436,6 +436,11 @@ impl Workspace {
             })
             .child(div().flex_1())
             .child(
+                Button::primary("connect-host", "Connect")
+                    .full_width()
+                    .on_click(cx.listener(move |this, _, window, cx| this.connect(id, window, cx))),
+            )
+            .child(
                 div()
                     .flex()
                     .gap(theme::SPACE_2)
@@ -456,7 +461,7 @@ impl Workspace {
             )
     }
 
-    pub(super) fn edit_host(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn edit_host(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.vault.as_ref().and_then(|v| v.data().host(id).cloned());
         if host.is_some() {
             self.open_form(host, window, cx);
