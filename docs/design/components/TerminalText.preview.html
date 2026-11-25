@@ -1,0 +1,21 @@
+<!-- @dsCard group="Sessions" height=196 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TerminalText</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;padding:var(--space-5);background:var(--ground);color:var(--ink);font:14px/1.5 var(--font-sans);display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:center}button{font:inherit;cursor:pointer}
+body{display:block;background:var(--sunken)}.t{background:var(--terminal);border:1px solid var(--line);border-top:2px solid var(--accent);border-radius:var(--radius-md);padding:14px 16px;font:13px/1.6 var(--font-mono);color:var(--ink-soft);white-space:pre;overflow-x:auto}.p{color:var(--accent);font-weight:500}.d{color:var(--ink-dim)}.c{color:var(--ink)}.ok{color:var(--group-mint)}.n{color:var(--group-violet)}.w{color:var(--warn)}.cur{display:inline-block;width:8px;height:16px;background:var(--ink);vertical-align:text-bottom}
+</style>
+</head>
+<body>
+<div class="t"><span class="p">deploy@prod-web-01</span><span class="d">:</span>~<span class="d">$ </span><span class="c">systemctl status nginx</span>
+<span class="ok">●</span> <span class="c">nginx.service - A high performance web server</span>
+<span class="d">     Active: </span><span class="ok">active (running)</span><span class="d"> since Mon 2026-11-23 08:14:02 UTC</span>
+<span class="d">   Main PID: </span><span class="n">1042</span> (nginx)
+<span class="d">Nov 25 12:41:22 app[2210]: </span><span class="w">WARN queue depth 48</span>
+<span class="p">deploy@prod-web-01</span><span class="d">:</span>/srv/app<span class="d">$ </span><span class="cur"></span></div>
+</body>
+</html>

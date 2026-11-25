@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Holonet snippets</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/holonet/tokens.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;background:var(--ground, #121212)}
+a{color:var(--ink-muted, #A3A3A3);text-decoration:none}a:hover{color:var(--ink, #EDEDED)}
+button{font:inherit;cursor:pointer}
+.card{transition:transform .12s ease,box-shadow .12s ease}.card:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(0,0,0,0.35)}
+.tab:not(.on):hover{background:#161616 !important}
+input::placeholder{color:var(--ink-muted, #A3A3A3)}
+input[type=text],textarea{box-sizing:border-box;width:100%;background:var(--card, #1C1C1C);border:1px solid var(--line, #2C2C2C);border-radius:8px;padding:0 12px;color:var(--ink, #EDEDED);font:14px Inter,sans-serif;outline:none}
+input[type=text]{height:44px}
+textarea{padding:12px;min-height:110px;resize:vertical;font:13px/1.6 'JetBrains Mono',monospace}
+input:focus,textarea:focus{border-color:var(--accent, #5CC8FF)}
+</style>
+</helmet>
+<div style="min-height: 900px; display: flex; flex-direction: column; background: var(--ground, #121212); color: var(--ink, #EDEDED); font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<div style="display: flex; align-items: center; gap: 12px; background: var(--raised, #2A2A2A); border-bottom: 1px solid var(--line, #2C2C2C); padding-left: 14px; min-height: 44px">
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'Space Grotesk', sans-serif; font-weight: 600; letter-spacing: 0.04em">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+Holonet
+</div>
+<div style="display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; align-self: stretch; padding-top: 6px">
+<a href="Main.dc.html" aria-label="Vault" style="flex: none; width: 44px; height: 38px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border-radius: 6px 6px 0 0; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-bottom: none; color: var(--accent, #5CC8FF)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<span aria-hidden="true" style="flex: none; width: 1px; height: 20px; background: #4A4A4A; margin: 0 6px 9px"></span>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">prod-web-01</span></a><button aria-label="Close prod-web-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">db-primary</span></a><button aria-label="Close db-primary" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(127,214,181,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Sftp.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">nas-01</span></a><button aria-label="Close nas-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<button aria-label="New tab" style="flex: none; align-self: center; background: none; border: none; color: var(--ink-muted, #A3A3A3); width: 36px; height: 36px; font-size: 18px">+</button>
+</div>
+<div style="display: flex; align-self: stretch">
+<button aria-label="Minimize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 5h10"/></svg></button>
+<button aria-label="Maximize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+<button aria-label="Close" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; flex: 1">
+
+<nav style="flex: 1 1 200px; max-width: 100%; box-sizing: border-box; background: var(--panel, #171717); border-right: 1px solid var(--line, #2C2C2C); padding: 16px 10px; display: flex; flex-direction: column; gap: 2px">
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); padding: 4px 12px 8px">Vault</div>
+<a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>Hosts</a>
+<a href="Keychain.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg>Keychain</a>
+<a href="PortForwarding.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>Port forwarding</a>
+<a href="Snippets.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px; background: var(--raised, #2A2A2A); color: var(--ink, #EDEDED); font-weight: 500"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6"/></svg>Snippets</a>
+<a href="KnownHosts.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg>Known hosts</a>
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); padding: 20px 12px 8px">Sessions</div>
+<a href="Terminal.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8"/></svg>Terminal</a>
+<a href="Sftp.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>SFTP</a>
+<a href="History.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>History</a>
+<div style="flex: 1"></div>
+<a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Settings<span role="img" aria-label="Update available" style="margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #5CC8FF)"></span></a>
+<div style="margin: 12px 4px 0; padding: 12px; border: 1px solid var(--line, #2C2C2C); border-radius: 8px; font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5"><span style="color: var(--ink, #EDEDED); font-weight: 500">Local vault</span><br>Encrypted, unlocked with Windows Hello</div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; display: flex; flex-wrap: wrap">
+
+<section style="flex: 999 1 420px; min-width: 0; box-sizing: border-box; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+<div style="flex: 1 1 240px">
+<h1 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 600; letter-spacing: -0.01em">Snippets</h1>
+<div style="color: var(--ink-muted, #A3A3A3); margin-top: 6px">Saved commands you can run in any session, on several hosts at once, or when a host connects.</div>
+</div>
+<button type="button" style="height: 44px; padding: 0 18px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">New snippet</button>
+</div>
+
+<label style="display: flex; align-items: center; gap: 8px; background: var(--card, #1C1C1C); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 12px; height: 44px; box-sizing: border-box">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" role="img" aria-label="Search" style="stroke: var(--ink-muted, #A3A3A3)"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg>
+<input type="text" value="{{ query }}" onChange="{{ setQuery }}" placeholder="Filter by name or command" style="flex: 1; min-width: 0; height: auto; padding: 0; background: none; border: none">
+</label>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px">
+<sc-for list="{{ items }}" as="i" hint-placeholder-count="6">
+<button class="card" type="button" onClick="{{ i.pick }}" style="text-align: left; background: {{ i.bg }}; border: 1px solid {{ i.border }}; border-radius: 10px; padding: 14px; color: var(--ink, #EDEDED); display: flex; flex-direction: column; gap: 8px">
+<span style="font-weight: 500">{{ i.name }}</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-soft, #CFCFCF); background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 6px; padding: 8px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ i.cmd }}</span>
+<span style="font-size: 12px; color: {{ i.metaColor }}">{{ i.meta }}</span>
+</button>
+</sc-for>
+</div>
+<sc-if value="{{ empty }}" hint-placeholder-val="{{ false }}">
+<div style="padding: 28px 16px; color: var(--ink-muted, #A3A3A3); text-align: center">No snippets match this filter.</div>
+</sc-if>
+</section>
+
+<aside style="flex: 1 1 360px; box-sizing: border-box; background: var(--panel, #171717); border-left: 1px solid var(--line, #2C2C2C); box-shadow: -16px 0 40px rgba(0,0,0,0.28); padding: 28px 24px; display: flex; flex-direction: column; gap: 16px">
+<div style="font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Edit snippet</div>
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-muted, #A3A3A3)">Name<input type="text" value="{{ sel.name }}" onChange="{{ setName }}"></label>
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-muted, #A3A3A3)">Command<textarea value="{{ sel.cmd }}" onChange="{{ setCmd }}" spellcheck="false"></textarea></label>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5">{{ varNote }}</div>
+<div style="display: flex; flex-direction: column">
+<label style="display: flex; align-items: center; gap: 10px; min-height: 44px"><input type="checkbox" checked="{{ sel.enter }}" onChange="{{ toggleEnter }}" style="width: 18px; height: 18px; accent-color: var(--accent, #5CC8FF)">Press Enter after inserting</label>
+<label style="display: flex; align-items: center; gap: 10px; min-height: 44px"><input type="checkbox" checked="{{ sel.confirm }}" onChange="{{ toggleConfirm }}" style="width: 18px; height: 18px; accent-color: var(--accent, #5CC8FF)">Ask before running</label>
+</div>
+<div>
+<div style="font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); margin-bottom: 8px">Run on</div>
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ targets }}" as="t" hint-placeholder-count="6">
+<button type="button" onClick="{{ t.toggle }}" aria-pressed="{{ t.on }}" style="height: 44px; padding: 0 12px; background: {{ t.bg }}; border: 1px solid {{ t.border }}; color: var(--ink, #EDEDED); border-radius: 22px; font-size: 13px; display: inline-flex; align-items: center; gap: 8px"><span style="flex: none; width: 8px; height: 8px; border-radius: 2px; background: {{ t.color }}"></span>{{ t.label }}</button>
+</sc-for>
+</div>
+</div>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5">{{ sel.startup }}</div>
+<div style="flex: 1"></div>
+<a href="Terminal.dc.html" style="text-align: center; padding: 13px 0; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border-radius: 8px; font-weight: 600">{{ runLabel }}</a>
+<div style="display: flex; gap: 8px">
+<button type="button" style="flex: 1; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Save</button>
+<button type="button" style="flex: 1; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Duplicate</button>
+<button type="button" style="flex: 1; height: 44px; background: none; border: 1px solid var(--warn-line, #5A4A33); color: var(--warn, #F2A65A); border-radius: 8px">Delete</button>
+</div>
+</aside>
+
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = Object.assign({ picked: 'restart', query: '', edits: {}, targets: { 'prod-web-01': true, 'prod-web-02': true } }, this.state || {});
+    const base = [
+      { id: 'status', name: 'Service status', cmd: 'systemctl status nginx', enter: true, confirm: false, startup: 'Not used as a startup snippet.' },
+      { id: 'restart', name: 'Restart service', cmd: 'sudo systemctl restart ${service}', enter: true, confirm: true, startup: 'Not used as a startup snippet.' },
+      { id: 'log', name: 'Tail app log', cmd: 'journalctl -u app -f', enter: true, confirm: false, startup: 'Startup snippet for staging-api.' },
+      { id: 'disk', name: 'Disk usage', cmd: 'df -h', enter: true, confirm: false, startup: 'Not used as a startup snippet.' },
+      { id: 'repo', name: 'App repo status', cmd: 'cd /srv/app && git status', enter: true, confirm: false, startup: 'Startup snippet for prod-web-01 and prod-web-02.' },
+      { id: 'deploy', name: 'Deploy main', cmd: 'cd /srv/app && ./deploy.sh', enter: false, confirm: true, startup: 'Not used as a startup snippet.' }
+    ].map((b) => Object.assign({}, b, s.edits[b.id] || {}));
+    const sel = base.find((b) => b.id === s.picked);
+    const edit = (patch) => this.setState({ edits: Object.assign({}, s.edits, { [sel.id]: Object.assign({}, s.edits[sel.id] || {}, patch) }) });
+    const vars = (sel.cmd.match(/\$\{\w+\}/g) || []).map((v) => v.slice(2, -1));
+    const q = s.query.trim().toLowerCase();
+    const items = base.filter((b) => !q || (b.name + ' ' + b.cmd).toLowerCase().includes(q)).map((b) => Object.assign({}, b, {
+      bg: b.id === s.picked ? 'var(--raised, #2A2A2A)' : 'var(--card, #1C1C1C)',
+      border: b.id === s.picked ? 'var(--accent, #5CC8FF)' : 'var(--line, #2C2C2C)',
+      meta: b.confirm ? 'Asks before running' : b.enter ? 'Runs immediately' : 'Inserts without running',
+      metaColor: b.confirm ? 'var(--warn, #F2A65A)' : 'var(--ink-muted, #A3A3A3)',
+      pick: () => this.setState({ picked: b.id })
+    }));
+    const GC = { 'prod-web-01': 'var(--accent, #5CC8FF)', 'prod-web-02': 'var(--accent, #5CC8FF)', 'db-primary': 'var(--accent, #5CC8FF)', 'bastion-east': 'var(--accent, #5CC8FF)', 'staging-api': 'var(--group-violet, #B9A5FF)', 'nas-01': 'var(--group-mint, #7FD6B5)', 'pi-cluster-1': 'var(--group-mint, #7FD6B5)', 'client-acme-vps': 'var(--ink-muted, #A3A3A3)' };
+    const hosts = ['prod-web-01', 'prod-web-02', 'db-primary', 'staging-api', 'nas-01', 'pi-cluster-1'];
+    const count = hosts.filter((h) => s.targets[h]).length;
+    return {
+      items, sel,
+      empty: items.length === 0,
+      query: s.query,
+      setQuery: (e) => this.setState({ query: e.target.value }),
+      setName: (e) => edit({ name: e.target.value }),
+      setCmd: (e) => edit({ cmd: e.target.value }),
+      toggleEnter: () => edit({ enter: !sel.enter }),
+      toggleConfirm: () => edit({ confirm: !sel.confirm }),
+      varNote: vars.length ? 'Holonet asks for ' + vars.join(', ') + ' each time this runs. Write a variable as ${name}.' : 'No variables. Write ${name} to be asked for a value each time this runs.',
+      targets: hosts.map((h) => ({
+        label: h, color: GC[h], on: !!s.targets[h],
+        bg: s.targets[h] ? 'var(--raised, #2A2A2A)' : 'var(--card, #1C1C1C)',
+        border: s.targets[h] ? 'var(--accent, #5CC8FF)' : 'var(--line, #2C2C2C)',
+        toggle: () => this.setState({ targets: Object.assign({}, s.targets, { [h]: !s.targets[h] }) })
+      })),
+      runLabel: count === 0 ? 'Run in active session' : count === 1 ? 'Run on 1 host' : 'Run on ' + count + ' hosts'
+    };
+  }
+}
+</script>
+</body>
+</html>

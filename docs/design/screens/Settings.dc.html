@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Holonet settings</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/holonet/tokens.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;background:var(--ground, #121212)}
+a{color:var(--ink-muted, #A3A3A3);text-decoration:none}a:hover{color:var(--ink, #EDEDED)}
+button{font:inherit;cursor:pointer}
+.tab:not(.on):hover{background:#161616 !important}
+input[type=text],select{height:44px;box-sizing:border-box;background:var(--card, #1C1C1C);border:1px solid var(--line, #2C2C2C);border-radius:8px;padding:0 12px;color:var(--ink, #EDEDED);font:14px Inter,sans-serif;outline:none}
+input:focus,select:focus{border-color:var(--accent, #5CC8FF)}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent, #5CC8FF);flex:none}
+input[type=range]{accent-color:var(--accent, #5CC8FF);width:160px;height:44px}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion: reduce){.cursor{animation:none !important}}
+</style>
+</helmet>
+<div style="min-height: 2760px; display: flex; flex-direction: column; background: var(--ground, #121212); color: var(--ink, #EDEDED); font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<div style="display: flex; align-items: center; gap: 12px; background: var(--raised, #2A2A2A); border-bottom: 1px solid var(--line, #2C2C2C); padding-left: 14px; min-height: 44px">
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'Space Grotesk', sans-serif; font-weight: 600; letter-spacing: 0.04em">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+Holonet
+</div>
+<div style="display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; align-self: stretch; padding-top: 6px">
+<a href="Main.dc.html" aria-label="Vault" style="flex: none; width: 44px; height: 38px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border-radius: 6px 6px 0 0; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-bottom: none; color: var(--accent, #5CC8FF)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<span aria-hidden="true" style="flex: none; width: 1px; height: 20px; background: #4A4A4A; margin: 0 6px 9px"></span>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">prod-web-01</span></a><button aria-label="Close prod-web-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">db-primary</span></a><button aria-label="Close db-primary" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(127,214,181,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Sftp.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">nas-01</span></a><button aria-label="Close nas-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<button aria-label="New tab" style="flex: none; align-self: center; background: none; border: none; color: var(--ink-muted, #A3A3A3); width: 36px; height: 36px; font-size: 18px">+</button>
+</div>
+<div style="display: flex; align-self: stretch">
+<button aria-label="Minimize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 5h10"/></svg></button>
+<button aria-label="Maximize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+<button aria-label="Close" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; flex: 1">
+
+<nav style="flex: 1 1 200px; max-width: 100%; box-sizing: border-box; background: var(--panel, #171717); border-right: 1px solid var(--line, #2C2C2C); padding: 16px 10px; display: flex; flex-direction: column; gap: 2px">
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); padding: 4px 12px 8px">Vault</div>
+<a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>Hosts</a>
+<a href="Keychain.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg>Keychain</a>
+<a href="PortForwarding.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>Port forwarding</a>
+<a href="Snippets.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6"/></svg>Snippets</a>
+<a href="KnownHosts.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg>Known hosts</a>
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); padding: 20px 12px 8px">Sessions</div>
+<a href="Terminal.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8"/></svg>Terminal</a>
+<a href="Sftp.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>SFTP</a>
+<a href="History.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>History</a>
+<div style="flex: 1"></div>
+<a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 8px; background: var(--raised, #2A2A2A); color: var(--ink, #EDEDED); font-weight: 500"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Settings<span role="img" aria-label="Update available" style="margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #5CC8FF)"></span></a>
+<div style="margin: 12px 4px 0; padding: 12px; border: 1px solid var(--line, #2C2C2C); border-radius: 8px; font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5"><span style="color: var(--ink, #EDEDED); font-weight: 500">Local vault</span><br>Encrypted, unlocked with Windows Hello</div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 24px 28px 40px; display: flex; flex-direction: column; gap: 24px">
+<div style="max-width: 1080px; width: 100%; display: flex; flex-direction: column; gap: 24px">
+
+<div>
+<h1 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 600; letter-spacing: -0.01em">Settings</h1>
+<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px">
+<a href="#terminal" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Terminal</a>
+<a href="#appearance" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Appearance</a>
+<a href="#security" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Vault and security</a>
+<a href="#connection" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Connection</a>
+<a href="#sftp" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">SFTP</a>
+<a href="#keyboard" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Keyboard</a>
+<a href="#updates" style="padding: 12px 14px; border: 1px solid var(--line, #2C2C2C); border-radius: 22px; color: var(--ink, #EDEDED)">Updates</a>
+</div>
+</div>
+
+<sc-if value="{{ notice }}" hint-placeholder-val="{{ true }}">
+<div role="status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; background: var(--card, #1C1C1C); border: 1px solid var(--accent, #5CC8FF); border-radius: 12px; padding: 16px 18px">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF); flex: none"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+<div style="flex: 1 1 280px; min-width: 0"><div style="font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 16px">Holonet 0.2.0 is available</div><div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); margin-top: 2px">You have 0.1.0. Released on GitHub on 24 Nov 2026.</div></div>
+<a href="https://github.com/lascott80/holonet/releases" style="padding: 13px 16px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border-radius: 8px; font-weight: 600">View release on GitHub</a>
+<button type="button" onClick="{{ dismiss }}" style="height: 44px; padding: 0 14px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Later</button>
+</div>
+</sc-if>
+
+<section id="terminal" style="display: flex; flex-direction: column; gap: 16px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Terminal</h2>
+
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; overflow: hidden">
+<div style="display: flex; justify-content: space-between; gap: 12px; padding: 8px 14px; background: var(--panel, #171717); border-bottom: 1px solid var(--line, #2C2C2C); font-size: 12px; color: var(--ink-muted, #A3A3A3)"><span>Preview</span><span style="font-family: 'JetBrains Mono', monospace">{{ summary }}</span></div>
+<div style="padding: 16px 18px; overflow-x: auto; background: {{ p.bg }}; color: {{ p.fg }}; font-family: {{ stack }}; font-size: {{ sizePx }}; line-height: {{ lh }}; font-variant-ligatures: {{ ligVal }}">
+<div style="white-space: pre"><span style="color: {{ p.acc }}">deploy@prod-web-01</span><span style="color: {{ p.dim }}">:~$ </span>git log --oneline -3</div>
+<div style="white-space: pre"><span style="color: {{ p.grn }}">a1b2c3d</span> fix: retry when status != 200 &amp;&amp; tries &lt;= 3</div>
+<div style="white-space: pre"><span style="color: {{ p.grn }}">d4e5f6a</span> feat: hosts |&gt; filter -&gt; connect =&gt; session</div>
+<div style="white-space: pre"><span style="color: {{ p.grn }}">0f9e8d7</span> docs: 0O 1lI characters stay distinct</div>
+<div style="white-space: pre"><span style="color: {{ p.acc }}">deploy@prod-web-01</span><span style="color: {{ p.dim }}">:~$ </span><span class="cursor" aria-hidden="true" style="display: inline-block; width: {{ cur.w }}; height: {{ cur.h }}; vertical-align: {{ cur.v }}; background: {{ p.fg }}; animation: {{ blinkAnim }}"></span></div>
+</div>
+</div>
+
+<div>
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px"><span style="font-weight: 500">Font</span><span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">Nerd Font builds add Powerline and icon glyphs for prompts like Starship and Oh My Posh</span></div>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px">
+<sc-for list="{{ fonts }}" as="f" hint-placeholder-count="6">
+<button type="button" onClick="{{ f.pick }}" aria-pressed="{{ f.on }}" style="text-align: left; background: {{ f.bg }}; border: 1px solid {{ f.border }}; border-radius: 10px; padding: 12px 14px; color: var(--ink, #EDEDED); display: flex; flex-direction: column; gap: 4px; min-height: 64px">
+<span style="display: flex; align-items: center; justify-content: space-between; gap: 8px"><span style="font-family: {{ f.stack }}; font-size: 15px">{{ f.name }}</span><span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: {{ f.badgeColor }}">{{ f.badge }}</span></span>
+<span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.note }}</span>
+</button>
+</sc-for>
+</div>
+<button type="button" style="margin-top: 10px; height: 44px; padding: 0 14px; background: none; border: 1px dashed var(--line-strong, #3D3D3D); color: var(--ink-muted, #A3A3A3); border-radius: 8px">Use another installed font</button>
+</div>
+
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-size">Font size</label><span style="display: flex; align-items: center; gap: 12px"><input id="set-size" type="range" min="10" max="20" step="1" value="{{ size }}" onChange="{{ setSize }}"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; min-width: 44px; text-align: right">{{ sizePx }}</span></span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-lh">Line height</label><span style="display: flex; align-items: center; gap: 12px"><input id="set-lh" type="range" min="1" max="1.8" step="0.1" value="{{ lh }}" onChange="{{ setLh }}"><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; min-width: 44px; text-align: right">{{ lh }}</span></span></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Font ligatures<br><span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ ligNote }}</span></span><input type="checkbox" checked="{{ lig }}" onChange="{{ toggleLig }}"></label>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Cursor</span><span style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ cursors }}" as="c" hint-placeholder-count="3"><button type="button" onClick="{{ c.pick }}" aria-pressed="{{ c.on }}" style="height: 44px; padding: 0 14px; background: {{ c.bg }}; border: 1px solid {{ c.border }}; color: var(--ink, #EDEDED); border-radius: 8px">{{ c.label }}</button></sc-for>
+</span></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Blinking cursor</span><input type="checkbox" checked="{{ blink }}" onChange="{{ toggleBlink }}"></label>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Color scheme</span><span style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ schemes }}" as="c" hint-placeholder-count="3"><button type="button" onClick="{{ c.pick }}" aria-pressed="{{ c.on }}" style="height: 44px; padding: 0 14px; background: {{ c.bg }}; border: 1px solid {{ c.border }}; color: var(--ink, #EDEDED); border-radius: 8px">{{ c.label }}</button></sc-for>
+</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-scroll">Scrollback</label><select id="set-scroll"><option>10,000 lines</option><option>50,000 lines</option><option>Unlimited</option></select></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Copy on select</span><input type="checkbox"></label>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px"><span>Right-click pastes</span><input type="checkbox" checked></label>
+</div>
+</section>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 24px; align-items: start">
+
+<section id="appearance" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Appearance</h2>
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-theme">App theme</label><select id="set-theme"><option>Dark gray</option><option>Follow Windows</option></select></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Group colors on tabs and panes</span><input type="checkbox" checked></label>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px"><span>Use Windows accent color</span><input type="checkbox"></label>
+</div>
+</section>
+
+<section id="security" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Vault and security</h2>
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Unlock with Windows Hello</span><input type="checkbox" checked></label>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-lock">Lock vault after</label><select id="set-lock"><option>15 minutes idle</option><option>1 hour idle</option><option>When Windows locks</option><option>Never</option></select></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-hk">Unknown host keys</label><select id="set-hk"><option>Ask every time</option><option>Refuse to connect</option></select></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px"><span>Vault backup</span><button type="button" style="height: 44px; padding: 0 14px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Export encrypted file</button></div>
+</div>
+</section>
+
+<section id="connection" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Connection</h2>
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-ka">Keep-alive interval</label><select id="set-ka"><option>30 seconds</option><option>60 seconds</option><option>Off</option></select></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Reconnect after sleep or network change</span><input type="checkbox" checked></label>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Save terminal output to History<br><span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">Off by default. Logs can contain anything typed or printed, including secrets. You can turn it on for single hosts instead.</span></span><input type="checkbox"></label>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px"><span>Restore open sessions on launch</span><input type="checkbox"></label>
+</div>
+</section>
+
+<section id="sftp" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">SFTP</h2>
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-ow">When a file already exists</label><select id="set-ow"><option>Ask</option><option>Overwrite</option><option>Keep both</option></select></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-par">Transfers at once</label><select id="set-par"><option>2</option><option>4</option><option>8</option></select></div>
+<label style="display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; min-height: 44px"><span>Show hidden files</span><input type="checkbox" checked></label>
+</div>
+</section>
+
+</div>
+
+<section id="keyboard" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Keyboard</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 24px; border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C); padding: 4px 16px">
+<sc-for list="{{ keys }}" as="k" hint-placeholder-count="8">
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>{{ k.action }}</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-soft, #CFCFCF); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 4px; padding: 3px 8px">{{ k.combo }}</span></div>
+</sc-for>
+</div>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5">App shortcuts use Ctrl Shift, so Ctrl K, Ctrl T, Ctrl W and the other shell editing keys always reach the terminal.</div>
+</section>
+
+<section id="updates" style="display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">About and updates</h2>
+<div style="border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C)">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><span>Version</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 13px">0.1.0 · Windows ARM64</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; min-height: 44px; border-bottom: 1px solid var(--line, #2C2C2C)"><label for="set-upd">Look for new releases</label><select id="set-upd"><option>When Holonet starts</option><option>Once a day</option><option>Never</option></select></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px; min-height: 44px"><span>Last checked<br><span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ checked }}</span></span><button type="button" onClick="{{ checkNow }}" style="height: 44px; padding: 0 14px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Check now</button></div>
+</div>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5">Holonet only reads the public releases page of <a href="https://github.com/lascott80/holonet/releases" style="color: var(--accent, #5CC8FF)">github.com/lascott80/holonet</a>. Nothing is installed automatically: download the new build and replace the old one. Builds are unsigned, so Windows warns the first time each one runs.</div>
+</section>
+
+</div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = Object.assign({ font: 'JetBrainsMono Nerd Font', size: 13, lh: 1.6, lig: true, cursor: 'Block', blink: true, scheme: 'Holonet Dark', notice: true, checked: 'Today at 13:40. A newer release was found.' }, this.state || {});
+    const JB = "'JetBrains Mono', monospace";
+    const fontList = [
+      { name: 'JetBrainsMono Nerd Font', stack: JB, nerd: true, note: 'Default. Ligatures and double-width icon glyphs.' },
+      { name: 'JetBrainsMono Nerd Font Mono', stack: JB, nerd: true, note: 'Icons fit a single cell for strict alignment.' },
+      { name: 'JetBrainsMono Nerd Font Propo', stack: JB, nerd: true, note: 'Proportional icon widths, for prompts and status lines.' },
+      { name: 'JetBrainsMonoNL Nerd Font', stack: JB, nerd: true, nl: true, note: 'Same glyphs with ligatures removed.' },
+      { name: 'Cascadia Mono', stack: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace", note: 'Uses the copy installed with Windows.' },
+      { name: 'Consolas', stack: 'Consolas, monospace', note: 'Uses the copy installed with Windows.' }
+    ];
+    const cur = fontList.find((f) => f.name === s.font);
+    const P = {
+      'Holonet Dark': { bg: 'var(--terminal, #101010)', fg: 'var(--ink-soft, #CFCFCF)', dim: 'var(--ink-dim, #8A8A8A)', acc: 'var(--accent, #5CC8FF)', grn: 'var(--group-mint, #7FD6B5)' },
+      'High contrast': { bg: '#000000', fg: '#FFFFFF', dim: '#BDBDBD', acc: '#7AD7FF', grn: '#9FF0CF' },
+      'Light': { bg: '#FAFAFA', fg: 'var(--line-soft, #1F1F1F)', dim: '#5F5F5F', acc: '#0B6A99', grn: '#1B7A55' }
+    };
+    const shapes = { Block: { w: '0.6em', h: '1.15em', v: 'text-bottom' }, Bar: { w: '2px', h: '1.15em', v: 'text-bottom' }, Underline: { w: '0.6em', h: '2px', v: 'baseline' } };
+    const seg = (key, list) => list.map((label) => ({
+      label, on: s[key] === label,
+      bg: s[key] === label ? 'var(--raised, #2A2A2A)' : 'var(--card, #1C1C1C)',
+      border: s[key] === label ? 'var(--accent, #5CC8FF)' : 'var(--line, #2C2C2C)',
+      pick: () => this.setState({ [key]: label })
+    }));
+    const ligOn = s.lig && !cur.nl;
+    return {
+      notice: s.notice, dismiss: () => this.setState({ notice: false }),
+      checked: s.checked, checkNow: () => this.setState({ notice: true, checked: 'Just now. A newer release was found.' }),
+      p: P[s.scheme], cur: shapes[s.cursor],
+      stack: cur.stack, size: s.size, sizePx: s.size + 'px', lh: s.lh,
+      lig: ligOn, ligVal: ligOn ? 'normal' : 'none',
+      ligNote: cur.nl ? 'Not available in the NL build of this font.' : 'Joins character pairs such as != and => into one symbol.',
+      blink: s.blink, blinkAnim: s.blink ? 'blink 1.1s steps(1) infinite' : 'none',
+      summary: s.font + ' · ' + s.size + 'px',
+      setSize: (e) => this.setState({ size: Number(e.target.value) }),
+      setLh: (e) => this.setState({ lh: Number(e.target.value) }),
+      toggleLig: () => this.setState({ lig: !s.lig }),
+      toggleBlink: () => this.setState({ blink: !s.blink }),
+      fonts: fontList.map((f) => Object.assign({}, f, {
+        on: f.name === s.font,
+        bg: f.name === s.font ? 'var(--raised, #2A2A2A)' : 'var(--card, #1C1C1C)',
+        border: f.name === s.font ? 'var(--accent, #5CC8FF)' : 'var(--line, #2C2C2C)',
+        badge: f.nerd ? 'Bundled' : 'System',
+        badgeColor: f.nerd ? 'var(--accent, #5CC8FF)' : 'var(--ink-muted, #A3A3A3)',
+        pick: () => this.setState({ font: f.name })
+      })),
+      cursors: seg('cursor', ['Block', 'Bar', 'Underline']),
+      schemes: seg('scheme', ['Holonet Dark', 'High contrast', 'Light']),
+      keys: [
+        { action: 'Command palette', combo: 'Ctrl Shift P' }, { action: 'New tab', combo: 'Ctrl Shift T' },
+        { action: 'Close tab', combo: 'Ctrl Shift W' }, { action: 'Next tab', combo: 'Ctrl Tab' },
+        { action: 'Split right', combo: 'Ctrl Shift D' }, { action: 'Find in terminal', combo: 'Ctrl Shift F' },
+        { action: 'Copy', combo: 'Ctrl Shift C' }, { action: 'Paste', combo: 'Ctrl Shift V' }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

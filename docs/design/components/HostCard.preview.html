@@ -1,0 +1,16 @@
+<!-- @dsCard group="Hosts" height=168 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HostCard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;padding:var(--space-5);background:var(--ground);color:var(--ink);font:14px/1.5 var(--font-sans);display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:center}button{font:inherit;cursor:pointer}
+.h{width:280px;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-xl);padding:14px;color:var(--ink);display:flex;flex-direction:column;gap:12px}.h.on{background:var(--card-selected);border-color:var(--accent)}.top{display:flex;gap:12px;align-items:center}.tile{width:40px;height:40px;border-radius:var(--radius-lg);display:flex;align-items:center;justify-content:center;flex:none}.n{font-weight:600}.a{font:12px var(--font-mono);color:var(--ink-muted)}.f{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-muted);border-top:1px solid var(--line);padding-top:10px}.sq{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+</style>
+</head>
+<body>
+<button class="h on"><span class="top"><span class="tile" style="background:rgba(92,200,255,0.14);color:#5CC8FF"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01"/></svg></span><span><span class="n">prod-web-01</span><br><span class="a">deploy@10.20.0.11:22</span></span></span><span class="f"><span><span class="sq" style="background:#5CC8FF"></span>Production</span><span style="color:var(--ink)">Connected</span></span></button><button class="h"><span class="top"><span class="tile" style="background:rgba(127,214,181,0.14);color:#7FD6B5"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h16M8 17h.01M12 17h.01"/></svg></span><span><span class="n">nas-01</span><br><span class="a">admin@192.168.1.40:22</span></span></span><span class="f"><span><span class="sq" style="background:#7FD6B5"></span>Home lab</span><span>24 Nov</span></span></button>
+</body>
+</html>

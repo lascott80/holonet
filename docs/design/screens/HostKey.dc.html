@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Holonet host key check</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/holonet/tokens.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;background:var(--ground, #121212)}
+a{color:var(--ink-muted, #A3A3A3);text-decoration:none}a:hover{color:var(--ink, #EDEDED)}
+button{font:inherit;cursor:pointer}
+.tab:not(.on):hover{background:#161616 !important}
+</style>
+</helmet>
+<div style="min-height: 900px; display: flex; flex-direction: column; background: var(--ground, #121212); color: var(--ink, #EDEDED); font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<div style="display: flex; align-items: center; gap: 12px; background: var(--raised, #2A2A2A); border-bottom: 1px solid var(--line, #2C2C2C); padding-left: 14px; min-height: 44px">
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'Space Grotesk', sans-serif; font-weight: 600; letter-spacing: 0.04em">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+Holonet
+</div>
+<div style="display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; align-self: stretch; padding-top: 6px">
+<a href="Main.dc.html" aria-label="Vault" style="flex: none; width: 44px; height: 38px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border-radius: 6px 6px 0 0; border: 1px solid transparent; border-bottom: none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<span aria-hidden="true" style="flex: none; width: 1px; height: 20px; background: #4A4A4A; margin: 0 6px 9px"></span>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">prod-web-01</span></a><button aria-label="Close prod-web-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">db-primary</span></a><button aria-label="Close db-primary" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab on" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid {{ groupColor }}; border-radius: 6px 6px 0 0; background: var(--ground, #121212); border-left: 1px solid var(--line, #2C2C2C); border-right: 1px solid var(--line, #2C2C2C)"><a href="HostKey.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink, #EDEDED); font-weight: 500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--ink-soft, #CFCFCF); box-sizing: border-box"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ host }}</span></a><button aria-label="Close connecting tab" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<button aria-label="New tab" style="flex: none; align-self: center; background: none; border: none; color: var(--ink-muted, #A3A3A3); width: 36px; height: 36px; font-size: 18px">+</button>
+</div>
+<div style="display: flex; align-self: stretch">
+<button aria-label="Minimize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 5h10"/></svg></button>
+<button aria-label="Maximize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+<button aria-label="Close" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+</div>
+</div>
+
+<div style="display: flex; flex: 1">
+
+<nav style="flex: none; width: 56px; background: var(--panel, #171717); border-right: 1px solid var(--line, #2C2C2C); padding: 10px 6px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; align-items: center">
+<a href="Main.dc.html" aria-label="Hosts" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<a href="Keychain.dc.html" aria-label="Keychain" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg></a>
+<a href="Terminal.dc.html" aria-label="Terminal" style="width: 44px; height: 44px; border-radius: 8px; background: var(--raised, #2A2A2A); color: var(--accent, #5CC8FF); display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8"/></svg></a>
+<a href="Sftp.dc.html" aria-label="SFTP" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></a>
+<div style="flex: 1"></div>
+<a href="Settings.dc.html" aria-label="Settings, update available" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center; position: relative"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span aria-hidden="true" style="position: absolute; top: 9px; right: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #5CC8FF)"></span></a>
+</nav>
+
+<main style="flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--sunken, #0A0A0A); padding: 8px; box-sizing: border-box">
+<div style="flex: 1; display: flex; flex-direction: column; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 16px 18px 40px">
+
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6; color: var(--ink-muted, #A3A3A3)">
+<div>Connecting to {{ target }} ...</div>
+<div>Connected. Key exchange curve25519-sha256, cipher chacha20-poly1305</div>
+<div>Server host key type: ssh-ed25519</div>
+<div style="color: var(--warn, #F2A65A)">Paused: waiting for host key verification</div>
+</div>
+
+<sc-if value="{{ isFirst }}" hint-placeholder-val="{{ true }}">
+<div role="dialog" aria-labelledby="hk-first" style="margin: auto; width: 100%; max-width: 560px; box-sizing: border-box; background: var(--card, #1C1C1C); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 12px; padding: 28px; display: flex; flex-direction: column; gap: 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.5)">
+<div style="display: flex; gap: 14px; align-items: flex-start">
+<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF); flex: none"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M12 9v4M12 16h.01"/></svg>
+<div>
+<h1 id="hk-first" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 600">Verify this host before connecting</h1>
+<div style="color: var(--ink-muted, #A3A3A3); margin-top: 6px; line-height: 1.5">This is the first time Holonet has connected to staging-worker-02. Check the fingerprint against one you got from the server's administrator or console.</div>
+</div>
+</div>
+<div style="background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--ink-muted, #A3A3A3)"><span>ED25519 fingerprint</span><button type="button" style="background: none; border: none; color: var(--accent, #5CC8FF); padding: 0">Copy</button></div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; word-break: break-all">SHA256:[FINGERPRINT]</div>
+<div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3)">10.30.0.9:22 · deploy</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<a href="Terminal.dc.html" style="flex: 2 1 180px; text-align: center; padding: 13px 0; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border-radius: 8px; font-weight: 600">Trust and connect</a>
+<a href="Terminal.dc.html" style="flex: 1 1 120px; text-align: center; padding: 12px 0; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Connect once</a>
+<a href="Main.dc.html" style="flex: 1 1 100px; text-align: center; padding: 12px 0; border: 1px solid transparent; border-radius: 8px">Cancel</a>
+</div>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); line-height: 1.5">Trusting saves the key to Known hosts. Connect once does not save it, so you will be asked again next time.</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isChanged }}" hint-placeholder-val="{{ false }}">
+<div role="alertdialog" aria-labelledby="hk-changed" style="margin: auto; width: 100%; max-width: 600px; box-sizing: border-box; background: var(--warn-surface, #1C1710); border: 1px solid var(--warn, #F2A65A); border-radius: 12px; padding: 28px; display: flex; flex-direction: column; gap: 18px; box-shadow: 0 24px 60px rgba(0,0,0,0.5)">
+<div style="display: flex; gap: 14px; align-items: flex-start">
+<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: var(--warn, #F2A65A); flex: none"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/></svg>
+<div>
+<h1 id="hk-changed" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 600">The host key for prod-web-01 has changed</h1>
+<div style="color: var(--warn-ink, #D9CDBB); margin-top: 6px; line-height: 1.5">The server may have been rebuilt, or something between you and it may be intercepting the connection. Holonet has not sent your credentials.</div>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px">
+<div style="background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 14px"><div style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">Trusted in Known hosts</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; margin-top: 6px; word-break: break-all">SHA256:[TRUSTED FINGERPRINT]</div><div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); margin-top: 6px">Saved [DATE]</div></div>
+<div style="background: var(--ground, #121212); border: 1px solid var(--warn, #F2A65A); border-radius: 8px; padding: 14px"><div style="font-size: 12px; color: var(--warn, #F2A65A)">Presented now</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; margin-top: 6px; word-break: break-all">SHA256:[NEW FINGERPRINT]</div><div style="font-size: 12px; color: var(--ink-muted, #A3A3A3); margin-top: 6px">ED25519 · 10.20.0.11:22</div></div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<a href="Main.dc.html" style="flex: 2 1 160px; text-align: center; padding: 13px 0; background: var(--warn, #F2A65A); color: var(--on-warn, #2A1A05); border-radius: 8px; font-weight: 600">Disconnect</a>
+<a href="KnownHosts.dc.html" style="flex: 2 1 180px; text-align: center; padding: 12px 0; border: 1px solid var(--warn-line, #5A4A33); color: var(--ink, #EDEDED); border-radius: 8px">Review in Known hosts</a>
+</div>
+<details style="font-size: 13px; color: var(--warn-ink, #D9CDBB)">
+<summary style="cursor: pointer; padding: 12px 0">I expected this change</summary>
+<div style="line-height: 1.5; margin-bottom: 12px">Only continue if you have confirmed the new fingerprint with whoever runs the server.</div>
+<a href="Terminal.dc.html" style="display: inline-block; padding: 12px 16px; border: 1px solid var(--warn-line, #5A4A33); color: var(--ink, #EDEDED); border-radius: 8px">Replace trusted key and connect</a>
+</details>
+</div>
+</sc-if>
+
+</div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["First connection","Key changed"],"default":"First connection"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const changed = (this.props.variant ?? 'First connection') === 'Key changed';
+    return {
+      isFirst: !changed,
+      isChanged: changed, groupColor: changed ? 'var(--accent, #5CC8FF)' : 'var(--group-violet, #B9A5FF)',
+      host: changed ? 'prod-web-01' : 'staging-worker-02',
+      target: changed ? '10.20.0.11:22 via bastion-east' : '10.30.0.9:22'
+    };
+  }
+}
+</script>
+</body>
+</html>

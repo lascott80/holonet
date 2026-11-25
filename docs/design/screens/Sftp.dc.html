@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Holonet SFTP</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="ds/holonet/tokens.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+body{margin:0;background:var(--ground, #121212)}
+a{color:var(--ink-muted, #A3A3A3);text-decoration:none}a:hover{color:var(--ink, #EDEDED)}
+button{font:inherit;cursor:pointer}
+.tab:not(.on):hover{background:#161616 !important}
+.row:hover{background:var(--card, #1C1C1C)}
+.crumb:hover{background:var(--raised, #2A2A2A)}
+input::placeholder{color:var(--ink-muted, #A3A3A3)}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent, #5CC8FF);margin:0}
+</style>
+</helmet>
+<div style="position: relative; min-height: 1000px; display: flex; flex-direction: column; background: var(--ground, #121212); color: var(--ink, #EDEDED); font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<div style="display: flex; align-items: center; gap: 12px; background: var(--raised, #2A2A2A); border-bottom: 1px solid var(--line, #2C2C2C); padding-left: 14px; min-height: 44px">
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'Space Grotesk', sans-serif; font-weight: 600; letter-spacing: 0.04em">
+<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="stroke: var(--accent, #5CC8FF)"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+Holonet
+</div>
+<div style="display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; align-self: stretch; padding-top: 6px">
+<a href="Main.dc.html" aria-label="Vault" style="flex: none; width: 44px; height: 38px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border-radius: 6px 6px 0 0; border: 1px solid transparent; border-bottom: none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<span aria-hidden="true" style="flex: none; width: 1px; height: 20px; background: #4A4A4A; margin: 0 6px 9px"></span>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">prod-web-01</span></a><button aria-label="Close prod-web-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid rgba(92,200,255,0.45); border-radius: 6px 6px 0 0; background: var(--card, #1C1C1C); border-left: 1px solid transparent; border-right: 1px solid transparent"><a href="Terminal.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink-muted, #A3A3A3)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 6l6 6-6 6M12 18h8"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">db-primary</span></a><button aria-label="Close db-primary" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<div class="tab on" style="flex: 0 1 190px; min-width: 130px; height: 38px; box-sizing: border-box; display: flex; align-items: center; border-top: 2px solid var(--group-mint, #7FD6B5); border-radius: 6px 6px 0 0; background: var(--ground, #121212); border-left: 1px solid var(--line, #2C2C2C); border-right: 1px solid var(--line, #2C2C2C)"><a href="Sftp.dc.html" style="flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--ink, #EDEDED); font-weight: 500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span style="flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-soft, #CFCFCF)"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">nas-01</span></a><button aria-label="Close nas-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); display: flex; align-items: center; justify-content: center"><svg width="9" height="9" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button></div>
+<button aria-label="New tab" style="flex: none; align-self: center; background: none; border: none; color: var(--ink-muted, #A3A3A3); width: 36px; height: 36px; font-size: 18px">+</button>
+</div>
+<div style="display: flex; align-self: stretch">
+<button aria-label="Minimize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 5h10"/></svg></button>
+<button aria-label="Maximize" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+<button aria-label="Close" style="width: 46px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+</div>
+</div>
+
+<div style="display: flex; flex: 1">
+
+<nav style="flex: none; width: 56px; background: var(--panel, #171717); border-right: 1px solid var(--line, #2C2C2C); padding: 10px 6px; box-sizing: border-box; display: flex; flex-direction: column; gap: 4px; align-items: center">
+<a href="Main.dc.html" aria-label="Hosts" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></a>
+<a href="Keychain.dc.html" aria-label="Keychain" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg></a>
+<a href="Terminal.dc.html" aria-label="Terminal" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l6 6-6 6M12 18h8"/></svg></a>
+<a href="Sftp.dc.html" aria-label="SFTP" style="width: 44px; height: 44px; border-radius: 8px; background: var(--raised, #2A2A2A); color: var(--accent, #5CC8FF); display: flex; align-items: center; justify-content: center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></a>
+<div style="flex: 1"></div>
+<a href="Settings.dc.html" aria-label="Settings, update available" style="width: 44px; height: 44px; border-radius: 8px; display: flex; align-items: center; justify-content: center; position: relative"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span aria-hidden="true" style="position: absolute; top: 9px; right: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent, #5CC8FF)"></span></a>
+</nav>
+
+<main style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+
+<div style="flex: 1; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--sunken, #0A0A0A)">
+
+<section onDragOver="{{ local.over }}" onDrop="{{ local.drop }}" style="flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; background: var(--ground, #121212); border: {{ local.border }}; border-top: 2px solid var(--ink-muted, #A3A3A3); border-radius: 8px; overflow: hidden">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px 6px">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 15px">This PC</span>
+<span style="flex: 1"></span>
+<label style="display: flex; align-items: center; gap: 8px; background: var(--card, #1C1C1C); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 10px; height: 36px; flex: 0 1 200px; min-width: 120px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" role="img" aria-label="Filter" style="stroke: var(--ink-muted, #A3A3A3)"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg><input type="text" value="{{ local.q }}" onChange="{{ local.setQ }}" placeholder="Filter" style="flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--ink, #EDEDED); font: inherit"></label>
+</div>
+<div style="display: flex; align-items: center; gap: 4px; padding: 0 10px 8px; border-bottom: 1px solid var(--line, #2C2C2C)">
+<button aria-label="Back" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+<button aria-label="Up one folder" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+<button aria-label="Refresh" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/></svg></button>
+<div style="flex: 1; min-width: 0; display: flex; align-items: center; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap">
+<sc-for list="{{ local.crumbs }}" as="c" hint-placeholder-count="5"><button class="crumb" style="background: none; border: none; color: {{ c.color }}; padding: 8px 6px; border-radius: 6px; font: inherit">{{ c.label }}</button><span aria-hidden="true" style="color: var(--ink-faint, #666666)">{{ c.sep }}</span></sc-for>
+</div>
+<button aria-label="Bookmarks for this PC" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg></button>
+</div>
+<sc-if value="{{ local.target }}" hint-placeholder-val="{{ false }}">
+<div style="margin: 8px; padding: 14px; border: 1px dashed var(--accent, #5CC8FF); border-radius: 8px; background: rgba(92,200,255,0.08); color: var(--accent, #5CC8FF); text-align: center; font-weight: 500">Drop to download into this folder</div>
+</sc-if>
+<sc-if value="{{ local.hasSel }}" hint-placeholder-val="{{ true }}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; background: var(--card, #1C1C1C); border-bottom: 1px solid var(--line, #2C2C2C)">
+<span style="padding: 0 6px; font-weight: 500">{{ local.selText }}</span>
+<span style="flex: 1"></span>
+<button onClick="{{ local.send }}" style="height: 36px; padding: 0 12px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">Upload →</button>
+<button onClick="{{ local.rename }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Rename</button>
+<button style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Copy path</button>
+<button onClick="{{ local.del }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--warn-line, #5A4A33); color: var(--warn, #F2A65A); border-radius: 8px">Delete</button>
+<button onClick="{{ local.clear }}" aria-label="Clear selection" style="width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button>
+</div>
+</sc-if>
+<div style="overflow-x: auto; flex: 1">
+<div style="min-width: 480px">
+<div style="display: grid; grid-template-columns: 28px minmax(0, 1fr) 90px 140px; gap: 10px; align-items: center; padding: 8px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); border-bottom: 1px solid var(--line, #2C2C2C)"><input type="checkbox" aria-label="Select all on this PC" checked="{{ local.all }}" onChange="{{ local.toggleAll }}"><span>Name</span><span>Size</span><span>Modified</span></div>
+<sc-for list="{{ local.files }}" as="f" hint-placeholder-count="9">
+<label class="row" draggable="true" onDragStart="{{ f.dragStart }}" onDragEnd="{{ dragEnd }}" style="display: grid; grid-template-columns: 28px minmax(0, 1fr) 90px 140px; gap: 10px; align-items: center; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--line-soft, #1F1F1F); background: {{ f.bg }}">
+<input type="checkbox" checked="{{ f.on }}" onChange="{{ f.toggle }}">
+<span style="display: flex; align-items: center; gap: 10px; min-width: 0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: {{ f.color }}; flex: none"><path d="{{ f.icon }}"/></svg><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ f.label }}</span></span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.size }}</span>
+<span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.mod }}</span>
+</label>
+</sc-for>
+</div>
+</div>
+</section>
+
+<section onDragOver="{{ remote.over }}" onDrop="{{ remote.drop }}" style="flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; background: var(--ground, #121212); border: {{ remote.border }}; border-top: 2px solid var(--group-mint, #7FD6B5); border-radius: 8px; overflow: hidden">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 14px 6px">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 15px">nas-01</span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--group-mint, #7FD6B5); border: 1px solid var(--group-mint, #7FD6B5); border-radius: 4px; padding: 1px 6px">Home lab</span>
+<span style="font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft, #CFCFCF); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 4px; padding: 1px 6px">Via Tailscale</span>
+<span style="flex: 1"></span>
+<label style="display: flex; align-items: center; gap: 8px; background: var(--card, #1C1C1C); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 10px; height: 36px; flex: 0 1 200px; min-width: 120px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" role="img" aria-label="Filter" style="stroke: var(--ink-muted, #A3A3A3)"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg><input type="text" value="{{ remote.q }}" onChange="{{ remote.setQ }}" placeholder="Filter" style="flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--ink, #EDEDED); font: inherit"></label>
+</div>
+<div style="display: flex; align-items: center; gap: 4px; padding: 0 10px 8px; border-bottom: 1px solid var(--line, #2C2C2C)">
+<button aria-label="Back" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+<button aria-label="Up one folder" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+<button aria-label="Refresh" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/></svg></button>
+<div style="flex: 1; min-width: 0; display: flex; align-items: center; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px; white-space: nowrap">
+<sc-for list="{{ remote.crumbs }}" as="c" hint-placeholder-count="5"><button class="crumb" style="background: none; border: none; color: {{ c.color }}; padding: 8px 6px; border-radius: 6px; font: inherit">{{ c.label }}</button><span aria-hidden="true" style="color: var(--ink-faint, #666666)">{{ c.sep }}</span></sc-for>
+</div>
+<button aria-label="Bookmarks for nas-01" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3); border-radius: 6px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg></button>
+</div>
+<sc-if value="{{ remote.target }}" hint-placeholder-val="{{ false }}">
+<div style="margin: 8px; padding: 14px; border: 1px dashed var(--accent, #5CC8FF); border-radius: 8px; background: rgba(92,200,255,0.08); color: var(--accent, #5CC8FF); text-align: center; font-weight: 500">Drop to upload into /mnt/tank/www/site</div>
+</sc-if>
+<sc-if value="{{ remote.hasSel }}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; background: var(--card, #1C1C1C); border-bottom: 1px solid var(--line, #2C2C2C)">
+<span style="padding: 0 6px; font-weight: 500">{{ remote.selText }}</span>
+<span style="flex: 1"></span>
+<button onClick="{{ remote.send }}" style="height: 36px; padding: 0 12px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">← Download</button>
+<button onClick="{{ remote.rename }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Rename</button>
+<button onClick="{{ openPerm }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Permissions</button>
+<button style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Copy path</button>
+<button onClick="{{ remote.del }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--warn-line, #5A4A33); color: var(--warn, #F2A65A); border-radius: 8px">Delete</button>
+<button onClick="{{ remote.clear }}" aria-label="Clear selection" style="width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button>
+</div>
+</sc-if>
+<div style="overflow-x: auto; flex: 1">
+<div style="min-width: 560px">
+<div style="display: grid; grid-template-columns: 28px minmax(0, 1fr) 80px 110px 100px; gap: 10px; align-items: center; padding: 8px 14px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); border-bottom: 1px solid var(--line, #2C2C2C)"><input type="checkbox" aria-label="Select all on nas-01" checked="{{ remote.all }}" onChange="{{ remote.toggleAll }}"><span>Name</span><span>Size</span><span>Modified</span><span>Permissions</span></div>
+<sc-for list="{{ remote.files }}" as="f" hint-placeholder-count="9">
+<label class="row" draggable="true" onDragStart="{{ f.dragStart }}" onDragEnd="{{ dragEnd }}" style="display: grid; grid-template-columns: 28px minmax(0, 1fr) 80px 110px 100px; gap: 10px; align-items: center; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--line-soft, #1F1F1F); background: {{ f.bg }}">
+<input type="checkbox" checked="{{ f.on }}" onChange="{{ f.toggle }}">
+<span style="display: flex; align-items: center; gap: 10px; min-width: 0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="stroke: {{ f.color }}; flex: none"><path d="{{ f.icon }}"/></svg><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ f.label }}</span></span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.size }}</span>
+<span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.mod }}</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ f.perm }}</span>
+</label>
+</sc-for>
+</div>
+</div>
+</section>
+
+</div>
+
+<div style="border-top: 1px solid var(--line, #2C2C2C); background: var(--panel, #171717); padding: 14px 18px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px"><span style="font-family: 'Space Grotesk', sans-serif; font-weight: 600">Transfers</span><span style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ queueSummary }}</span><span style="flex: 1"></span>
+<button onClick="{{ toggleDone }}" aria-expanded="{{ showDone }}" style="height: 36px; padding: 0 12px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">{{ doneLabel }}</button></div>
+<div style="display: flex; flex-direction: column; border: 1px solid var(--line, #2C2C2C); border-radius: 10px; background: var(--card, #1C1C1C); overflow: hidden">
+<sc-for list="{{ queue }}" as="t" hint-placeholder-count="4">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 8px 8px 14px; border-bottom: 1px solid var(--line, #2C2C2C)">
+<div style="flex: 1 1 200px; min-width: 0"><div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ t.name }}</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3)">{{ t.route }}</div></div>
+<div style="flex: 2 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<div style="height: 4px; background: var(--line, #2C2C2C); border-radius: 2px"><div style="width: {{ t.width }}; height: 4px; background: {{ t.color }}; border-radius: 2px"></div></div>
+<div style="font-size: 12px; color: {{ t.metaColor }}">{{ t.meta }}</div>
+</div>
+<div style="display: flex; align-items: center; gap: 2px">
+<sc-if value="{{ t.canToggle }}" hint-placeholder-val="{{ true }}"><button onClick="{{ t.toggle }}" style="height: 36px; padding: 0 10px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px; font-size: 13px">{{ t.toggleLabel }}</button></sc-if>
+<button onClick="{{ t.remove }}" aria-label="Remove {{ t.name }} from the queue" style="width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button>
+</div>
+</div>
+</sc-for>
+<sc-if value="{{ queueEmpty }}" hint-placeholder-val="{{ false }}"><div style="padding: 18px; color: var(--ink-muted, #A3A3A3); text-align: center">Nothing in the queue. Drag files between the panes to start a transfer.</div></sc-if>
+<sc-if value="{{ showDone }}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line, #2C2C2C); color: var(--ink-muted, #A3A3A3)"><span>robots.txt</span><span style="font-size: 12px">Uploaded to nas-01 · 72 B</span></div>
+<div style="display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; color: var(--ink-muted, #A3A3A3)"><span>deploy.sh</span><span style="font-size: 12px">Downloaded to This PC · 940 B</span></div>
+</sc-if>
+</div>
+</div>
+
+</main>
+</div>
+<sc-if value="{{ permOpen }}" hint-placeholder-val="{{ false }}">
+<div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px">
+<button onClick="{{ closePerm }}" aria-label="Close permissions" style="position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); border: none; cursor: default"></button>
+<div role="dialog" aria-modal="true" aria-labelledby="perm-title" style="position: relative; width: 100%; max-width: 460px; box-sizing: border-box; background: var(--card, #1C1C1C); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 32px 80px rgba(0,0,0,0.6)">
+<div style="display: flex; align-items: flex-start; gap: 12px">
+<div style="flex: 1; min-width: 0"><h2 id="perm-title" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">{{ permTitle }}</h2><div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--ink-muted, #A3A3A3); margin-top: 6px; word-break: break-all">{{ permPath }}</div></div>
+<button onClick="{{ closePerm }}" aria-label="Close" style="flex: none; width: 36px; height: 36px; background: none; border: none; color: var(--ink-muted, #A3A3A3)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"/></svg></button>
+</div>
+<div style="display: flex; flex-direction: column">
+<div style="display: grid; grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(0, 1fr)); gap: 8px; align-items: center; padding-bottom: 6px"><span></span><span style="font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); text-align: center">Read</span><span style="font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); text-align: center">Write</span><span style="font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted, #A3A3A3); text-align: center">Run</span></div>
+<sc-for list="{{ permRows }}" as="r" hint-placeholder-count="3">
+<div style="display: grid; grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(0, 1fr)); gap: 8px; align-items: center; border-top: 1px solid var(--line, #2C2C2C)"><span>{{ r.who }}</span><label style="display: flex; align-items: center; justify-content: center; min-height: 44px"><input type="checkbox" aria-label="{{ r.a.label }}" checked="{{ r.a.on }}" onChange="{{ r.a.toggle }}"></label><label style="display: flex; align-items: center; justify-content: center; min-height: 44px"><input type="checkbox" aria-label="{{ r.b.label }}" checked="{{ r.b.on }}" onChange="{{ r.b.toggle }}"></label><label style="display: flex; align-items: center; justify-content: center; min-height: 44px"><input type="checkbox" aria-label="{{ r.c.label }}" checked="{{ r.c.on }}" onChange="{{ r.c.toggle }}"></label></div>
+</sc-for>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 12px 14px; font-family: 'JetBrains Mono', monospace"><span style="font-size: 20px">{{ octal }}</span><span style="color: var(--ink-muted, #A3A3A3)">{{ symbolic }}</span></div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-muted, #A3A3A3)">Owner<input type="text" value="admin" readonly style="height: 44px; box-sizing: border-box; width: 100%; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 12px; color: var(--ink, #EDEDED); font: 14px Inter, sans-serif; outline: none"></label>
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-muted, #A3A3A3)">Group<input type="text" value="www-data" readonly style="height: 44px; box-sizing: border-box; width: 100%; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 12px; color: var(--ink, #EDEDED); font: 14px Inter, sans-serif; outline: none"></label>
+</div>
+<div style="display: flex; gap: 8px">
+<button onClick="{{ closePerm }}" style="flex: 1; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Cancel</button>
+<button onClick="{{ applyPerm }}" style="flex: 1; height: 44px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">Apply</button>
+</div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{ isRename }}" hint-placeholder-val="{{ false }}">
+<div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px">
+<button onClick="{{ closeDlg }}" aria-label="Close dialog" style="position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); border: none; cursor: default"></button>
+<div role="dialog" aria-modal="true" aria-labelledby="dlg-rename" style="position: relative; width: 100%; max-width: 460px; box-sizing: border-box; background: var(--card, #1C1C1C); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 32px 80px rgba(0,0,0,0.6)">
+<h2 id="dlg-rename" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">Rename on {{ dlgWhere }}</h2>
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-muted, #A3A3A3)">New name<input type="text" value="{{ newName }}" onChange="{{ setNewName }}" style="height: 44px; box-sizing: border-box; width: 100%; background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 0 12px; color: var(--ink, #EDEDED); font: 13px 'JetBrains Mono', monospace; outline: none"></label>
+<div style="font-size: 12px; color: {{ nameColor }}">{{ nameNote }}</div>
+<div style="display: flex; gap: 8px"><button onClick="{{ closeDlg }}" style="flex: 1; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Cancel</button><button onClick="{{ applyRename }}" style="flex: 1; height: 44px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">Rename</button></div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{ isDelete }}" hint-placeholder-val="{{ false }}">
+<div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px">
+<button onClick="{{ closeDlg }}" aria-label="Close dialog" style="position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); border: none; cursor: default"></button>
+<div role="alertdialog" aria-modal="true" aria-labelledby="dlg-delete" style="position: relative; width: 100%; max-width: 460px; box-sizing: border-box; background: var(--warn-surface, #1C1710); border: 1px solid var(--warn, #F2A65A); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 32px 80px rgba(0,0,0,0.6)">
+<div><h2 id="dlg-delete" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">{{ delTitle }}</h2><div style="color: var(--warn-ink, #D9CDBB); margin-top: 6px; line-height: 1.5">{{ delNote }}</div></div>
+<div style="background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 12px 14px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.7; max-height: 180px; overflow-y: auto"><sc-for list="{{ delItems }}" as="i" hint-placeholder-count="2"><div>{{ i.n }}</div></sc-for></div>
+<div style="display: flex; gap: 8px"><button onClick="{{ closeDlg }}" style="flex: 1; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Cancel</button><button onClick="{{ applyDelete }}" style="flex: 1; height: 44px; background: var(--warn, #F2A65A); color: var(--on-warn, #2A1A05); border: none; border-radius: 8px; font-weight: 600">Delete</button></div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{ isConflict }}" hint-placeholder-val="{{ false }}">
+<div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px">
+<button onClick="{{ closeDlg }}" aria-label="Close dialog" style="position: absolute; inset: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); border: none; cursor: default"></button>
+<div role="dialog" aria-modal="true" aria-labelledby="dlg-conflict" style="position: relative; width: 100%; max-width: 460px; box-sizing: border-box; background: var(--card, #1C1C1C); border: 1px solid var(--line-strong, #3D3D3D); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 32px 80px rgba(0,0,0,0.6)">
+<div><h2 id="dlg-conflict" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600">{{ clashTitle }}</h2><div style="color: var(--ink-muted, #A3A3A3); margin-top: 6px; line-height: 1.5">{{ clashNote }}</div></div>
+<div style="background: var(--ground, #121212); border: 1px solid var(--line, #2C2C2C); border-radius: 8px; padding: 12px 14px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.7; max-height: 180px; overflow-y: auto"><sc-for list="{{ clashItems }}" as="i" hint-placeholder-count="1"><div>{{ i.n }}</div></sc-for></div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px"><button onClick="{{ overwrite }}" style="flex: 1 1 110px; height: 44px; background: var(--accent, #5CC8FF); color: var(--on-accent, #06202E); border: none; border-radius: 8px; font-weight: 600">Overwrite</button><button onClick="{{ keepBoth }}" style="flex: 1 1 110px; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Keep both</button><button onClick="{{ skip }}" style="flex: 1 1 80px; height: 44px; background: none; border: 1px solid var(--line-strong, #3D3D3D); color: var(--ink, #EDEDED); border-radius: 8px">Skip</button><button onClick="{{ closeDlg }}" style="flex: 1 1 110px; height: 44px; background: none; border: 1px solid transparent; color: var(--ink-muted, #A3A3A3); border-radius: 8px">Cancel all</button></div>
+<div style="font-size: 12px; color: var(--ink-muted, #A3A3A3)">Keep both adds (1) to the name of the incoming file. Skip transfers only the files without a conflict.</div>
+</div>
+</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = Object.assign({
+      sel: { local: { 'deploy.ps1': true, 'README.md': true }, remote: { 'deploy.sh': true } },
+      perm: false, mode: [1, 1, 1, 1, 0, 1, 0, 0, 0], perms: {}, dlg: null, newName: '', names: {}, gone: {},
+      q: { local: '', remote: '' }, drag: null, showDone: false,
+      queue: [
+        { id: 1, name: 'assets.tar.gz', dir: 'up', status: 'active', pct: 64, rate: '4.2 MB/s', eta: '4 s left' },
+        { id: 2, name: 'backup-2026-11-24.sql', dir: 'down', status: 'active', pct: 28, rate: '1.1 MB/s', eta: '3 min left' },
+        { id: 3, name: 'index.html', dir: 'up', status: 'queued', pct: 0 },
+        { id: 4, name: 'nginx.conf', dir: 'down', status: 'failed', pct: 0, error: 'Permission denied' }
+      ]
+    }, this.state || {});
+    const FILE = 'M6 3h8l4 4v14H6zM14 3v4h4';
+    const K = {
+      folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'var(--accent, #5CC8FF)'],
+      link: ['M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1', 'var(--group-violet, #B9A5FF)'],
+      archive: [FILE + 'M10 10h2M10 13h2M10 16h2', 'var(--ink-soft, #CFCFCF)'],
+      code: [FILE + 'M10 12l-2 2 2 2M14 12l2 2-2 2', 'var(--group-mint, #7FD6B5)'],
+      text: [FILE + 'M9 12h6M9 15h6', 'var(--ink-muted, #A3A3A3)'],
+      config: [FILE + 'M9 12h2M13 12h2M9 16h4', 'var(--ink-muted, #A3A3A3)'],
+      lock: ['M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z', 'var(--ink-muted, #A3A3A3)']
+    };
+    const data = {
+      local: [
+        ['src', 'folder', '', '24 Nov 2026 16:02'], ['public', 'folder', '', '22 Nov 2026 09:40'], ['dist', 'folder', '', '24 Nov 2026 16:10'],
+        ['assets.tar.gz', 'archive', '48.2 MB', '24 Nov 2026 16:11'], ['index.html', 'code', '6.1 KB', '24 Nov 2026 15:58'],
+        ['Cargo.toml', 'config', '1.2 KB', '20 Nov 2026 11:14'], ['deploy.ps1', 'code', '2.4 KB', '18 Nov 2026 10:03'],
+        ['README.md', 'text', '3.0 KB', '12 Nov 2026 14:27'], ['.env.example', 'lock', '310 B', '02 Nov 2026 08:51']
+      ],
+      remote: [
+        ['backups', 'folder', '', '24 Nov 2026', 'drwxr-x---'], ['releases', 'folder', '', '23 Nov 2026', 'drwxr-xr-x'], ['shared', 'folder', '', '10 Nov 2026', 'drwxrwxr-x'],
+        ['current', 'link', '', '23 Nov 2026', 'lrwxrwxrwx'], ['index.html', 'code', '5.9 KB', '23 Nov 2026', '-rw-r--r--'],
+        ['robots.txt', 'text', '72 B', '01 Oct 2026', '-rw-r--r--'], ['nginx.conf', 'config', '1.8 KB', '15 Nov 2026', '-rw-r-----'],
+        ['deploy.sh', 'code', '940 B', '15 Nov 2026', '-rwxr-x---'], ['.htpasswd', 'lock', '128 B', '03 Sep 2026', '-rw-------']
+      ]
+    };
+    const paths = { local: ['This PC', 'C:', 'Users', '[YOU]', 'Projects', 'site'], remote: ['/', 'mnt', 'tank', 'www', 'site'] };
+    const setSel = (pane, next) => this.setState({ sel: Object.assign({}, s.sel, { [pane]: next }) });
+    const enqueue = (src, mode) => {
+      const dst = src === 'local' ? 'remote' : 'local';
+      const names = Object.keys(s.sel[src]).filter((n) => s.sel[src][n]);
+      const clash = names.filter((n) => data[dst].some((r) => r[0] === n && !s.gone[dst + ':' + n]));
+      if (clash.length && !mode) { this.setState({ dlg: { type: 'conflict', pane: src, clash }, drag: null }); return; }
+      const keep = names.filter((n) => mode !== 'skip' || !clash.includes(n));
+      const added = keep.map((name, i) => ({ id: Date.now() + i, name: mode === 'both' && clash.includes(name) ? name.replace(/(\.[^.]*)?$/, ' (1)$1') : name, dir: src === 'local' ? 'up' : 'down', status: 'queued', pct: 0 }));
+      this.setState({ queue: s.queue.concat(added), sel: Object.assign({}, s.sel, { [src]: {} }), drag: null, dlg: null });
+    };
+    const pane = (key) => {
+      const other = key === 'local' ? 'remote' : 'local';
+      const sel = s.sel[key];
+      const q = s.q[key].trim().toLowerCase();
+      const rows = data[key].filter((r) => !s.gone[key + ':' + r[0]] && (!q || (s.names[key + ':' + r[0]] || r[0]).toLowerCase().includes(q)));
+      const count = Object.keys(sel).filter((n) => sel[n]).length;
+      const target = s.drag === other;
+      return {
+        q: s.q[key],
+        setQ: (e) => this.setState({ q: Object.assign({}, s.q, { [key]: e.target.value }) }),
+        crumbs: paths[key].map((label, i, a) => ({ label, sep: i < a.length - 1 ? '›' : '', color: i === a.length - 1 ? 'var(--ink, #EDEDED)' : 'var(--ink-muted, #A3A3A3)' })),
+        target,
+        border: target ? '1px dashed var(--accent, #5CC8FF)' : '1px solid var(--line, #2C2C2C)',
+        over: (e) => { if (target) e.preventDefault(); },
+        drop: (e) => { if (target) { e.preventDefault(); enqueue(other); } },
+        hasSel: count > 0,
+        selText: count === 1 ? '1 item selected' : count + ' items selected',
+        send: () => enqueue(key),
+        clear: () => setSel(key, {}),
+        rename: () => { const x = Object.keys(sel).find((k) => sel[k]); this.setState({ dlg: { type: 'rename', pane: key, name: x }, newName: s.names[key + ':' + x] || x }); },
+        del: () => this.setState({ dlg: { type: 'delete', pane: key } }),
+        all: rows.length > 0 && rows.every((r) => sel[r[0]]),
+        toggleAll: () => setSel(key, rows.every((r) => sel[r[0]]) ? {} : Object.fromEntries(rows.map((r) => [r[0], true]))),
+        files: rows.map(([name, kind, size, mod, perm]) => ({
+          name, label: s.names[key + ':' + name] || name, mod, perm: s.perms[key + ':' + name] || perm, size: size || 'Folder', icon: K[kind][0], color: K[kind][1],
+          on: !!sel[name], bg: sel[name] ? 'var(--card-selected, #242424)' : 'transparent',
+          toggle: () => setSel(key, Object.assign({}, sel, { [name]: !sel[name] })),
+          dragStart: () => this.setState({ drag: key, sel: Object.assign({}, s.sel, { [key]: sel[name] ? sel : { [name]: true } }) })
+        }))
+      };
+    };
+    const patch = (id, p) => this.setState({ queue: s.queue.map((t) => (t.id === id ? Object.assign({}, t, p) : t)) });
+    const queue = s.queue.map((t) => {
+      const up = t.dir === 'up';
+      const v = {
+        active: { meta: t.pct + '% · ' + t.rate + ' · ' + t.eta, color: up ? 'var(--accent, #5CC8FF)' : 'var(--group-violet, #B9A5FF)', label: 'Pause', next: 'paused' },
+        paused: { meta: 'Paused at ' + t.pct + '%', color: 'var(--ink-faint, #666666)', label: 'Resume', next: 'active' },
+        queued: { meta: 'Queued', color: 'var(--ink-faint, #666666)' },
+        failed: { meta: 'Failed: ' + t.error, color: 'var(--warn, #F2A65A)', label: 'Retry', next: 'queued' }
+      }[t.status];
+      return {
+        name: t.name, route: up ? 'This PC → nas-01' : 'nas-01 → This PC',
+        width: t.pct + '%', color: v.color, meta: v.meta, metaColor: t.status === 'failed' ? 'var(--warn, #F2A65A)' : 'var(--ink-muted, #A3A3A3)',
+        canToggle: !!v.label, toggleLabel: v.label || '',
+        toggle: () => patch(t.id, { status: v.next }),
+        remove: () => this.setState({ queue: s.queue.filter((x) => x.id !== t.id) })
+      };
+    });
+    const n = (st) => s.queue.filter((t) => t.status === st).length;
+    const parts = [[n('active'), 'active'], [n('paused'), 'paused'], [n('queued'), 'queued'], [n('failed'), 'failed']].filter((p) => p[0]).map((p) => p[0] + ' ' + p[1]);
+    const d = s.dlg || {};
+    const dsel = d.pane ? Object.keys(s.sel[d.pane]).filter((x) => s.sel[d.pane][x]) : [];
+    const where = d.pane === 'remote' ? 'nas-01' : 'This PC';
+    const shown = (p, x) => s.names[p + ':' + x] || x;
+    const nn = s.newName.trim();
+    const taken = d.type === 'rename' && nn !== d.name && data[d.pane].some((r) => shown(d.pane, r[0]) === nn && !s.gone[d.pane + ':' + r[0]]);
+    const badName = !nn || nn.includes('/');
+    const clash = d.clash || [];
+    const rsel = Object.keys(s.sel.remote).filter((n) => s.sel.remote[n]);
+    const orig = (n) => s.perms['remote:' + n] || (data.remote.find((r) => r[0] === n) || [])[4] || '----------';
+    const who = ['Owner', 'Group', 'Everyone else'], what = ['read', 'write', 'run'];
+    const bit = (i) => ({ on: !!s.mode[i], label: who[Math.floor(i / 3)] + ' can ' + what[i % 3], toggle: () => this.setState({ mode: s.mode.map((v, j) => (j === i ? (v ? 0 : 1) : v)) }) });
+    const digit = (k) => s.mode[k] * 4 + s.mode[k + 1] * 2 + s.mode[k + 2];
+    const sym = s.mode.map((v, i) => (v ? 'rwx'[i % 3] : '-')).join('');
+    return {
+      permOpen: s.perm && rsel.length > 0,
+      permTitle: rsel.length === 1 ? 'Permissions for ' + rsel[0] : 'Permissions for ' + rsel.length + ' items',
+      permPath: rsel.length === 1 ? '/mnt/tank/www/site/' + rsel[0] : 'The same permissions are applied to every selected item.',
+      openPerm: () => this.setState({ perm: true, mode: orig(rsel[0]).slice(1).split('').map((c) => (c === '-' ? 0 : 1)) }),
+      closePerm: () => this.setState({ perm: false }),
+      applyPerm: () => this.setState({ perm: false, perms: Object.assign({}, s.perms, Object.fromEntries(rsel.map((n) => ['remote:' + n, orig(n)[0] + sym]))) }),
+      permRows: who.map((w, k) => ({ who: w, a: bit(k * 3), b: bit(k * 3 + 1), c: bit(k * 3 + 2) })),
+      octal: '' + digit(0) + digit(3) + digit(6), symbolic: sym,
+      closeDlg: () => this.setState({ dlg: null }),
+      isRename: d.type === 'rename', isDelete: d.type === 'delete', isConflict: d.type === 'conflict',
+      dlgWhere: where,
+      newName: s.newName, setNewName: (e) => this.setState({ newName: e.target.value }),
+      nameNote: badName ? 'Enter a name without a slash.' : taken ? 'Something with this name already exists in this folder.' : 'Renames ' + (d.name ? shown(d.pane, d.name) : ''),
+      nameColor: badName || taken ? 'var(--warn, #F2A65A)' : 'var(--ink-muted, #A3A3A3)',
+      applyRename: () => { if (!badName && !taken) this.setState({ dlg: null, names: Object.assign({}, s.names, { [d.pane + ':' + d.name]: nn }) }); },
+      delTitle: 'Delete ' + (dsel.length === 1 ? shown(d.pane, dsel[0]) : dsel.length + ' items') + ' from ' + where + '?',
+      delNote: d.pane === 'remote' ? 'Files deleted over SFTP do not go to a recycle bin. This cannot be undone.' : 'These are moved to the Recycle Bin on this PC.',
+      delItems: dsel.map((x) => ({ n: shown(d.pane, x) })),
+      applyDelete: () => this.setState({ dlg: null, gone: Object.assign({}, s.gone, Object.fromEntries(dsel.map((x) => [d.pane + ':' + x, true]))), sel: Object.assign({}, s.sel, { [d.pane]: {} }) }),
+      clashTitle: clash.length === 1 ? clash[0] + ' already exists' : clash.length + ' files already exist',
+      clashNote: (d.pane === 'local' ? 'Uploading to /mnt/tank/www/site on nas-01.' : 'Downloading to this PC.') + ' Your choice applies to every conflict in this transfer.',
+      clashItems: clash.map((x) => ({ n: x })),
+      overwrite: () => enqueue(d.pane, 'overwrite'), keepBoth: () => enqueue(d.pane, 'both'), skip: () => enqueue(d.pane, 'skip'),
+      local: pane('local'), remote: pane('remote'),
+      dragEnd: () => this.setState({ drag: null }),
+      queue, queueEmpty: queue.length === 0,
+      queueSummary: parts.length ? parts.join(' · ') : 'Idle',
+      showDone: s.showDone,
+      toggleDone: () => this.setState({ showDone: !s.showDone }),
+      doneLabel: s.showDone ? 'Hide finished (2)' : 'Show finished (2)'
+    };
+  }
+}
+</script>
+</body>
+</html>
