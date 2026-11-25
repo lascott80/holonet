@@ -43,6 +43,7 @@ async fn run_until(shell: &mut Shell, command: &str, marker: &str) -> Result<(St
             }
             ShellEvent::Exit(code) => bail!("shell exited with {code}"),
             ShellEvent::Closed => bail!("shell closed"),
+            ShellEvent::Lost(reason) => bail!("connection lost: {reason}"),
         }
     }
     bail!("event stream ended")

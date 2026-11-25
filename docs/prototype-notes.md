@@ -445,3 +445,40 @@ The spike also logs whenever the wall clock and the monotonic clock jump apart, 
 ### Left in the tree for later phases
 - `holonet --font-spike` (`src/font_spike.rs`) stays as a regression check until phase 2 embeds the fonts. It is removed in phase 9.
 - `examples/power_spike.rs` and its `windows-sys` dev-dependency stay for phase 7's live test.
+
+## Milestone 3, phase 1: settings model and lost connections (25 Nov 2026)
+
+**`holonet-model`.**
+- `Settings` gains `terminal: TerminalSettings` and `connection: ConnectionSettings`. Both use `#[serde(default)]`, so milestone 2 vaults open unchanged: the throwaway vault from milestone 2 unlocked and connected as before.
+- `TerminalSettings` holds:
+  - `font` (`Bundled(NerdFont | NerdFontMono | NerdFontPropo | NerdFontNl)` or `Installed(name)`)
+  - `font_size` (10 to 20) and `line_height_tenths` (10 to 18), clamped when read
+  - `ligatures`, `cursor` (Block, Bar or Underline), `cursor_blink`
+  - `scheme` (Holonet Dark, High contrast or Light), `scrollback` (10,000, 50,000 or unlimited)
+  - `copy_on_select`, `right_click_pastes`
+- The defaults match `Settings.dc.html`. `ligatures_on()` is false for the NL build, whatever the switch says.
+- `ConnectionSettings` holds `keep_alive` (30 s, 60 s or off) and `reconnect` (on). `keep_alive_for(host)` honours the host form's own keep-alive switch.
+- 3 new tests: a settings block as milestone 2 wrote it, partial and clamped values, and the keep-alive combination.
+
+**`holonet-ssh`.**
+- `ConnectOptions::keep_alive` is now `Option<Duration>`, taken from Settings. Three unanswered keep-alives end the connection.
+- A shell ends in one of two ways:
+  - `Exit(code)` followed by `Closed`, or `Closed` alone: the shell ended, so the connection was not lost.
+  - `Lost(LostReason)`: the channel ended with no exit status, EOF or close.
+- The reason comes from russh's `Handler::disconnected` hook:
+  - `ServerDisconnected(message)`
+  - `NoResponse` (keep-alive or inactivity timeout)
+  - `Network(detail)` (reset, or closed without a goodbye)
+  - `Other`
+- Only `Lost` will reconnect, in phase 7. Until then the pane shows it as an ended session with the reason.
+- `Session::lost_reason()` exposes the same reason.
+
+**New WSL tests** (10 in all now):
+
+| Test | Result |
+| --- | --- |
+| `exit 3` in the shell | `Exit(3)`, then `Closed`; no lost reason |
+| `kill -9 $PPID` (kills this connection's sshd process, no SSH goodbye) | `Lost(Network("it closed without warning"))` at once |
+| Keep-alive every 1 s through a local proxy that stops forwarding but keeps the socket open | `Lost(NoResponse)` 2 to 8 s after the freeze |
+
+The app shows the killed connection as "Session ended. The network connection failed: it closed without warning". Phases 6 and 7 replace this with the designed wording.

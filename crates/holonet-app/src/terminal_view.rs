@@ -202,6 +202,12 @@ impl TerminalView {
                 ShellEvent::Exit(code) => {
                     self.connection = Connection::Ended(format!("The shell exited with code {code}."))
                 }
+                ShellEvent::Lost(reason) => {
+                    // Reconnecting comes in milestone 3 phase 7.
+                    self.connection = Connection::Ended(reason.to_string());
+                    self.input = None;
+                    cx.emit(TerminalEvent::Ended(reason.to_string()));
+                }
                 ShellEvent::Closed => {
                     if !matches!(self.connection, Connection::Ended(_)) {
                         self.connection = Connection::Ended("The connection closed.".into());

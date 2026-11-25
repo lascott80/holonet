@@ -142,7 +142,7 @@ pub fn options_from(mode: &str, env: &HashMap<String, String>) -> Result<Connect
         user: get(env, "HOLONET_TEST_USER")?.clone(),
         credential,
         connect_timeout: Duration::from_secs(10),
-        keep_alive: true,
+        keep_alive: Some(holonet_ssh::KEEPALIVE),
         prompts: FilePrompts::with_answers(root().join(".dev/known_hosts"), answers),
     })
 }

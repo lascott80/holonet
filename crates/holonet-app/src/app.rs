@@ -13,7 +13,7 @@ use holonet_model::{HostId, KnownHostSource, Mismatch, Timestamp, VaultData};
 use holonet_ssh::{PresentedKey, classify};
 use holonet_vault::UnlockedVault;
 
-use crate::session::{KeyCheck, SessionEvent, SessionTab};
+use crate::session::{KeyCheck, Limits, SessionEvent, SessionTab};
 use crate::shell::{TabInfo, TabKind, TitleBar};
 use crate::terminal::GridSize;
 use crate::theme;
@@ -146,8 +146,11 @@ impl HolonetApp {
         };
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
-        let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
-        let tab = cx.new(|cx| SessionTab::new(app, host, key, runtime, timeout, size, window, cx));
+        let limits = Limits {
+            connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
+            keep_alive: data.settings.connection.keep_alive_for(&host),
+        };
+        let tab = cx.new(|cx| SessionTab::new(app, host, key, runtime, limits, size, window, cx));
         cx.subscribe_in(&tab, window, |this, tab, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_session(tab, window, cx),
             SessionEvent::ReviewKnownHost => {

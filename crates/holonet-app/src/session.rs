@@ -118,7 +118,7 @@ pub struct SessionTab {
     pub host: Host,
     key: Option<StoredKey>,
     runtime: tokio::runtime::Handle,
-    connect_timeout: Duration,
+    limits: Limits,
     state: State,
     log: Vec<(SharedString, bool)>,
     terminal: Entity<TerminalView>,
@@ -139,6 +139,14 @@ pub struct SessionTab {
 
 impl EventEmitter<SessionEvent> for SessionTab {}
 
+/// Connection timing from Settings, read when the tab is created.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub connect_timeout: Duration,
+    /// Already combined with the host's own keep-alive switch.
+    pub keep_alive: Option<Duration>,
+}
+
 impl SessionTab {
     #[allow(clippy::too_many_arguments)] // GPUI context plus the connection's inputs
     pub fn new(
@@ -146,7 +154,7 @@ impl SessionTab {
         host: Host,
         key: Option<StoredKey>,
         runtime: tokio::runtime::Handle,
-        connect_timeout: Duration,
+        limits: Limits,
         size: GridSize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -167,7 +175,7 @@ impl SessionTab {
             host,
             key,
             runtime,
-            connect_timeout,
+            limits,
             state: State::Connecting,
             log: Vec::new(),
             terminal,
@@ -241,15 +249,15 @@ impl SessionTab {
             }
         };
         // Not read from the app: `start` runs while the app creates this tab.
-        let timeout = self.connect_timeout;
+        let limits = self.limits;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let opts = ConnectOptions {
             host: self.host.address.trim().to_string(),
             port: self.host.port,
             user: self.host.username.clone(),
             credential,
-            connect_timeout: timeout,
-            keep_alive: self.host.keep_alive,
+            connect_timeout: limits.connect_timeout,
+            keep_alive: limits.keep_alive,
             prompts: Arc::new(UiPrompts(tx)),
         };
         let size = self.terminal.read(cx).grid_size();

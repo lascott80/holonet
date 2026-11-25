@@ -4,12 +4,20 @@
 //!
 //!   $env:HOLONET_TEST_SERVER = "1"; cargo test -p holonet-ssh --test wsl
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use holonet_model::Secret;
 mod support;
 
-use holonet_ssh::{ConnectError, Credential, SecretRequest, Session};
+use holonet_ssh::{
+    BoxFuture, ConnectError, Credential, HostKeyDecision, LostReason, PresentedKey, Prompts, PtySize, SecretRequest,
+    Session, Shell, ShellEvent, ShellInput,
+};
 use support::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
 
 fn enabled() -> bool {
@@ -164,4 +172,137 @@ async fn probe_returns_host_key_without_signing_in() {
         holonet_ssh::probe(&env["HOLONET_TEST_HOST"], 2299, Duration::from_secs(5)).await,
         Err(ConnectError::Refused)
     ));
+}
+
+/// How a shell ended, collected until the shell task stops (or 20 s pass).
+#[derive(Debug, PartialEq)]
+enum End {
+    ExitThenClosed(u32),
+    Closed,
+    Lost(LostReason),
+    Timeout,
+}
+
+async fn wait_for_end(shell: &mut Shell) -> End {
+    let mut exit = None;
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return End::Timeout,
+            event = shell.events.recv() => match event {
+                Some(ShellEvent::Output(_)) => {}
+                Some(ShellEvent::Exit(code)) => exit = Some(code),
+                Some(ShellEvent::Closed) | None => {
+                    return exit.map_or(End::Closed, End::ExitThenClosed);
+                }
+                Some(ShellEvent::Lost(reason)) => return End::Lost(reason),
+            },
+        }
+    }
+}
+
+fn type_line(shell: &Shell, line: &str) {
+    shell.input.send(ShellInput::Data(format!("{line}\n").into_bytes())).unwrap();
+}
+
+#[tokio::test]
+async fn shell_exit_is_not_a_lost_connection() {
+    if !enabled() {
+        return;
+    }
+    let session = Session::connect(options_from("ed25519", &env()).unwrap()).await.unwrap();
+    let mut shell = session.open_shell(PtySize::cells(80, 24)).await.unwrap();
+    type_line(&shell, "exit 3");
+    assert_eq!(wait_for_end(&mut shell).await, End::ExitThenClosed(3));
+    assert_eq!(session.lost_reason(), None);
+}
+
+#[tokio::test]
+async fn killed_connection_is_lost() {
+    if !enabled() {
+        return;
+    }
+    let session = Session::connect(options_from("ed25519", &env()).unwrap()).await.unwrap();
+    let mut shell = session.open_shell(PtySize::cells(80, 24)).await.unwrap();
+    // The login shell's parent is this connection's sshd process: killing it
+    // drops the TCP connection with no SSH goodbye, like a crashed server.
+    type_line(&shell, "kill -9 $PPID");
+    match wait_for_end(&mut shell).await {
+        End::Lost(reason @ (LostReason::Network(_) | LostReason::Other(_))) => eprintln!("lost: {reason}"),
+        other => panic!("expected a lost connection, got {other:?}"),
+    }
+}
+
+/// Accepts any host key: the keep-alive test connects through a local proxy,
+/// whose address is not in `.dev/known_hosts`.
+struct TrustAny;
+
+impl Prompts for TrustAny {
+    fn host_key(&self, _key: PresentedKey) -> BoxFuture<HostKeyDecision> {
+        Box::pin(async { HostKeyDecision::Continue })
+    }
+    fn secret(&self, _request: SecretRequest) -> BoxFuture<Option<Secret>> {
+        Box::pin(async { None })
+    }
+}
+
+/// A one-connection TCP proxy that can stop forwarding while keeping the
+/// socket open, as a sleeping PC or a dead route looks to the client.
+async fn freezable_proxy(target: (String, u16)) -> (u16, Arc<AtomicBool>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let frozen = Arc::new(AtomicBool::new(false));
+    let f = frozen.clone();
+    tokio::spawn(async move {
+        let (client, _) = listener.accept().await.unwrap();
+        let server = tokio::net::TcpStream::connect(target).await.unwrap();
+        let (cr, cw) = client.into_split();
+        let (sr, sw) = server.into_split();
+        tokio::spawn(pump(cr, sw, f.clone()));
+        tokio::spawn(pump(sr, cw, f));
+    });
+    (port, frozen)
+}
+
+async fn pump(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, frozen: Arc<AtomicBool>) {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        if frozen.load(Ordering::Relaxed) {
+            // Swallow everything from now on, without closing either socket.
+            std::future::pending::<()>().await;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unanswered_keep_alives_are_lost() {
+    if !enabled() {
+        return;
+    }
+    let env = env();
+    let (port, frozen) =
+        freezable_proxy((env["HOLONET_TEST_HOST"].clone(), env["HOLONET_TEST_PORT"].parse().unwrap())).await;
+    let mut opts = options_from("ed25519", &env).unwrap();
+    opts.host = "127.0.0.1".into();
+    opts.port = port;
+    opts.prompts = Arc::new(TrustAny);
+    opts.keep_alive = Some(Duration::from_secs(1));
+    let session = Session::connect(opts).await.unwrap();
+    let mut shell = session.open_shell(PtySize::cells(80, 24)).await.unwrap();
+    // Let a few keep-alives succeed first.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    frozen.store(true, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    assert_eq!(wait_for_end(&mut shell).await, End::Lost(LostReason::NoResponse));
+    // Three missed keep-alives at 1 s, give or take a tick.
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_secs(2) && waited < Duration::from_secs(8), "{waited:?}");
 }
