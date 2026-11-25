@@ -2,6 +2,7 @@
 //! Settings). Phases 6 and 7 add the session tab and Known hosts.
 
 mod hosts;
+mod known_hosts;
 
 pub use hosts::format_date;
 
@@ -44,12 +45,20 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 2] = [NavEntry::Hosts, NavEntry::Settings];
+const PAGES: [NavEntry; 3] = [NavEntry::Hosts, NavEntry::KnownHosts, NavEntry::Settings];
 
 pub(crate) enum Page {
     Hosts,
     Form(Entity<HostForm>),
+    KnownHosts,
     Settings,
+}
+
+/// Dialog open on the Known hosts page.
+#[derive(Clone, Copy)]
+pub(crate) enum KhDialog {
+    Forget,
+    Review { expected: bool },
 }
 
 struct ChangePassword {
@@ -71,6 +80,11 @@ pub struct Workspace {
     search: Entity<TextField>,
     cards: bool,
     selected: Option<HostId>,
+    /// Known hosts page: search, filter pill, selected entry, open dialog.
+    kh_search: Entity<TextField>,
+    kh_filter: usize,
+    kh_selected: Option<(String, u16)>,
+    kh_dialog: Option<KhDialog>,
     restored_from_backup: bool,
     save_error: Option<SharedString>,
     notice: Option<SharedString>,
@@ -91,6 +105,7 @@ impl Workspace {
         let unknown_keys = cx
             .new(|cx| Select::new(cx, vec!["Ask every time".into(), "Refuse to connect".into()], usize::from(refuse)));
         let search = cx.new(|cx| TextField::new(cx, "Find a host"));
+        let kh_search = cx.new(|cx| TextField::new(cx, "Filter by host, address or fingerprint"));
         let subscriptions = vec![
             cx.subscribe(&unknown_keys, |this: &mut Self, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = event;
@@ -98,6 +113,10 @@ impl Workspace {
                 this.save(|d| d.settings.unknown_host_keys = policy, cx);
             }),
             cx.subscribe(&search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+                _ => cx.notify(),
+            }),
+            cx.subscribe(&kh_search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
                 _ => cx.notify(),
             }),
@@ -112,6 +131,10 @@ impl Workspace {
             search,
             cards: true,
             selected: None,
+            kh_search,
+            kh_filter: 0,
+            kh_selected: None,
+            kh_dialog: None,
             restored_from_backup,
             save_error: None,
             notice: None,
@@ -181,6 +204,14 @@ impl Workspace {
 
     pub(crate) fn vault_data(&self) -> Option<&holonet_model::VaultData> {
         self.vault.as_ref().map(|v| v.data())
+    }
+
+    /// Open Known hosts with one entry selected.
+    pub(crate) fn show_known_host(&mut self, host: &str, port: u16, cx: &mut Context<Self>) {
+        self.kh_filter = 0;
+        self.kh_selected = Some((host.to_ascii_lowercase(), port));
+        self.page = Page::KnownHosts;
+        cx.notify();
     }
 
     pub(crate) fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -400,6 +431,7 @@ impl Render for Workspace {
         let entity = cx.entity();
         let active = match self.page {
             Page::Settings => NavEntry::Settings,
+            Page::KnownHosts => NavEntry::KnownHosts,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -411,6 +443,7 @@ impl Render for Workspace {
                 .into_any_element(),
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
+            Page::KnownHosts => self.known_hosts_page(cx),
         };
         let app = self.app.clone();
         let dialog = self.change_password_dialog(cx);
@@ -424,7 +457,11 @@ impl Render for Workspace {
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {
-                                this.page = if entry == NavEntry::Settings { Page::Settings } else { Page::Hosts };
+                                this.page = match entry {
+                                    NavEntry::Settings => Page::Settings,
+                                    NavEntry::KnownHosts => Page::KnownHosts,
+                                    _ => Page::Hosts,
+                                };
                                 cx.notify();
                             })
                         }

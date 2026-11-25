@@ -386,7 +386,16 @@ impl Workspace {
                     k.key_type_label(),
                     holonet_ssh::fingerprint(&k.public_key).unwrap_or_default()
                 ))))
-                .child(div().text_meta().text_color(theme::ink_muted()).child("Trusted in Known hosts"))
+                .child({
+                    let (h, p) = (k.host.clone(), k.port);
+                    div()
+                        .id("to-known-hosts")
+                        .text_meta()
+                        .text_color(theme::accent())
+                        .cursor_pointer()
+                        .child("Trusted in Known hosts")
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_known_host(&h, p, cx)))
+                })
                 .into_any_element(),
             None => div()
                 .text_meta()

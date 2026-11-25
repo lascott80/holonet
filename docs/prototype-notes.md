@@ -346,3 +346,22 @@ Connect from the Hosts detail panel, by double-clicking a card or row, or with "
 5. **Singular wording on the Locked screen.**
 
 **Not in milestone 2:** split panes, find, broadcast, snippets, automatic reconnect (milestone 3), and a dedicated key-refused screen variant.
+
+## Milestone 2, phase 7: Known hosts (25 Nov 2026)
+
+**Built.**
+- Known hosts in the side navigation, between Hosts and Settings.
+- Table: host, key type, fingerprint, trusted on, status. Filter pills: All, Saved hosts, No saved host, Needs review. Search matches name, address, fingerprint or key type.
+- Detail panel: a mismatch callout with "Review mismatch", the trusted fingerprint, trusted on, last matched, source, a link to the saved host, Copy fingerprint, Copy public key and "Forget this key" (with a confirmation).
+- Review dialog: the trusted and presented fingerprints side by side. "Keep the trusted key" clears the mismatch. "I expected this change" leads to "Replace trusted key"; the next connection then uses the new key.
+- Links in: "Trusted in Known hosts" on the Hosts detail, and "Review in Known hosts" on a session's changed-key view, which unlocks to Known hosts with that entry selected.
+
+**Checked with real input against the WSL server and a temporary second sshd** (port 2223, with its host key swapped):
+
+| Check | Result |
+| --- | --- |
+| Changed key, then Review in Known hosts | Known hosts opened with the entry selected and "Mismatch seen" |
+| Review, then Keep the trusted key | Mismatch cleared; "Needs review" shows nothing |
+| Forget, with confirmation | Entry removed; the next connect shows the first-connection prompt |
+
+**Fixed during the pass:** the copy buttons overflowed the 320 px panel (now stacked), and the changed-key card was narrower than its wrapper (the wrapper now takes the full width).

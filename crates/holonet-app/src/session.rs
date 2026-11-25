@@ -109,6 +109,8 @@ pub enum SessionEvent {
     Close,
     /// Open the host form for this host.
     EditHost,
+    /// Open Known hosts at this host's entry.
+    ReviewKnownHost,
 }
 
 pub struct SessionTab {
@@ -546,7 +548,18 @@ impl SessionTab {
                     // Equal spacers centre the card; they shrink to nothing
                     // when it is taller than the pane, which then scrolls.
                     .child(div().flex_1())
-                    .child(div().flex_none().flex().items_start().justify_center().py(theme::SPACE_4).child(content))
+                    // Full width so card text wraps at its real width when its
+                    // height is measured (otherwise the card is cut short).
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .flex()
+                            .items_start()
+                            .justify_center()
+                            .py(theme::SPACE_4)
+                            .child(content),
+                    )
                     .child(div().flex_1()),
             )
     }
@@ -757,9 +770,20 @@ impl SessionTab {
                     )),
             )
             .child(
-                Button::new("disconnect", "Disconnect", ButtonKind::DestructiveFill)
-                    .full_width()
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(theme::SPACE_2)
+                    .child(div().flex_grow().min_w(px(160.)).child(
+                        Button::new("disconnect", "Disconnect", ButtonKind::DestructiveFill)
+                            .full_width()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
+                    ))
+                    .child(div().flex_grow().min_w(px(180.)).child(
+                        Button::secondary("review-known", "Review in Known hosts")
+                            .full_width()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::ReviewKnownHost))),
+                    )),
             )
             .child(
                 div()

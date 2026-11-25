@@ -150,6 +150,16 @@ impl HolonetApp {
         let tab = cx.new(|cx| SessionTab::new(app, host, key, runtime, timeout, size, window, cx));
         cx.subscribe_in(&tab, window, |this, tab, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_session(tab, window, cx),
+            SessionEvent::ReviewKnownHost => {
+                let (host, port) = {
+                    let t = tab.read(cx);
+                    (t.host.address.trim().to_string(), t.host.port)
+                };
+                this.show_vault(window, cx);
+                if let Some(w) = this.workspace().cloned() {
+                    w.update(cx, |w, cx| w.show_known_host(&host, port, cx));
+                }
+            }
             SessionEvent::EditHost => {
                 let id = tab.read(cx).host.id;
                 this.show_vault(window, cx);
