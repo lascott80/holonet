@@ -149,6 +149,7 @@ impl HolonetApp {
         let limits = Limits {
             connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
             keep_alive: data.settings.connection.keep_alive_for(&host),
+            terminal: data.settings.terminal.clone(),
         };
         let tab = cx.new(|cx| SessionTab::new(app, host, key, runtime, limits, size, window, cx));
         cx.subscribe_in(&tab, window, |this, tab, event: &SessionEvent, window, cx| match event {

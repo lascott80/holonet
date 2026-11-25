@@ -139,12 +139,13 @@ pub struct SessionTab {
 
 impl EventEmitter<SessionEvent> for SessionTab {}
 
-/// Connection timing from Settings, read when the tab is created.
-#[derive(Clone, Copy)]
+/// Settings read when the tab is created.
+#[derive(Clone)]
 pub struct Limits {
     pub connect_timeout: Duration,
     /// Already combined with the host's own keep-alive switch.
     pub keep_alive: Option<Duration>,
+    pub terminal: holonet_model::TerminalSettings,
 }
 
 impl SessionTab {
@@ -161,6 +162,7 @@ impl SessionTab {
     ) -> Self {
         let terminal = cx.new(|cx| {
             let mut t = TerminalView::new(window, cx);
+            t.apply_settings(&limits.terminal, window, cx);
             t.set_embedded(size);
             t
         });
@@ -249,15 +251,15 @@ impl SessionTab {
             }
         };
         // Not read from the app: `start` runs while the app creates this tab.
-        let limits = self.limits;
+        let limits = (self.limits.connect_timeout, self.limits.keep_alive);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let opts = ConnectOptions {
             host: self.host.address.trim().to_string(),
             port: self.host.port,
             user: self.host.username.clone(),
             credential,
-            connect_timeout: limits.connect_timeout,
-            keep_alive: limits.keep_alive,
+            connect_timeout: limits.0,
+            keep_alive: limits.1,
             prompts: Arc::new(UiPrompts(tx)),
         };
         let size = self.terminal.read(cx).grid_size();

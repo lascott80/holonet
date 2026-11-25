@@ -61,6 +61,26 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf"),
 ];
 
+/// JetBrainsMono Nerd Font v3.5.1, four builds in four styles
+/// (`assets/fonts/jetbrainsmono-nerd/NOTICE.md`).
+macro_rules! nerd_fonts {
+    ($($stem:literal),*) => {
+        const NERD_FONTS: &[&[u8]] = &[$(
+            include_bytes!(concat!("../assets/fonts/jetbrainsmono-nerd/", $stem, "-Regular.ttf")),
+            include_bytes!(concat!("../assets/fonts/jetbrainsmono-nerd/", $stem, "-Bold.ttf")),
+            include_bytes!(concat!("../assets/fonts/jetbrainsmono-nerd/", $stem, "-Italic.ttf")),
+            include_bytes!(concat!("../assets/fonts/jetbrainsmono-nerd/", $stem, "-BoldItalic.ttf")),
+        )*];
+    };
+}
+
+nerd_fonts![
+    "JetBrainsMonoNerdFont",
+    "JetBrainsMonoNerdFontMono",
+    "JetBrainsMonoNerdFontPropo",
+    "JetBrainsMonoNLNerdFont"
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -75,7 +95,7 @@ impl AssetSource for Assets {
 
 /// Register the bundled fonts with GPUI's text system.
 pub fn load_fonts(cx: &mut App) {
-    let fonts = FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
+    let fonts = FONTS.iter().chain(NERD_FONTS).map(|bytes| Cow::Borrowed(*bytes)).collect();
     if let Err(err) = cx.text_system().add_fonts(fonts) {
         eprintln!("holonet: could not load bundled fonts: {err:#}");
     }

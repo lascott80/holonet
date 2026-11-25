@@ -482,3 +482,49 @@ The spike also logs whenever the wall clock and the monotonic clock jump apart, 
 | Keep-alive every 1 s through a local proxy that stops forwarding but keeps the socket open | `Lost(NoResponse)` 2 to 8 s after the freeze |
 
 The app shows the killed connection as "Session ended. The network connection failed: it closed without warning". Phases 6 and 7 replace this with the designed wording.
+
+## Milestone 3, phase 2: renderer and fonts (25 Nov 2026)
+
+**Bundled fonts.**
+- JetBrainsMono Nerd Font v3.5.1 lives in `crates/holonet-app/assets/fonts/jetbrainsmono-nerd/`. It holds Regular, Bold, Italic and Bold Italic of the Nerd Font, Mono, Propo and NL builds (16 files, 39 MB), plus `OFL.txt` and `NOTICE.md` (copyrights and the icon-set licences).
+- The fonts are embedded and registered at start-up with Inter and Space Grotesk.
+- `holonet.exe` grew from 18.5 MB to 56.7 MB.
+
+**The terminal view follows `TerminalSettings`** (`TerminalView::apply_settings`):
+- **Font, size and line height.** The cell width is measured from the chosen font. An installed font that is missing falls back to the preference list.
+- **Ligatures.** `calt` is set to 1 or 0 explicitly; the phase 0 finding is that leaving it unset turns ligatures off. They are always off for the NL build.
+- **Cursor:**
+  - The default shape (block, bar or underline) and blink pass to alacritty's `default_cursor_style`, so programs can still change them with DECSCUSR (tested).
+  - Blinking runs at 530 ms only while the pane has focus. It stays solid for a moment after typing or output.
+  - It stops when Windows' "Animation effects" is off (`SPI_GETCLIENTAREAANIMATION`, `src/platform.rs`).
+  - Without focus, the cursor is drawn as an outline.
+- **Color schemes.** `Palette` holds Holonet Dark, High contrast and Light.
+  - The design gives only the background, foreground, dim, accent and green for each scheme, so the 16 ANSI colors are built from those hues.
+  - A test checks contrast against the background: 7:1 for the foreground, 4.5:1 for every ANSI color except black and bright black (3:1), and 4.5:1 for text on the selection and on the cursor.
+  - In Light, "white" is a dark gray so programs that print white stay readable.
+  - Dim text is mixed a third of the way toward the background, which works on light backgrounds too.
+- **Scrollback.** 10,000 lines, 50,000 lines, or unlimited (no cap; alacritty grows the history as output arrives).
+- **Copy on select** (on mouse up after a drag) and **right-click pastes**.
+- Session tabs take these settings from the vault. `holonet --showcase` accepts options for screenshots before the Settings page exists: `light`, `contrast`, `bar`, `underline`, `noblink`, `mono`, `propo`, `nl`, `nolig`, `size=N`, `lh=N` and `font=Name_With_Underscores`.
+
+**Box drawing (new, `src/boxdraw.rs`).**
+- At the design's 1.6 line height, font glyphs for `│ ─ ┌` stop short of the row above and below, so table and `tmux` borders broke between rows.
+- These are now drawn as rectangles that fill the cell, as Alacritty, WezTerm and Windows Terminal do. That covers U+2500 to U+257F (light, heavy, double; rounded corners drawn square) and the block elements U+2580 to U+259F (halves, eighths, quadrants, shades).
+- Dashed lines and diagonals stay with the font.
+- The segment table is generated from the Unicode names, and tests check its edges, weights and blocks.
+
+**Checks.**
+- Screenshots: each scheme, block, bar and underline cursors, the Nerd Font, Mono and NL builds, size 16 with line height 1.2, and a live WSL session printing box drawing, shades and ligatures.
+- `--stream-bench` (10 MB), three runs each:
+
+| | Throughput | Frames | Average paint |
+| --- | --- | --- | --- |
+| Before this phase | 72 to 85 MB/s | 64 to 71 fps | 1.9 to 2.1 ms |
+| After | 79 to 81 MB/s | 64 to 71 fps | 2.3 to 2.5 ms |
+
+- Paint costs about 0.4 ms more per frame (Nerd Font with `calt` shaping, plus the box check), still far inside a 16 ms frame. Throughput is unchanged.
+- 22 app tests pass, 4 of them new (palettes, configure, box drawing).
+
+**Notes.**
+- Programs that choose 24-bit colors themselves keep them in every scheme. A prompt themed for dark backgrounds can look pale in Light; that is the program's color, not the palette's.
+- The font licences are in the repository now. Showing them in Settings comes with phase 3, and shipping them beside the exe with release packaging in milestone 7.

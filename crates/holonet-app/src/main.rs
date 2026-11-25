@@ -2,7 +2,9 @@
 //!
 //!   holonet                 the app: create or unlock the vault, then the workspace.
 //!                           HOLONET_VAULT=<file> uses another vault file (testing).
-//!   holonet --showcase      spike 3: terminal grid from canned output
+//!   holonet --showcase [options]  terminal grid from canned output; options set
+//!                           terminal settings for screenshots: light, contrast, bar,
+//!                           underline, noblink, mono, propo, nl, nolig, size=N, lh=N
 //!   holonet --gallery       milestone 2 phase 3: every shared control
 //!   holonet --fonts         spike 1: font and glyph width check
 //!   holonet --font-spike    milestone 3 phase 0: ligatures, icon widths, font load cost
@@ -11,11 +13,13 @@
 
 mod app;
 mod assets;
+mod boxdraw;
 mod font_check;
 mod font_spike;
 mod gallery;
 mod host_form;
 mod input;
+mod platform;
 mod sample;
 mod session;
 // Design-system modules: parts are used by later phases of milestone 2.
@@ -70,6 +74,38 @@ fn parse_bench() {
         snapshot.as_micros(),
         snap.history
     );
+}
+
+/// Terminal settings from `--showcase` options, for screenshots before the
+/// Settings page exists.
+fn showcase_settings(args: impl Iterator<Item = String>) -> holonet_model::TerminalSettings {
+    use holonet_model::{BundledFont, ColorScheme, CursorShape, TerminalFont};
+    let mut s = holonet_model::TerminalSettings::default();
+    for arg in args {
+        match arg.as_str() {
+            "light" => s.scheme = ColorScheme::Light,
+            "contrast" => s.scheme = ColorScheme::HighContrast,
+            "bar" => s.cursor = CursorShape::Bar,
+            "underline" => s.cursor = CursorShape::Underline,
+            "noblink" => s.cursor_blink = false,
+            "mono" => s.font = TerminalFont::Bundled(BundledFont::NerdFontMono),
+            "propo" => s.font = TerminalFont::Bundled(BundledFont::NerdFontPropo),
+            "nl" => s.font = TerminalFont::Bundled(BundledFont::NerdFontNl),
+            "nolig" => s.ligatures = false,
+            other => {
+                if let Some(n) = other.strip_prefix("size=").and_then(|n| n.parse().ok()) {
+                    s.font_size = n;
+                } else if let Some(n) = other.strip_prefix("lh=").and_then(|n| n.parse().ok()) {
+                    s.line_height_tenths = n;
+                } else if let Some(name) = other.strip_prefix("font=") {
+                    s.font = TerminalFont::Installed(name.replace('_', " "));
+                } else {
+                    eprintln!("holonet: unknown showcase option {other}");
+                }
+            }
+        }
+    }
+    s
 }
 
 fn main() {
@@ -165,7 +201,10 @@ fn main() {
             cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
                     let mut view = terminal_view::TerminalView::new(window, cx);
-                    let _ = showcase;
+                    if showcase {
+                        let settings = showcase_settings(std::env::args().skip(2));
+                        view.apply_settings(&settings, window, cx);
+                    }
                     view.feed(&sample::showcase());
                     if stream {
                         view.stream(sample::bulk(10_000_000), true);

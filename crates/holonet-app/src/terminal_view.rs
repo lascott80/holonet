@@ -18,18 +18,18 @@ use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
     StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use holonet_ssh::{PtySize, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input;
-use crate::terminal::{GridSize, Snapshot, TerminalModel, palette};
+use crate::terminal::{GridSize, Snapshot, TerminalModel};
+use holonet_model::TerminalSettings;
 
-const FONT_SIZE: f32 = 13.0;
-/// Line height from the design: 13px at 1.6.
-const LINE_HEIGHT: f32 = FONT_SIZE * 1.6;
+/// How long the cursor stays on, and off, while blinking.
+const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 const PADDING: f32 = 12.0;
 const STATUS_HEIGHT: f32 = 28.0;
 const SCROLLBACK: usize = 10_000;
@@ -52,8 +52,16 @@ enum Connection {
 pub struct TerminalView {
     model: TerminalModel,
     font: Font,
+    font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
+    copy_on_select: bool,
+    right_click_pastes: bool,
+    /// Blink phase: the cursor is drawn while this is true.
+    blink_visible: bool,
+    /// Last keystroke or output; the cursor stays solid for a moment after it.
+    blink_reset: Instant,
+    blink_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
     /// Top-left of the grid in window coordinates, set at paint time.
     grid_origin: Rc<Cell<Point<Pixels>>>,
@@ -104,18 +112,19 @@ const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 impl TerminalView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let text = window.text_system();
-        let family = crate::pick_font(&text.all_font_names());
-        let font = font(family);
-        let font_id = text.resolve_font(&font);
-        let cell_width = text.advance(font_id, px(FONT_SIZE), 'M').map(|s| s.width).unwrap_or(px(FONT_SIZE * 0.6));
         let focus = cx.focus_handle();
         window.focus(&focus);
         let mut view = Self {
             model: TerminalModel::new(GridSize { cols: 80, rows: 24 }, SCROLLBACK),
-            font,
-            cell_width,
-            line_height: px(LINE_HEIGHT),
+            font: font("Consolas"),
+            font_size: px(13.),
+            cell_width: px(7.8),
+            line_height: px(20.8),
+            copy_on_select: false,
+            right_click_pastes: true,
+            blink_visible: true,
+            blink_reset: Instant::now(),
+            blink_task: None,
             focus,
             grid_origin: Rc::new(Cell::new(point(px(0.), px(0.)))),
             scroll_remainder: 0.0,
@@ -132,6 +141,7 @@ impl TerminalView {
             embedded: false,
             measured: Rc::new(Cell::new(None)),
         };
+        view.apply_settings(&TerminalSettings::default(), window, cx);
         // Size the grid to the window now, so the PTY opens at the right size.
         let grid = view.grid_for(window.viewport_size());
         view.model.resize(grid);
@@ -142,6 +152,37 @@ impl TerminalView {
     pub fn set_embedded(&mut self, size: GridSize) {
         self.embedded = true;
         self.model.resize(size);
+    }
+
+    /// Font, size, line height, ligatures, colors, cursor, history and mouse
+    /// behaviour from Settings. Takes effect at the next frame; the grid is
+    /// re-measured, so the server hears about any size change.
+    pub fn apply_settings(&mut self, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let text = window.text_system();
+        let wanted = settings.font.family();
+        let family: SharedString = if text.all_font_names().iter().any(|f| f == wanted) {
+            wanted.to_string().into()
+        } else {
+            crate::pick_font(&text.all_font_names()).into()
+        };
+        let mut f = font(family);
+        // GPUI hands DirectWrite an empty feature list unless one is set, which
+        // turns ligatures off; ask for `calt` either way (prototype notes,
+        // milestone 3 phase 0).
+        let calt = u32::from(settings.ligatures_on());
+        f.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), calt)]));
+        let font_size = px(settings.font_size());
+        let font_id = text.resolve_font(&f);
+        self.cell_width = text.advance(font_id, font_size, 'M').map(|s| s.width).unwrap_or(font_size * 0.6);
+        self.line_height = font_size * settings.line_height();
+        self.font_size = font_size;
+        self.font = f;
+        self.copy_on_select = settings.copy_on_select;
+        self.right_click_pastes = settings.right_click_pastes;
+        self.model.configure(settings);
+        self.measured.set(None);
+        self.blink_visible = true;
+        cx.notify();
     }
 
     pub fn grid_size(&self) -> GridSize {
@@ -198,6 +239,8 @@ impl TerminalView {
                         self.last_echo_ms = Some(sent.elapsed().as_secs_f64() * 1e3);
                     }
                     self.model.advance(&bytes);
+                    self.blink_reset = Instant::now();
+                    self.blink_visible = true;
                 }
                 ShellEvent::Exit(code) => {
                     self.connection = Connection::Ended(format!("The shell exited with code {code}."))
@@ -225,6 +268,8 @@ impl TerminalView {
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let Some(input) = &self.input else { return };
         if input.send(ShellInput::Data(bytes)).is_ok() {
+            self.blink_reset = Instant::now();
+            self.blink_visible = true;
             self.echo_pending.get_or_insert_with(Instant::now);
             self.model.scroll_to_bottom();
             self.model.clear_selection();
@@ -322,12 +367,47 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
-        self.selecting = false;
+        let was_selecting = std::mem::replace(&mut self.selecting, false);
         if !self.dragged {
             // A plain click clears the selection.
             self.model.clear_selection();
+        } else if was_selecting && self.copy_on_select {
+            self.copy(cx);
         }
         cx.notify();
+    }
+
+    fn on_right_click(&mut self, cx: &mut Context<Self>) {
+        if self.right_click_pastes {
+            self.paste(cx);
+        }
+    }
+
+    /// Run or stop the blink timer to match the current state.
+    fn update_blink(&mut self, blinking: bool, focused: bool, cx: &mut Context<Self>) {
+        let wanted = blinking && focused && !crate::platform::reduced_motion();
+        if !wanted {
+            self.blink_task = None;
+            self.blink_visible = true;
+            return;
+        }
+        if self.blink_task.is_some() {
+            return;
+        }
+        self.blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                let alive = this.update(cx, |view, cx| {
+                    // Stay solid while typing or output is arriving.
+                    view.blink_visible =
+                        if view.blink_reset.elapsed() < BLINK_INTERVAL { true } else { !view.blink_visible };
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -457,8 +537,13 @@ impl Render for TerminalView {
             bench.snapshot_us_total += self.snapshot_us;
         }
         let (status, warn) = self.status_text(&snapshot);
+        let focused = self.focus.is_focused(window);
+        self.update_blink(snapshot.cursor_blinking, focused, cx);
+        let cursor_on = self.blink_visible;
+        let background = snapshot.palette.background;
 
         let font = self.font.clone();
+        let font_size = self.font_size;
         let cell_width = self.cell_width;
         let line_height = self.line_height;
         let paint_us = self.paint_us.clone();
@@ -471,7 +556,7 @@ impl Render for TerminalView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(palette::BACKGROUND))
+            .bg(rgb(background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| this.on_scroll(event, cx)))
@@ -483,6 +568,10 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.on_right_click(cx)),
             )
             .child(
                 div()
@@ -507,7 +596,8 @@ impl Render for TerminalView {
                                     window.refresh();
                                 }
                                 let started = Instant::now();
-                                paint_grid(bounds, &snapshot, &font, cell_width, line_height, window, cx);
+                                let metrics = Metrics { font_size, cell_width, line_height };
+                                paint_grid(bounds, &snapshot, &font, metrics, (cursor_on, focused), window, cx);
                                 paint_us.set(started.elapsed().as_micros());
                             },
                         )
@@ -532,17 +622,24 @@ impl Render for TerminalView {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Metrics {
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+}
+
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,
     base: &Font,
-    cell_width: Pixels,
-    line_height: Pixels,
+    metrics: Metrics,
+    (cursor_on, focused): (bool, bool),
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
     let origin = bounds.origin;
-    let font_size = px(FONT_SIZE);
+    let Metrics { font_size, cell_width, line_height } = metrics;
     let cell_at =
         |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
 
@@ -558,8 +655,27 @@ fn paint_grid(
                 continue;
             }
             let color: Hsla = rgb(run.fg).into();
+            // Box-drawing and block characters fill the cell as rectangles;
+            // the font draws everything else (crate::boxdraw).
+            let one_per_cell = run.cells == run.text.chars().count();
+            let mut text = std::borrow::Cow::Borrowed(run.text.as_str());
+            if one_per_cell && run.text.chars().any(crate::boxdraw::handles) {
+                let light = (f32::from(font_size) / 13.0).round().max(1.0);
+                let (cw, lh) = (f32::from(cell_width), f32::from(line_height));
+                for (i, ch) in run.text.chars().enumerate().filter(|(_, ch)| crate::boxdraw::handles(*ch)) {
+                    let at = cell_at(row, run.col + i);
+                    for r in crate::boxdraw::rects(ch, cw, lh, light) {
+                        let area = Bounds::new(point(at.x + px(r.x), at.y + px(r.y)), size(px(r.w), px(r.h)));
+                        window.paint_quad(fill(area, color.opacity(r.alpha)));
+                    }
+                }
+                text = run.text.chars().map(|ch| if crate::boxdraw::handles(ch) { ' ' } else { ch }).collect();
+                if text.trim().is_empty() && !run.underline && !run.strikeout {
+                    continue;
+                }
+            }
             let text_run = TextRun {
-                len: run.text.len(),
+                len: text.len(),
                 font: Font {
                     weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
                     style: if run.italic { FontStyle::Italic } else { FontStyle::Normal },
@@ -576,15 +692,17 @@ fn paint_grid(
             };
             // Force one glyph per cell, except for runs holding a wide char
             // or combining marks, which are placed by their column alone.
-            let force = (run.cells == run.text.chars().count()).then_some(cell_width);
-            let shaped = window.text_system().shape_line(run.text.clone().into(), font_size, &[text_run], force);
+            let force = one_per_cell.then_some(cell_width);
+            let shaped = window.text_system().shape_line(text.into_owned().into(), font_size, &[text_run], force);
             let _ = shaped.paint(cell_at(row, run.col), line_height, window, cx);
         }
     }
 
-    if let Some((row, col, shape)) = snap.cursor {
+    if let Some((row, col, shape)) = snap.cursor.filter(|_| cursor_on || !focused) {
         let at = cell_at(row, col);
-        let cursor = rgb(palette::CURSOR);
+        let cursor = rgb(snap.palette.cursor);
+        // Without focus the cursor is an outline, so the focused pane stands out.
+        let shape = if focused { shape } else { CursorShape::HollowBlock };
         match shape {
             CursorShape::Beam => window.paint_quad(fill(Bounds::new(at, size(px(2.), line_height)), cursor)),
             CursorShape::Underline => window.paint_quad(fill(
@@ -603,7 +721,7 @@ fn paint_grid(
                     let run = TextRun {
                         len: text.len(),
                         font: base.clone(),
-                        color: rgb(palette::BACKGROUND).into(),
+                        color: rgb(snap.palette.cursor_text).into(),
                         background_color: None,
                         underline: None,
                         strikethrough: None,

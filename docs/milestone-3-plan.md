@@ -108,7 +108,7 @@ Each phase ends with a commit and a check.
 | --- | --- | --- |
 | 0 | **Spikes** *(done; ligatures work with `calt` set explicitly, the Nerd Font default stays, fonts are embedded, the sleep and network APIs register but the live test moves to phase 7)*: (a) ligatures and double-width Nerd icons in the cell grid, (b) detecting sleep, resume and network changes from a GPUI app on Windows ARM64, (c) start-up cost and binary size with 16 embedded font files (about 2.4 MB each) | Notes record each answer. If ligatures cannot be drawn without breaking the grid, the ligature setting is not shown, and the default font becomes the Mono build. |
 | 1 | **Model and SSH** *(done)*: the settings structs, keep-alive from settings, lost connection told apart from shell exit | Old vault decodes; WSL tests cover exit compared with a killed connection (`ss -K` in WSL) |
-| 2 | **Renderer and fonts**: bundled fonts and licence files, font, size and line height from settings, cursor shapes and blink (off under reduced motion), three color schemes, scrollback limit, ligatures if phase 0 allows | Screenshots of each scheme, cursor and font; `--stream-bench` no slower than milestone 1 |
+| 2 | **Renderer and fonts** *(done; box-drawing and block characters are also drawn to fill the cell)*: bundled fonts and licence files, font, size and line height from settings, cursor shapes and blink (off under reduced motion), three color schemes, scrollback limit, ligatures if phase 0 allows | Screenshots of each scheme, cursor and font; `--stream-bench` no slower than milestone 1 |
 | 3 | **Settings page**: Terminal (live preview, font cards, the controls above), Connection, Keyboard; changes apply to open terminals at once | Change each setting with a session open and see it apply; survives restart |
 | 4 | **Tabs**: `Tab` and `Pane` split, the tab strip with state dots and sideways scrolling, new-tab host picker, Ctrl Shift T, Ctrl Shift W, Ctrl Tab and Ctrl Shift Tab, session header and status bar for the active pane | Ten tabs to two hosts, keyboard only; closing tabs in any order; lock and unlock with tabs open |
 | 5 | **Split panes**: Split right and down, nesting to 4, the split menu with host picker, drag to resize, active pane, focus by click and keyboard, close pane | Four panes on two hosts, resized; each shell's `stty size` matches its header |
@@ -140,7 +140,7 @@ Each phase ends with a commit and a check.
 - **Tailscale wording:** the connecting state says "Trying <address>" without the Tailscale sentence until milestone 4.
 - **Fonts:**
   - The design's default, "JetBrainsMono Nerd Font" (the non-Mono build, with double-width icons), stays the default only if phase 0 shows the grid draws it cleanly. Otherwise the default is the Mono build.
-  - Ship Regular, Bold, Italic and Bold Italic of each build, with `OFL.txt`, both copyright lines and the icon-set notices in a `licenses/` folder beside `holonet.exe` and in Settings, About.
+  - Ship Regular, Bold, Italic and Bold Italic of each build. `OFL.txt` and `NOTICE.md` (both copyright lines and the icon-set notices) sit beside the fonts in the repository, are shown in Settings from phase 3, and go in a `licenses/` folder beside `holonet.exe` with release packaging (milestone 7).
 
 ## Risks
 
