@@ -37,9 +37,13 @@ const PREVIEW_ROWS: usize = 6;
 /// each joins this list when its feature lands).
 const SHORTCUTS: &[(&str, &str)] = &[
     ("New tab", "Ctrl Shift T"),
-    ("Close tab", "Ctrl Shift W"),
+    ("Close pane or tab", "Ctrl Shift W"),
     ("Next tab", "Ctrl Tab"),
     ("Previous tab", "Ctrl Shift Tab"),
+    ("Split right", "Ctrl Shift D"),
+    ("Split down", "Ctrl Shift E"),
+    ("Next pane", "Ctrl Shift ]"),
+    ("Previous pane", "Ctrl Shift ["),
     ("Copy", "Ctrl Shift C"),
     ("Paste", "Ctrl Shift V"),
 ];

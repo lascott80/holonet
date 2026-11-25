@@ -618,3 +618,47 @@ Afterwards the throwaway vault was set back to the defaults.
 | Ctrl Shift Tab | TAB-2 |
 | Lock now | "8 sessions are open"; after unlocking all 8 tabs are back |
 | Ctrl Shift W eight times, then Ctrl Shift T | All closed, the vault view shows, the picker opens |
+
+## Milestone 3, phase 5: split panes (25 Nov 2026)
+
+**Pane tree** (`tab.rs`).
+- A tab holds a tree. A leaf is one pane. A split puts two subtrees side by side (Split right) or one above the other (Split down), sized by a ratio.
+- A tab holds at most four panes (owner decision 1). At four, the Split buttons are disabled and the header says "A tab holds up to 4 panes."
+- Splitting replaces the active leaf with a split of it and the new pane. The new pane starts at half the size, takes focus and becomes active.
+- Removing a leaf puts its sibling in the parent's place.
+
+**Layout.**
+- Panes sit on the `sunken` gutter with an 8 px gap (Terminal.dc.html). Each split's halves use `flex-grow` set to the ratio with a zero basis; Taffy collapses percentage widths inside flex parents.
+- The active pane has the `ink-muted` border, and the others `line`. Panes without focus draw an outline cursor.
+
+**Resizing.**
+- The 8 px gap between two subtrees is the handle, with a resize cursor and a 2 px line: half-strength accent on hover, full accent while dragging (an undrawn state).
+- Each split records its bounds when painted, so a drag maps straight to a ratio.
+- Panes stay at least 190 px wide or 170 px tall: about 20 columns by 5 rows at the default font, plus the pane header and padding.
+- Every terminal re-measures after a drag and sends its new size to the server.
+
+**Controls.**
+- The session header has **Split right** and **Split down** (44 px, as drawn), each with a chevron menu: "Same host" (with its shortcut) and every saved host (owner decision 2).
+- The menu is drawn with `deferred` plus `anchored`, so it appears above the panes. It closes on an outside click.
+- Shortcuts:
+  - Ctrl Shift D: split right, same host
+  - Ctrl Shift E: split down, same host
+  - Ctrl Shift ] and Ctrl Shift [: next and previous pane
+  - Ctrl Shift W: close the active pane, and the tab with its last pane
+- With Shift held, Windows reports `]` and `[` as `}` and `{`, so both spellings are bound. Found during testing: the first build only bound `ctrl-shift-]`, and nothing happened.
+- Clicking anywhere in a pane makes it active (`capture_any_mouse_down`, so the terminal still gets the click).
+- A pane's "Close tab" button reads "Close pane" when the tab holds more than one pane.
+- The header and status bar follow the active pane. The tab's name and dot follow it too.
+- Settings, Keyboard lists the new shortcuts.
+
+**Checked with real input against WSL:**
+
+| Check | Result |
+| --- | --- |
+| wsl-test, then Ctrl Shift D, Ctrl Shift E, then the Split right menu choosing localhost | Four panes, two hosts; the header shows localhost; Split disabled with the message |
+| `stty size` in each pane, moving with Ctrl Shift ] | 28 72, 12 72, 12 33, 12 33, matching each header |
+| Dragged the main gap from x 1012 to 700 | Left pane 45×28, the right column 99×12 and 46×12 twice; `stty size` matched all four |
+| Ctrl Shift W on the active pane | It closed; its sibling took the space; Split enabled again |
+| `exit` in another pane | Ended bar with "Close pane"; clicking it closed the pane |
+| Ctrl Shift W twice more | The tab closed; the vault view came back |
+| Split down, then a click in the top pane, then typing | The text went to the top pane |

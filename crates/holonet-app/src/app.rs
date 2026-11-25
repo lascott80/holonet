@@ -26,14 +26,14 @@ use holonet_vault::UnlockedVault;
 use crate::host_picker::{HostPicker, HostPickerEvent};
 use crate::session::{KeyCheck, Limits, Pane, SessionEvent};
 use crate::shell::{TabInfo, TabKind, TitleBar};
-use crate::tab::Tab;
+use crate::tab::{Axis, Tab, TabEvent};
 use crate::terminal::GridSize;
 use crate::theme;
 use crate::ui::icon;
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
 
-actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab]);
+actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane]);
 
 const CONTEXT: &str = "HolonetApp";
 
@@ -43,6 +43,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-w", CloseTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
+        // With Shift held, Windows layouts report ] and [ as } and {.
+        KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-}", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-}", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-[", PreviousPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-{", PreviousPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-{", PreviousPane, Some(CONTEXT)),
     ]);
 }
 
@@ -108,6 +117,9 @@ impl HolonetApp {
         let app = cx.entity().downgrade();
         let path = self.path.clone();
         let open = self.tabs.iter().map(|t| t.read(cx).panes().len()).sum();
+        for tab in &self.tabs {
+            tab.update(cx, |t, cx| t.close_menu(cx));
+        }
         self.picker = None;
         self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, LockReason::Manual, open, window, cx)));
         self.active = None;
@@ -176,26 +188,35 @@ impl HolonetApp {
 
     /// Terminal settings changed in Settings: every open terminal follows.
     pub fn apply_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
-        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes().to_vec()).collect();
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
         for pane in panes {
             pane.update(cx, |p, cx| p.set_terminal_settings(settings, cx));
         }
     }
 
-    /// Open a new tab connected to a saved host.
-    pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(data) = self.vault_data(cx) else { return };
-        let Some(host) = data.host(id).cloned() else { return };
+    /// Saved hosts by name, for a tab's split menu.
+    pub fn host_names(&self, cx: &App) -> Vec<(HostId, SharedString)> {
+        let Some(data) = self.vault_data(cx) else { return Vec::new() };
+        let mut hosts: Vec<(HostId, SharedString)> =
+            data.hosts.iter().map(|h| (h.id, SharedString::from(h.display_name().to_string()))).collect();
+        hosts.sort_by_key(|(_, n)| n.to_lowercase());
+        hosts
+    }
+
+    /// A pane connecting to a saved host, `size` cells to start with (the
+    /// pane re-measures on its first paint and tells the server).
+    fn new_pane(
+        &mut self,
+        id: HostId,
+        size: GridSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Pane>> {
+        let data = self.vault_data(cx)?;
+        let host = data.host(id).cloned()?;
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } => None,
-        };
-        // Estimate the terminal size from the window; the pane corrects it
-        // on first paint (and tells the server).
-        let viewport = window.viewport_size();
-        let size = GridSize {
-            cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
-            rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
         };
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
@@ -226,11 +247,60 @@ impl HolonetApp {
             }
         })
         .detach();
-        let tab = cx.new(|cx| Tab::new(pane, cx));
+        Some(pane)
+    }
+
+    /// Open a new tab connected to a saved host.
+    pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        // Estimate the terminal size from the window.
+        let viewport = window.viewport_size();
+        let size = GridSize {
+            cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
+            rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
+        };
+        let Some(pane) = self.new_pane(id, size, window, cx) else { return };
+        let app = cx.entity().downgrade();
+        let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
         cx.observe(&tab, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| {
+            let TabEvent::Split { axis, host } = event;
+            this.split(tab, *axis, *host, window, cx);
+        })
+        .detach();
         self.tabs.push(tab);
         self.select(Some(self.tabs.len() - 1), window, cx);
+    }
+
+    /// Split a tab's active pane, with the same host unless another is given.
+    fn split(
+        &mut self,
+        tab: &Entity<Tab>,
+        axis: Axis,
+        host: Option<HostId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !tab.read(cx).can_split() {
+            return;
+        }
+        let active = tab.read(cx).active_pane().clone();
+        let (same, size) = {
+            let p = active.read(cx);
+            (p.host.id, p.grid_size(cx))
+        };
+        // The new pane takes half of the one it splits.
+        let size = match axis {
+            Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
+            Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
+        };
+        let Some(pane) = self.new_pane(host.unwrap_or(same), size, window, cx) else { return };
+        tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
+        cx.notify();
+    }
+
+    fn active_tab(&self) -> Option<Entity<Tab>> {
+        self.active.and_then(|i| self.tabs.get(i)).cloned()
     }
 
     /// Close one pane; its tab closes with its last pane.
@@ -238,7 +308,7 @@ impl HolonetApp {
         let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(pane)) else { return };
         pane.update(cx, |p, _| p.disconnect());
         let tab = self.tabs[index].clone();
-        if tab.update(cx, |t, cx| t.remove(pane, cx)) {
+        if tab.update(cx, |t, cx| t.remove(pane, window, cx)) {
             self.close_tab_at(index, window, cx);
         } else {
             tab.update(cx, |t, cx| t.focus(window, cx));
@@ -251,7 +321,7 @@ impl HolonetApp {
             return;
         }
         let tab = self.tabs.remove(index);
-        for pane in tab.read(cx).panes().to_vec() {
+        for pane in tab.read(cx).panes() {
             pane.update(cx, |p, _| p.disconnect());
         }
         let next = match self.active {
@@ -464,6 +534,26 @@ impl Render for HolonetApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle(1, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    this.split(&tab, Axis::Right, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    this.split(&tab, Axis::Down, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextPane, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| t.cycle_pane(1, window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousPane, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| t.cycle_pane(-1, window, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle(-1, window, cx)))
             .bg(theme::ground())
             .text_color(theme::ink())

@@ -133,9 +133,10 @@ pub struct Pane {
     attempt: u64,
     /// A typed password (true) or passphrase to save after a successful sign-in.
     pending_save: Option<(bool, Secret)>,
-    /// Drawn with the stronger border of the tab's active pane (one pane
-    /// per tab until split panes, milestone 3 phase 5).
+    /// Drawn with the stronger border of the tab's active pane.
     active: bool,
+    /// The only pane in its tab: "Close tab" instead of "Close pane".
+    alone: bool,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
@@ -199,6 +200,7 @@ impl Pane {
             pending_save: None,
             focus_pending: false,
             active: true,
+            alone: true,
             _subscriptions: subscriptions,
         };
         tab.start(cx);
@@ -234,6 +236,22 @@ impl Pane {
 
     fn target(&self) -> String {
         format!("{}:{}", self.host.address.trim(), self.host.port)
+    }
+
+    /// Where the pane sits in its tab (set by [`crate::tab::Tab`]).
+    pub fn set_place(&mut self, active: bool, alone: bool, cx: &mut Context<Self>) {
+        if (self.active, self.alone) != (active, alone) {
+            (self.active, self.alone) = (active, alone);
+            cx.notify();
+        }
+    }
+
+    pub fn grid_size(&self, cx: &gpui::App) -> GridSize {
+        self.terminal.read(cx).grid_size()
+    }
+
+    fn close_label(&self) -> &'static str {
+        if self.alone { "Close tab" } else { "Close pane" }
     }
 
     /// `user@address:port`, for the session header.
@@ -931,7 +949,7 @@ impl Pane {
                 )
             })
             .child(
-                Button::quiet("close-tab", "Close tab")
+                Button::quiet("close-tab", self.close_label())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
             );
         self.center_card(
@@ -1054,7 +1072,7 @@ impl Render for Pane {
                                 .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                         )
                         .child(
-                            Button::quiet("close-ended", "Close tab")
+                            Button::quiet("close-ended", self.close_label())
                                 .compact()
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
                         ),
