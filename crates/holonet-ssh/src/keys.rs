@@ -89,9 +89,12 @@ pub fn algorithm_label(algorithm: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A test key named in `.dev/test-server.env`, if the local test setup exists.
     fn read(var: &str) -> Option<String> {
-        let env = crate::dev::load_env().ok()?;
-        std::fs::read_to_string(crate::dev::root().join(env.get(var)?)).ok()
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let env = std::fs::read_to_string(root.join(".dev/test-server.env")).ok()?;
+        let path = env.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == var)?.1.trim().to_string();
+        std::fs::read_to_string(root.join(path)).ok()
     }
 
     #[test]

@@ -7,8 +7,10 @@
 use std::time::Duration;
 
 use holonet_model::Secret;
-use holonet_ssh::dev::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
+mod support;
+
 use holonet_ssh::{ConnectError, Credential, SecretRequest, Session};
+use support::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
 
 fn enabled() -> bool {
     let on = std::env::var("HOLONET_TEST_SERVER").is_ok_and(|v| v == "1");

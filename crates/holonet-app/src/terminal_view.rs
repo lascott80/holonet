@@ -1,5 +1,5 @@
-//! GPUI view that paints a `TerminalModel` snapshot cell by cell, and (spike 4)
-//! drives it from an SSH shell.
+//! GPUI view that paints a `TerminalModel` snapshot cell by cell, and drives
+//! it from an attached SSH shell.
 //!
 //! Each styled run is shaped on its own and placed at its column, with glyph
 //! advances forced to the cell width, so the grid stays aligned whatever the
@@ -16,13 +16,12 @@ use std::time::Instant;
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
-use anyhow::anyhow;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
     StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
-use holonet_ssh::{ConnectOptions, PtySize, Session, ShellEvent, ShellInput};
+use holonet_ssh::{PtySize, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input;
@@ -46,9 +45,7 @@ const WARN: u32 = 0xF2A65A;
 enum Connection {
     /// Canned output only (spike 3).
     Offline,
-    Connecting(String),
     Connected(String),
-    Failed(String),
     Ended(String),
 }
 
@@ -66,7 +63,6 @@ pub struct TerminalView {
     stream: Option<StreamBench>,
 
     connection: Connection,
-    session: Option<Session>,
     input: Option<UnboundedSender<ShellInput>>,
     sent_size: Option<GridSize>,
     /// When the last keystroke was sent, until the first output after it.
@@ -127,7 +123,6 @@ impl TerminalView {
             paint_us: Rc::new(Cell::new(0)),
             stream: None,
             connection: Connection::Offline,
-            session: None,
             input: None,
             sent_size: None,
             echo_pending: None,
@@ -159,41 +154,6 @@ impl TerminalView {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.model.advance(bytes);
-    }
-
-    /// Connect and open a shell on the Tokio runtime, then stream its output here.
-    pub fn connect(&mut self, runtime: tokio::runtime::Handle, opts: ConnectOptions, cx: &mut Context<Self>) {
-        let target = format!("{}@{}:{}", opts.user, opts.host, opts.port);
-        self.connection = Connection::Connecting(target.clone());
-        let size = self.model.size();
-        self.sent_size = Some(size);
-
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        runtime.spawn(async move {
-            let result = async {
-                let session = Session::connect(opts).await?;
-                let shell = session.open_shell(PtySize::cells(size.cols as u16, size.rows as u16)).await?;
-                anyhow::Ok((session, shell))
-            }
-            .await;
-            let _ = ready_tx.send(result);
-        });
-
-        cx.spawn(async move |this, cx| {
-            let result = ready_rx.await.unwrap_or_else(|_| Err(anyhow!("connection task stopped")));
-            let _ = this.update(cx, |view, cx| match result {
-                Ok((session, shell)) => {
-                    view.session = Some(session);
-                    view.connection = Connection::Connected(target);
-                    view.attach(shell, cx);
-                }
-                Err(err) => {
-                    view.connection = Connection::Failed(format!("{err:#}"));
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     /// Show an open shell: its output is parsed here and keystrokes go to it.
@@ -247,7 +207,6 @@ impl TerminalView {
                         self.connection = Connection::Ended("The connection closed.".into());
                     }
                     self.input = None;
-                    self.session = None;
                     if let Connection::Ended(reason) = &self.connection {
                         cx.emit(TerminalEvent::Ended(reason.clone()));
                     }
@@ -444,9 +403,7 @@ impl TerminalView {
         }
         let (state, warn) = match &self.connection {
             Connection::Offline => ("canned output".to_string(), false),
-            Connection::Connecting(target) => (format!("connecting to {target}…"), false),
             Connection::Connected(target) => (target.clone(), false),
-            Connection::Failed(err) => (format!("failed: {err}"), true),
             Connection::Ended(why) => (why.clone(), true),
         };
         let scrolled = if snapshot.display_offset > 0 {

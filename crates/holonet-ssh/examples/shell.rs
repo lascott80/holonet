@@ -12,8 +12,11 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use holonet_ssh::dev::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
+#[path = "../tests/support/mod.rs"]
+mod support;
+
 use holonet_ssh::{ConnectError, PtySize, Session, Shell, ShellEvent, ShellInput};
+use support::{FileKeyStatus, FilePrompts, MODES, load_env, options_from, root};
 
 /// Send a command and collect output until `marker` appears.
 async fn run_until(shell: &mut Shell, command: &str, marker: &str) -> Result<(String, usize)> {

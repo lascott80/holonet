@@ -3,8 +3,6 @@
 //!   holonet                 the app: create or unlock the vault, then the workspace.
 //!                           HOLONET_VAULT=<file> uses another vault file (testing).
 //!   holonet --showcase      spike 3: terminal grid from canned output
-//!   holonet --ssh [mode]    spike 4: shell on the WSL test server; mode is
-//!                           password, ed25519 (default), rsa or passphrase
 //!   holonet --gallery       milestone 2 phase 3: every shared control
 //!   holonet --fonts         spike 1: font and glyph width check
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
@@ -83,18 +81,6 @@ fn main() {
     let showcase = arg.as_deref() == Some("--showcase");
     // --stream-bench: feed 10 MB a frame at a time, print the timing and quit.
     let stream = arg.as_deref() == Some("--stream-bench");
-    let ssh = if arg.as_deref() == Some("--ssh") {
-        let mode = std::env::args().nth(2).unwrap_or_else(|| "ed25519".into());
-        match holonet_ssh::dev::options(&mode) {
-            Ok(opts) => Some(opts),
-            Err(err) => {
-                eprintln!("holonet: {err:#}");
-                std::process::exit(2);
-            }
-        }
-    } else {
-        None
-    };
     // SSH runs on its own Tokio threads; GPUI keeps the main thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -159,10 +145,6 @@ fn main() {
             cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
                     let mut view = terminal_view::TerminalView::new(window, cx);
-                    if let Some(opts) = ssh.clone() {
-                        view.connect(handle.clone(), opts, cx);
-                        return view;
-                    }
                     let _ = showcase;
                     view.feed(&sample::showcase());
                     if stream {

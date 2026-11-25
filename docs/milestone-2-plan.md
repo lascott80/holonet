@@ -135,7 +135,7 @@ Each phase ends with a commit and a check.
 | 5 | **Hosts and host form** *(done)*: Hosts cards, list and detail, empty state, search filter; New and Edit host, Duplicate, delete dialog; key-file import into the vault; Test connection | Add, edit, duplicate and delete hosts, persisted; Test connection reports reachability and the fingerprint |
 | 6 | **Session** *(done)*: one tab with the drawn chrome, connecting and failed states, the host key prompt (both variants), password and passphrase prompts, status bar | Connect to WSL by password and by key, trust the key, reconnect silently; a changed key is stopped and recorded |
 | 7 | **Known hosts** *(done)* screen: table, filters, detail panel, copy fingerprint and public key, forget (with a confirmation), "Review mismatch" | Forgetting a key brings the prompt back on next connect; "Review mismatch" shows the changed-key view |
-| 8 | **Wrap-up**: remove `holonet_ssh::dev` and the `--ssh` flag, update `CLAUDE.md` and notes, open the PR | Done check at the top of this file, from a clean `%APPDATA%` |
+| 8 | **Wrap-up** *(done)*: remove `holonet_ssh::dev` and the `--ssh` flag, update `CLAUDE.md` and notes, open the PR | Done check at the top of this file, from a clean `%APPDATA%` |
 
 ## Undrawn states I will draw in the design system's style
 

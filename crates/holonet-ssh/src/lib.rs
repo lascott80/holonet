@@ -9,7 +9,6 @@
 //! back on the SSH window instead of buffering without limit.
 
 mod connect;
-pub mod dev;
 pub mod hostkey;
 pub mod keys;
 

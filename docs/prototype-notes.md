@@ -134,7 +134,7 @@ For milestone 3 (sessions and terminal settings) unless noted:
 4. **Mouse reporting to programs** (`vim` mouse mode, `tmux`, `htop` clicks). Not wired; the mouse always selects. Shift should bypass reporting when it is added.
 5. **Not yet tested**: IME composition (Japanese and Chinese input), dead keys, focus in/out reporting, the kitty keyboard protocol, cursor blink, and window titles from `OSC 0/2`.
 6. **Host key prompt** (milestone 2): unknown keys are refused today, not offered as "Trust and connect".
-7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault.
+7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault. *(Done in milestone 2 phase 8: now test support only.)*
 
 ## Milestone 2, phases 0 and 1 (25 Nov 2026)
 
@@ -365,3 +365,22 @@ Connect from the Hosts detail panel, by double-clicking a card or row, or with "
 | Forget, with confirmation | Entry removed; the next connect shows the first-connection prompt |
 
 **Fixed during the pass:** the copy buttons overflowed the 320 px panel (now stacked), and the changed-key card was narrower than its wrapper (the wrapper now takes the full width).
+
+## Milestone 2, phase 8: wrap-up (25 Nov 2026)
+
+**Removed from the app.** `holonet_ssh::dev` is gone from the library: its `.dev/test-server.env` reader and `FilePrompts` moved to `crates/holonet-ssh/tests/support/`, shared by the integration tests and the `shell` example. `holonet --ssh` and the terminal view's own connect path are removed; session tabs are the only way to connect.
+
+**Done check from a clean profile**: release build, `APPDATA` pointed at an empty folder, no `HOLONET_VAULT`, no `.dev/` files used by the app.
+
+| Step | Result |
+| --- | --- |
+| First start | Create your vault; vault created at `%APPDATA%\Holonet\vault.holonet` |
+| Add a host | Welcome screen, New host, password host on the WSL server, Save and connect |
+| Verify its key | First-connection prompt with the real fingerprint; Trust and connect |
+| Use the terminal | `echo $(whoami) $(stty size)` printed `holotest 28 150`, matching the 150 × 28 tab |
+| Restart | Unlock; Hosts lists the host with its key; Known hosts lists the trusted key with its saved host |
+| Connect again | No prompts: trusted key, saved password |
+
+Clippy, the unit tests and the WSL integration tests (7) pass.
+
+**Milestone 2 is done.**

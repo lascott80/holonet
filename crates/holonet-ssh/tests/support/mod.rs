@@ -1,7 +1,8 @@
-//! Development helpers for the local WSL test server described in
-//! docs/milestone-1-plan.md, read from `.dev/test-server.env`. Used by the
-//! example, the integration tests and `holonet --ssh`. Removed from the app at
-//! the end of milestone 2, when hosts come from the vault.
+//! Test support for the local WSL test server described in
+//! docs/milestone-1-plan.md, read from `.dev/test-server.env`. Shared by the
+//! integration tests and the `shell` example; not part of the library.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use holonet_model::Secret;
 use russh::keys::{PublicKey, check_known_hosts_path};
 
-use crate::{BoxFuture, ConnectOptions, Credential, HostKeyDecision, PresentedKey, Prompts, SecretRequest};
+use holonet_ssh::{BoxFuture, ConnectOptions, Credential, HostKeyDecision, PresentedKey, Prompts, SecretRequest};
 
 /// Workspace root, as known at compile time.
 pub fn root() -> PathBuf {
