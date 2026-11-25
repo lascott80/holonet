@@ -5,12 +5,14 @@
 //!   holonet --showcase      spike 3: terminal grid from canned output
 //!   holonet --gallery       milestone 2 phase 3: every shared control
 //!   holonet --fonts         spike 1: font and glyph width check
+//!   holonet --font-spike    milestone 3 phase 0: ligatures, icon widths, font load cost
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
 
 mod app;
 mod assets;
 mod font_check;
+mod font_spike;
 mod gallery;
 mod host_form;
 mod input;
@@ -78,6 +80,7 @@ fn main() {
     }
     let fonts = arg.as_deref() == Some("--fonts");
     let gallery = arg.as_deref() == Some("--gallery");
+    let font_spike = arg.as_deref() == Some("--font-spike");
     let showcase = arg.as_deref() == Some("--showcase");
     // --stream-bench: feed 10 MB a frame at a time, print the timing and quit.
     let stream = arg.as_deref() == Some("--stream-bench");
@@ -95,6 +98,23 @@ fn main() {
         theme::init_fonts(cx);
         ui::text_field::bind_keys(cx);
         ui::select::bind_keys(cx);
+        if font_spike {
+            match font_spike::load(cx) {
+                Some((n, mb, read, add)) => {
+                    println!("registered {n} files, {mb:.1} MB: read {read:.0} ms, add_fonts {add:.0} ms")
+                }
+                None => println!("HOLONET_SPIKE_FONTS not set: using installed fonts only"),
+            }
+            let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1100.), px(900.)), cx);
+            let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |window, cx| {
+                font_spike::report(window);
+                cx.new(|_| font_spike::FontSpike)
+            })
+            .expect("failed to open window");
+            cx.activate(true);
+            return;
+        }
         if gallery {
             let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {

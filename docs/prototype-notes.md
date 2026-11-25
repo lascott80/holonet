@@ -384,3 +384,64 @@ Connect from the Hosts detail panel, by double-clicking a card or row, or with "
 Clippy, the unit tests and the WSL integration tests (7) pass.
 
 **Milestone 2 is done.**
+
+## Milestone 3, phase 0: spikes (25 Nov 2026)
+
+JetBrainsMono Nerd Font v3.5.1 (`JetBrainsMono.tar.xz`, sha256 checked against the release) was extracted to a scratch folder for these tests. Nothing was installed in Windows.
+
+### (a) Ligatures and icon widths in the cell grid: ligatures work, with one fix
+
+`holonet --font-spike` (with `HOLONET_SPIKE_FONTS` set to the extracted files) shapes test strings in each build and paints them the way the terminal does, one glyph forced into each cell.
+
+**Why milestone 1 saw no ligatures:**
+- GPUI 0.2.2's DirectWrite backend (`platform/windows/direct_write.rs`) always calls `SetTypography`. When a font has no features set, the typography it passes is empty.
+- An empty typography turns off DirectWrite's default `calt`, so no ligatures form anywhere in GPUI text.
+- Asking for `calt` explicitly fixes it: `font.features = FontFeatures(vec![("calt", 1)])`.
+
+**Results with `calt` explicit:**
+
+| Build | `->` `=>` `!=` `===` `<=` `>=` `<!--` `\|>` `::` | On the grid |
+| --- | --- | --- |
+| JetBrainsMono Nerd Font, Mono and Propo | Ligatures form (glyph ids differ from single characters) | Yes: one glyph per character, every glyph at a whole cell, with or without forced width |
+| JetBrainsMonoNL Nerd Font and NL Mono | No ligatures, as intended | Yes |
+
+JetBrains Mono's ligatures replace each character with a same-width piece, so forcing glyphs into cells keeps them intact. A ligature forms only within one styled run, which is what other terminals do.
+
+**Icon widths** are measured in cells, at 13 px with a cell of 7.80 px:
+
+| Build | Powerline, folder, git branch, Linux, Rust, Ubuntu (Font Logos) |
+| --- | --- |
+| Mono, NL Mono | All exactly 1 cell |
+| Nerd Font (non-Mono) | Advance 1 cell; the icon is drawn larger and spills into the next cell |
+| Propo | Advances from 0.96 to 1.56 cells; in the grid it is placed per cell and spills like the non-Mono build |
+
+**Decisions:**
+- The design's default, "JetBrainsMono Nerd Font" (non-Mono), stays the default.
+- The ligatures setting is shown. The renderer sets `calt` to 1 or 0 from it.
+- Wide icons overlap the next cell, as in Windows Terminal and WezTerm. The Mono build is the choice for strict alignment, as its card says.
+
+### (b) Sleep, resume and network changes: the APIs register without a window; real events not yet tested
+
+`cargo run -p holonet-app --example power_spike --release` registers three Win32 callbacks, none of which need a window. This is good news for GPUI, which does not expose window messages.
+
+| API | Result on Windows 11 ARM64 |
+| --- | --- |
+| `PowerRegisterSuspendResumeNotification` (`DEVICE_NOTIFY_CALLBACK`) | Returns 0 (registered) |
+| `NotifyIpInterfaceChange` (`AF_UNSPEC`) | Returns 0 |
+| `NotifyNetworkConnectivityHintChange` | Returns 0, and delivers the initial hint at once (level 3: internet) |
+
+The live test was skipped: Wi-Fi off and on, then sleep and wake. It moves to phase 7's exit check.
+
+The spike also logs whenever the wall clock and the monotonic clock jump apart, as a second sign of sleep. Phase 7 records which of these fire, in which order, and how soon after waking. The keep-alive timeout remains the fallback that catches every drop.
+
+### (c) Embedding the fonts: cheap at run time, larger download
+
+- **The 16 files to bundle:** Regular, Bold, Italic and Bold Italic of the Nerd Font, Mono, Propo and NL builds, offered as the four "Bundled" cards. They total 39.0 MB, or 21.6 MB zipped.
+- **Registration:** GPUI's `add_fonts` took **4 ms** for 20 files (51 MB). Reading them from disk took 10 to 66 ms; embedding skips that.
+- **Size:** today's `holonet.exe` is 18.5 MB, or 7.9 MB zipped. With the fonts embedded, the exe is about 58 MB and the release zip about 30 MB.
+
+**Decision:** embed them with `include_bytes!`, as Inter and Space Grotesk already are. The cost is download size only, and a single-file exe is simpler to run unsigned. If size ever matters, the fallback is a `fonts/` folder beside the exe, loaded at start.
+
+### Left in the tree for later phases
+- `holonet --font-spike` (`src/font_spike.rs`) stays as a regression check until phase 2 embeds the fonts. It is removed in phase 9.
+- `examples/power_spike.rs` and its `windows-sys` dev-dependency stay for phase 7's live test.
