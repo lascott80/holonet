@@ -3,6 +3,7 @@
 //! select keep state and have their own modules.
 
 pub mod select;
+pub mod slider;
 pub mod text_field;
 
 use gpui::{
@@ -14,6 +15,7 @@ use crate::assets;
 use crate::theme::{self, TypeStyles};
 
 pub use select::{Select, SelectEvent};
+pub use slider::{Slider, SliderEvent};
 pub use text_field::{TextField, TextFieldEvent};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;

@@ -130,6 +130,13 @@ impl HolonetApp {
     }
 
     /// Open a session tab for a saved host.
+    /// Terminal settings changed in Settings: every open terminal follows.
+    pub fn apply_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
+        for tab in &self.sessions {
+            tab.update(cx, |t, cx| t.set_terminal_settings(settings, cx));
+        }
+    }
+
     pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(data) = self.vault_data(cx) else { return };
         let Some(host) = data.host(id).cloned() else { return };

@@ -149,6 +149,12 @@ pub struct Limits {
 }
 
 impl SessionTab {
+    /// Settings changed: show them in this tab's terminal.
+    pub fn set_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
+        self.limits.terminal = settings.clone();
+        self.terminal.update(cx, |t, cx| t.set_settings(settings.clone(), cx));
+    }
+
     #[allow(clippy::too_many_arguments)] // GPUI context plus the connection's inputs
     pub fn new(
         app: WeakEntity<HolonetApp>,

@@ -528,3 +528,53 @@ The app shows the killed connection as "Session ended. The network connection fa
 **Notes.**
 - Programs that choose 24-bit colors themselves keep them in every scheme. A prompt themed for dark backgrounds can look pale in Light; that is the program's color, not the palette's.
 - The font licences are in the repository now. Showing them in Settings comes with phase 3, and shipping them beside the exe with release packaging in milestone 7.
+
+## Milestone 3, phase 3: Settings page (25 Nov 2026)
+
+The Settings page is rebuilt from `Settings.dc.html` in `workspace/settings.rs`. Section chips (Terminal, Vault and security, Connection, Keyboard, About) scroll to their section with GPUI's `ScrollHandle::scroll_to_top_of_item`.
+
+**Terminal.**
+- **Live preview.** A real `TerminalView` in a preview mode that never takes focus, fed the design's sample with palette colors plus a Nerd Font prompt line. It shows the actual font, ligatures, scheme and cursor. The header shows "font · size".
+- **Font cards**, two equal columns, each drawn in its own font:
+  - the four bundled builds, marked "Bundled"
+  - Cascadia Mono and Consolas when installed, marked "System"
+  - the installed font chosen, if it is another one
+- **"Use another installed font"** opens a searchable list of every installed family. GPUI cannot tell monospaced fonts apart, so the dialog says that.
+- **Installed fonts fall back to the bundled Mono build** for glyphs they lack, so Nerd Font prompt icons still draw in, say, Courier New.
+- **Controls:**
+  - Font size slider (10 to 20 px) and line height slider (1.0 to 1.8)
+  - Font ligatures, off and disabled for the NL build, with the design's note
+  - Cursor shape and Color scheme as segmented controls
+  - Blinking cursor
+  - Scrollback (10,000 lines, 50,000 lines or Unlimited)
+  - Copy on select and Right-click pastes, as rows where the whole row toggles
+- **New control: `ui::Slider`.** Click or drag on the track, or use the arrow keys, Home and End when focused. It shows the value in mono and has an accent focus ring, and it is in `--gallery`.
+
+**Vault and security:** unchanged rows.
+
+**Connection:** Keep-alive interval (applies to new connections). "Reconnect after sleep or network change" joins this section in phase 7, when reconnecting exists.
+
+**Keyboard:** the design's read-only list, showing only shortcuts that work today (Copy and Paste). Each joins the list in the phase that adds it.
+
+**About:** the version, and the bundled fonts with "View licences". That dialog shows `NOTICE.md` and the three OFL texts, compiled into the exe.
+
+**Changes apply at once.**
+- Each change saves to the vault and updates the preview.
+- `HolonetApp::apply_terminal_settings` passes the change to every open session tab (deferred, so the workspace and the app are never updated at the same time). Each `TerminalView` applies it at its next frame, where a window is available, and re-measures its grid, so the server hears about the new size.
+
+**Checked by hand against WSL, with a session open:**
+
+| Change | Result |
+| --- | --- |
+| Mono build, then 16 px | Preview and the open session switched; the session resized to 122×23 |
+| Light, then Bar cursor | Session redrawn light at once, with ANSI colors from the Light palette |
+| About chip | Scrolled to the end of the page |
+| View licences | Dialog with the notices and OFL texts; Close |
+| "cour" in the installed font list | Courier New; picked; its own card appears, selected |
+| Restart and unlock | Courier New, 16 px, Light and Bar still set |
+| Courier New with Nerd icons in the preview | Icons drawn from the bundled fallback (empty boxes before the fallback was added) |
+| Slider keys in the gallery | Right, End and Left step and clamp |
+
+Afterwards the throwaway vault was set back to the defaults.
+
+**Not on the page yet**, because those features don't exist: Appearance (milestone 7), SFTP (5), Updates (7), and the update notice.

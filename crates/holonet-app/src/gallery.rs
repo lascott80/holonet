@@ -26,6 +26,7 @@ pub struct Gallery {
     long: Entity<TextField>,
     group: Entity<Select>,
     timeout: Entity<Select>,
+    slider: Entity<crate::ui::Slider>,
     route: usize,
     auth: usize,
     keep_alive: bool,
@@ -64,7 +65,12 @@ impl Gallery {
         let timeout = cx
             .new(|cx| Select::new(cx, ["15 minutes idle", "1 hour idle", "Never"].map(SharedString::from).to_vec(), 0));
 
+        let slider = cx.new(|cx| crate::ui::Slider::new(cx, 10, 20, 13, |v| format!("{v}px")));
         let subscriptions = vec![
+            cx.subscribe(&slider, |this: &mut Self, _, event: &crate::ui::SliderEvent, cx| {
+                let crate::ui::SliderEvent::Changed(v) = *event;
+                this.note(format!("slider {v}"), cx);
+            }),
             cx.subscribe(&address, |this: &mut Self, field, event: &TextFieldEvent, cx| {
                 let text = field.read(cx).text().to_string();
                 this.note(format!("address {event:?}: {text}"), cx);
@@ -83,6 +89,7 @@ impl Gallery {
             long,
             group,
             timeout,
+            slider,
             route: 0,
             auth: 0,
             keep_alive: true,
@@ -209,6 +216,7 @@ impl Render for Gallery {
                 }),
                 None,
             ))
+            .child(field("Font size (slider: drag, click, arrow keys)", self.slider.clone(), None))
             .child(field(
                 "Authentication",
                 Segmented::new("auth", ["SSH key", "Password"].map(SharedString::from).to_vec(), self.auth).on_change(

@@ -134,6 +134,7 @@ fn main() {
         theme::init_fonts(cx);
         ui::text_field::bind_keys(cx);
         ui::select::bind_keys(cx);
+        ui::slider::bind_keys(cx);
         if font_spike {
             match font_spike::load(cx) {
                 Some((n, mb, read, add)) => {

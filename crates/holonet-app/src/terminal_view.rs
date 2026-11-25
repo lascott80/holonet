@@ -80,6 +80,10 @@ pub struct TerminalView {
     dragged: bool,
     /// Inside a session pane: no status bar, pane padding (Terminal.dc.html).
     embedded: bool,
+    /// The Settings preview: never takes focus, draws its cursor as if focused.
+    preview: bool,
+    /// Settings to apply at the next render (where a window is available).
+    pending: Option<TerminalSettings>,
     /// Grid size measured from the canvas at paint time; applied next render.
     measured: Rc<Cell<Option<GridSize>>>,
 }
@@ -112,8 +116,27 @@ const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 impl TerminalView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let view = Self::unfocused(window, cx);
+        window.focus(&view.focus);
+        view
+    }
+
+    /// A non-interactive terminal for the Settings preview.
+    pub fn preview(rows: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::unfocused(window, cx);
+        view.preview = true;
+        view.set_embedded(GridSize { cols: 80, rows });
+        view
+    }
+
+    /// Settings changed while this terminal is open: applied at the next frame.
+    pub fn set_settings(&mut self, settings: TerminalSettings, cx: &mut Context<Self>) {
+        self.pending = Some(settings);
+        cx.notify();
+    }
+
+    fn unfocused(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus);
         let mut view = Self {
             model: TerminalModel::new(GridSize { cols: 80, rows: 24 }, SCROLLBACK),
             font: font("Consolas"),
@@ -139,6 +162,8 @@ impl TerminalView {
             selecting: false,
             dragged: false,
             embedded: false,
+            preview: false,
+            pending: None,
             measured: Rc::new(Cell::new(None)),
         };
         view.apply_settings(&TerminalSettings::default(), window, cx);
@@ -171,6 +196,10 @@ impl TerminalView {
         // milestone 3 phase 0).
         let calt = u32::from(settings.ligatures_on());
         f.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), calt)]));
+        // Glyphs the font lacks (Nerd Font icons in an installed font) come
+        // from the bundled single-width build.
+        f.fallbacks =
+            Some(gpui::FontFallbacks::from_fonts(vec![holonet_model::BundledFont::NerdFontMono.family().to_string()]));
         let font_size = px(settings.font_size());
         let font_id = text.resolve_font(&f);
         self.cell_width = text.advance(font_id, font_size, 'M').map(|s| s.width).unwrap_or(font_size * 0.6);
@@ -514,6 +543,9 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(settings) = self.pending.take() {
+            self.apply_settings(&settings, window, cx);
+        }
         // Size: measured from the canvas at the last paint, or (before the
         // first paint of a full-window view) estimated from the window.
         let grid = match self.measured.get() {
@@ -537,7 +569,7 @@ impl Render for TerminalView {
             bench.snapshot_us_total += self.snapshot_us;
         }
         let (status, warn) = self.status_text(&snapshot);
-        let focused = self.focus.is_focused(window);
+        let focused = self.preview || self.focus.is_focused(window);
         self.update_blink(snapshot.cursor_blinking, focused, cx);
         let cursor_on = self.blink_visible;
         let background = snapshot.palette.background;
