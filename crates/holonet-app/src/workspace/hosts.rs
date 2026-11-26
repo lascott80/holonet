@@ -125,7 +125,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .flex_grow()
-                    .flex_basis(px(160.))
+                    .flex_basis(px(110.))
                     .child(div().text_title().text_color(theme::ink()).child("Hosts"))
                     .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(
                         match data.groups.len() {
@@ -136,7 +136,32 @@ impl Workspace {
                     ))),
             )
             // Narrower than drawn, so Import fits on the line with New host.
-            .child(div().w(px(260.)).child(self.search.clone()))
+            // Palette.dc.html: the palette's shortcut inside the search field.
+            .child(
+                div().w(px(300.)).relative().child(self.search.clone()).child(
+                    div().absolute().right(px(10.)).top_0().bottom_0().flex().items_center().child(
+                        div()
+                            .id("open-palette")
+                            .px(px(6.))
+                            .py(px(2.))
+                            .bg(theme::card())
+                            .border_1()
+                            .border_color(theme::line_strong())
+                            .rounded(px(4.))
+                            .text_mono_small()
+                            .text_color(theme::ink_muted())
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme::ink()))
+                            .child("Ctrl Shift P")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let app = this.app.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let _ = app.update(cx, |app, cx| app.open_palette(window, cx));
+                                });
+                            })),
+                    ),
+                ),
+            )
             .child(
                 div()
                     .flex()

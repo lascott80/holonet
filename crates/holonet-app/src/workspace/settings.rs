@@ -38,6 +38,9 @@ const PREVIEW_ROWS: usize = 6;
 /// Shortcuts that work in this build (Settings.dc.html lists the full set;
 /// each joins this list when its feature lands).
 const SHORTCUTS: &[(&str, &str)] = &[
+    ("Command palette", "Ctrl Shift P"),
+    ("New host", "Ctrl Shift N"),
+    ("Lock vault", "Ctrl Shift L"),
     ("New tab", "Ctrl Shift T"),
     ("Close pane or tab", "Ctrl Shift W"),
     ("Next tab", "Ctrl Tab"),
@@ -47,6 +50,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Next pane", "Ctrl Shift ]"),
     ("Previous pane", "Ctrl Shift ["),
     ("Find in terminal", "Ctrl Shift F"),
+    ("Broadcast to the tab's panes", "Ctrl Shift B"),
     ("Copy", "Ctrl Shift C"),
     ("Paste", "Ctrl Shift V"),
 ];

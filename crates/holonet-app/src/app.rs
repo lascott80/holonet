@@ -38,7 +38,21 @@ use crate::workspace::{Page, Workspace};
 
 actions!(
     holonet,
-    [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find, Broadcast]
+    [
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        SplitRight,
+        SplitDown,
+        NextPane,
+        PreviousPane,
+        Find,
+        Broadcast,
+        OpenPalette,
+        AddHost,
+        LockNow
+    ]
 );
 
 const CONTEXT: &str = "HolonetApp";
@@ -52,6 +66,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-b", Broadcast, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", AddHost, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-l", LockNow, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
         // With Shift held, Windows layouts report ] and [ as } and {.
         KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
@@ -79,6 +96,8 @@ pub struct HolonetApp {
     active: Option<usize>,
     /// The new-tab host picker, while open.
     picker: Option<Entity<HostPicker>>,
+    /// The command palette, while open.
+    palette: Option<Entity<crate::palette::CommandPalette>>,
     /// An SFTP tab waiting for "Close anyway?" (transfers still running).
     closing: Option<Entity<Tab>>,
     /// Where the "+" button was drawn, to place the picker under it.
@@ -169,6 +188,7 @@ impl HolonetApp {
             snippet_values: Default::default(),
             last_session: None,
             logs: None,
+            palette: None,
             pending_history: Vec::new(),
             history_cleaned: false,
         }
@@ -885,6 +905,205 @@ impl HolonetApp {
     }
 
     /// "+" or Ctrl Shift T: the host picker under the "+" button.
+    /// Ctrl Shift P: the command palette, over whatever is shown. Not while
+    /// the vault is locked: its entries come from the vault.
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::palette::{CommandPalette, PaletteEvent};
+        if self.vault_data(cx).is_none() {
+            return;
+        }
+        self.picker = None;
+        let entries = self.palette_entries(cx);
+        let palette = cx.new(|cx| CommandPalette::new(entries, window, cx));
+        cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
+            this.palette = None;
+            match event {
+                PaletteEvent::Run { command, split } => {
+                    let (command, split) = (command.clone(), *split);
+                    // Deferred: running reads the workspace, which may be mid-update.
+                    let app = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| app.run_command(command, split, window, cx))
+                    });
+                }
+                PaletteEvent::Dismiss => this.select(this.active, window, cx),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// The palette's entries: hosts (the open tab, or connect), snippets
+    /// when a terminal can run them, rules, screens and the actions that
+    /// work now.
+    fn palette_entries(&self, cx: &App) -> Vec<crate::palette::Entry> {
+        use crate::palette::{Command, Entry, Screen, Section};
+        let Some(data) = self.vault_data(cx) else { return Vec::new() };
+        let entry = |section, title: String, hint: &str, command| Entry {
+            section,
+            title,
+            hint: hint.into(),
+            keys: None,
+            color: None,
+            command,
+            splits: false,
+            recent: 0,
+            search_only: false,
+        };
+        let active = self.active_tab();
+        let terminal_tab = active.as_ref().filter(|t| !t.read(cx).is_files(cx));
+        let can_split = terminal_tab.is_some_and(|t| t.read(cx).can_split());
+        let mut out = Vec::new();
+        for host in &data.hosts {
+            let tab = self.tabs.iter().position(|t| {
+                !t.read(cx).is_files(cx) && t.read(cx).panes().iter().any(|p| p.read(cx).host.id == host.id)
+            });
+            let (hint, command) = match tab {
+                Some(i) => ("Go to session", Command::GoToTab(i)),
+                None => ("Connect", Command::Connect(host.id)),
+            };
+            let color = crate::workspace::GroupTag::of(data, host).map(|t| t.color);
+            let recent = host.last_connected_at.map_or(0, |t| t.0) + if tab.is_some() { 1 << 40 } else { 0 };
+            out.push(Entry {
+                color,
+                splits: can_split,
+                recent,
+                ..entry(Section::Hosts, host.display_name().to_string(), hint, command)
+            });
+            out.push(Entry {
+                color,
+                recent,
+                search_only: true,
+                ..entry(Section::Hosts, host.display_name().to_string(), "Open SFTP", Command::OpenFiles(host.id))
+            });
+        }
+        if self.active_session_name(cx).is_some() {
+            for s in &data.snippets {
+                out.push(entry(
+                    Section::Snippets,
+                    s.display_name().to_string(),
+                    "Run in active session",
+                    Command::RunSnippet(Box::new(s.clone())),
+                ));
+            }
+        }
+        for rule in &data.forward_rules {
+            let on = self.forwarder.read(cx).is_on(rule.id);
+            out.push(entry(
+                Section::Forwarding,
+                rule.display_name().to_string(),
+                if on { "Turn off" } else { "Turn on" },
+                Command::Rule(rule.id, !on),
+            ));
+        }
+        for screen in Screen::ALL {
+            out.push(entry(Section::GoTo, screen.label().into(), "Screen", Command::Screen(screen)));
+        }
+        let action = |title: &str, keys: &'static str, command| Entry {
+            keys: Some(keys),
+            ..entry(Section::Actions, title.into(), "Action", command)
+        };
+        out.push(action("New host", "Ctrl Shift N", Command::NewHost));
+        out.push(action("Lock vault", "Ctrl Shift L", Command::LockVault));
+        out.push(action("New tab", "Ctrl Shift T", Command::NewTab));
+        if can_split {
+            out.push(action("Split right", "Ctrl Shift D", Command::SplitRight));
+        }
+        if terminal_tab.is_some_and(|t| t.read(cx).panes().len() > 1) {
+            out.push(action("Broadcast", "Ctrl Shift B", Command::Broadcast));
+        }
+        if terminal_tab.is_some() {
+            out.push(action("Find in terminal", "Ctrl Shift F", Command::Find));
+        }
+        out
+    }
+
+    /// Run a palette entry. `split` opens a host in a split of the current
+    /// terminal tab.
+    fn run_command(
+        &mut self,
+        command: crate::palette::Command,
+        split: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::palette::{Command, Screen};
+        match command {
+            Command::GoToTab(i) => self.select(Some(i), window, cx),
+            Command::Connect(id) if split => match self.active_tab() {
+                Some(tab) => self.split(&tab, Axis::Right, Some(id), window, cx),
+                None => self.connect(id, window, cx),
+            },
+            Command::Connect(id) => self.connect(id, window, cx),
+            Command::OpenFiles(id) => self.open_files(id, Vec::new(), window, cx),
+            Command::RunSnippet(snippet) => {
+                let Some(tab) = self.last_session.as_ref().and_then(|t| t.upgrade()) else { return };
+                tab.update(cx, |t, cx| t.run_snippet_here(*snippet, window, cx));
+                // Back in its tab, with the keyboard in its pane.
+                if let Some(index) = self.tabs.iter().position(|t| *t == tab) {
+                    self.select(Some(index), window, cx);
+                }
+            }
+            Command::Rule(id, on) => {
+                let Some(data) = self.vault_data(cx).cloned() else { return };
+                self.forwarder.update(cx, |f, cx| if on { f.start(id, &data, cx) } else { f.stop(id, cx) });
+                // The keyboard goes back where it was.
+                self.select(self.active, window, cx);
+            }
+            Command::Screen(screen) => {
+                self.show_vault(window, cx);
+                if let Some(w) = self.workspace().cloned() {
+                    w.update(cx, |w, cx| match screen {
+                        Screen::Snippets => w.open_snippets(None, cx),
+                        Screen::History => w.open_history(cx),
+                        Screen::Hosts => w.set_page(Page::Hosts, cx),
+                        Screen::Groups => w.set_page(Page::Groups, cx),
+                        Screen::Keychain => w.set_page(Page::Keychain, cx),
+                        Screen::Forwarding => w.set_page(Page::Forwarding, cx),
+                        Screen::KnownHosts => w.set_page(Page::KnownHosts, cx),
+                        Screen::Settings => w.set_page(Page::Settings, cx),
+                    });
+                }
+            }
+            Command::NewHost => self.new_host(window, cx),
+            Command::LockVault => self.lock(window, cx),
+            Command::NewTab => self.open_picker(window, cx),
+            Command::SplitRight => {
+                if let Some(tab) = self.active_tab() {
+                    self.split(&tab, Axis::Right, None, window, cx);
+                }
+            }
+            Command::Broadcast => {
+                if let Some(tab) = self.active_tab() {
+                    tab.update(cx, |t, cx| t.toggle_broadcast(cx));
+                }
+                self.select(self.active, window, cx);
+            }
+            Command::Find => {
+                if let Some(tab) = self.active_tab() {
+                    tab.update(cx, |t, cx| {
+                        if !t.focus_find(window, cx) {
+                            t.toggle_find(window, cx);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Ctrl Shift N: the New host form.
+    fn new_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace().is_none() {
+            return;
+        }
+        self.show_vault(window, cx);
+        if let Some(w) = self.workspace().cloned() {
+            w.update(cx, |w, cx| w.open_form(None, window, cx));
+        }
+    }
+
     fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(data) = self.vault_data(cx) else { return };
         let data = data.clone();
@@ -1048,6 +1267,35 @@ impl Render for HolonetApp {
                         .child(picker),
                 )
         });
+        // Palette.dc.html: the palette over a dimmed window, near the top.
+        let palette = self.palette.clone().map(|palette| {
+            div()
+                .id("palette-layer")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(96.))
+                .px(px(20.))
+                .bg(gpui::hsla(0., 0., 0., 0.6))
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.palette = None;
+                        this.select(this.active, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(palette),
+                )
+        });
         // "n transfers are still running. Close anyway?"
         let closing = self.closing.clone().filter(|_| unlocked).map(|tab| {
             let n = Self::running_transfers(&tab, cx);
@@ -1153,6 +1401,13 @@ impl Render for HolonetApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|_, _: &AddHost, window, cx| {
+                // Deferred: the form reads the workspace, which may be mid-update.
+                let app = cx.entity();
+                window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.new_host(window, cx)));
+            }))
+            .on_action(cx.listener(|this, _: &LockNow, window, cx| this.lock(window, cx)))
             .bg(theme::ground())
             .text_color(theme::ink())
             .font_family(theme::SANS)
@@ -1160,6 +1415,7 @@ impl Render for HolonetApp {
             .child(div().flex_1().min_h_0().relative().child(body))
             .children(picker)
             .children(closing)
+            .children(palette)
     }
 }
 

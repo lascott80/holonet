@@ -2623,3 +2623,52 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 **Cleanup and checks:**
 - The test account's config, key and `known_hosts` were removed, and its `authorized_keys` and permissions (750, 700, 600) restored. The test vault folder was removed.
 - fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 46, including `quick_hosts`.
+
+## Milestone 7, phase 6: command palette (26 Nov 2026)
+
+**The palette (`palette.rs`):**
+
+- **Opening it:** Ctrl Shift P anywhere the vault is unlocked, over the vault view or a terminal, or the "Ctrl Shift P" chip in the Hosts search.
+- **The card, as Palette.dc.html draws it:** 640px over a dimmed window, 96px from the top. It has the search field ("Search hosts, snippets and commands"), an Esc chip, section headings, 44px rows with group colour squares, an "Enter" chip on the selected row, and the footer "Up and Down to move · Enter to open · Ctrl Enter to open in a split".
+- **Keys:** its own key context binds Up, Down and Ctrl Enter, as the host picker does. Enter, Esc and a click outside work through the field and the layer. Ctrl-click on a row opens it in a split.
+- **Ranking (`rank`, unit tested):**
+  - **Within a section, best first:** an exact match, then a prefix, then a word's start, then anywhere, then the letters in order.
+  - **Ties:** go to the more recent (hosts with an open tab first, then by last connection).
+  - **Sections:** always in the drawn order.
+  - **With nothing typed:** at most 6 hosts and 4 snippets or rules are shown, and the search-only rows are hidden.
+
+**Entries (`HolonetApp::palette_entries`), built when it opens:**
+
+- **Hosts:**
+  - "Go to session" when a terminal tab has the host, else "Connect". They split with Ctrl Enter when the current tab is a terminal with room.
+  - While searching, an "Open SFTP" row for each host.
+- **Snippets:** "Run in active session", only while a terminal can run them. They run through the tab's drawer path (`run_snippet_here`), so variables and Ask before running still prompt.
+- **Port forwarding:** "Turn on" or "Turn off" for each rule.
+- **Go to:** the eight screens.
+- **Actions:**
+  - always: New host (Ctrl Shift N), Lock vault (Ctrl Shift L) and New tab (Ctrl Shift T)
+  - only when they would work: Split right, Broadcast and Find in terminal
+- **Running an entry:** deferred, as the picker's are.
+- **Focus:** after a rule, Broadcast or a snippet, focus goes back to the active tab. Without that, typing after the palette went nowhere (found in the check).
+
+**Shortcuts:** Ctrl Shift N (New host) and Ctrl Shift L (Lock vault) are new, both Ctrl Shift like the others. Settings' Keyboard list adds them, the palette, and Broadcast (Ctrl Shift B), which was missing.
+
+**Live check** (a copy of the test vault with a snippet and a rule added by a throwaway program):
+
+- **Opening it:** Ctrl Shift P over the vault view showed hosts, the rule and the screens. There were no snippets, as no terminal was open.
+- **Hosts:**
+  - `wsl-a`, Enter connected.
+  - Over that terminal, `wsl-b` showed Connect and Open SFTP, and Ctrl Enter opened wsl-b in a split.
+- **Running the rest:**
+  - "Palette hello" ran in the active pane.
+  - "Palette rule" turned port 18190 on (listening), and again turned it off.
+- **Focus:** the first build lost focus after the palette, so typed text went nowhere. After the fix, a rule and a snippet each kept typing in the pane, and the status bar listed the forward.
+- **Every other action:**
+  - Find opened the find bar, New tab opened the picker, and Settings showed the screen with the new Keyboard rows.
+  - Ctrl Shift N opened New host, and Ctrl Shift L locked the vault.
+  - The Hosts chip opened the palette, and Esc closed it.
+- **Not run through the palette:** Broadcast, which uses the same toggle as Ctrl Shift B.
+
+**Hosts header:** the chip sits inside the search field, as drawn. The field is 300px wide and the title's basis 110px, so it all fits on one line at 150% scale. The long placeholder is clipped under the chip ("Find a host, or type ssh us…").
+
+**Cleanup and checks:** the test vault copy was removed, and port 18190 is closed. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 49.

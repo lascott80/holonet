@@ -387,8 +387,8 @@ impl Tab {
         cx.notify();
     }
 
-    /// Run a snippet from the drawer in the active pane.
-    fn run_from_drawer(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
+    /// Run a snippet in the active pane (the drawer, the palette).
+    pub fn run_snippet_here(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active.clone();
         if !pane.read(cx).can_run() {
             return;
@@ -432,7 +432,7 @@ impl Tab {
                 .when(ready, |d| {
                     d.cursor_pointer()
                         .hover(|d| d.border_color(theme::line_strong()))
-                        .on_click(cx.listener(move |this, _, window, cx| this.run_from_drawer(s.clone(), window, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_snippet_here(s.clone(), window, cx)))
                 })
                 .when(!ready, |d| d.opacity(0.5))
                 .child(

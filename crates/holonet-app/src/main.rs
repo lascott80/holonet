@@ -32,6 +32,7 @@ mod host_picker;
 mod import;
 mod input;
 mod key_import;
+mod palette;
 mod platform;
 mod sample;
 mod session;
@@ -198,6 +199,7 @@ fn main() {
         assets::load_fonts(cx);
         theme::init_fonts(cx);
         ui::text_field::bind_keys(cx);
+        palette::bind_keys(cx);
         ui::select::bind_keys(cx);
         ui::slider::bind_keys(cx);
         app::bind_keys(cx);
