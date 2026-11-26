@@ -281,6 +281,7 @@ impl Workspace {
                     HostFormEvent::Saved { host, new_keys, passphrase, connect } => {
                         let (host, new_keys, passphrase) = ((**host).clone(), new_keys.clone(), passphrase.clone());
                         let id = host.id;
+                        let label = host.label.clone();
                         this.save(
                             move |d| {
                                 d.keys.extend(new_keys);
@@ -297,6 +298,12 @@ impl Workspace {
                             cx,
                         );
                         this.selected = Some(id);
+                        // Open tabs show the saved name (Save as host, or a
+                        // rename while connected).
+                        let app = this.app.clone();
+                        window.defer(cx, move |_, cx| {
+                            let _ = app.update(cx, |app, cx| app.host_renamed(id, &label, cx));
+                        });
                         if *connect {
                             this.connect(id, window, cx);
                         }

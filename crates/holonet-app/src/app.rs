@@ -831,6 +831,23 @@ impl HolonetApp {
         self.vault_data(cx).is_none_or(|d| d.host(id).is_some())
     }
 
+    /// A saved host's label changed: its open panes and tabs show it. Only
+    /// the name: the connection keeps the details it was opened with.
+    pub fn host_renamed(&mut self, id: HostId, label: &str, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            for pane in tab.read(cx).panes() {
+                pane.update(cx, |p, cx| {
+                    if p.host.id == id && p.host.label != label {
+                        p.host.label = label.to_string();
+                        cx.notify();
+                    }
+                });
+            }
+            tab.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
     /// "Save as host": the host form, filled in from a quick connect.
     fn save_as_host(&mut self, host: holonet_model::Host, window: &mut Window, cx: &mut Context<Self>) {
         self.show_vault(window, cx);

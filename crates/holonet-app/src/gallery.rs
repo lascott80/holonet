@@ -1,8 +1,9 @@
 //! `holonet --gallery`: every shared control in every state, inside the app
 //! shell, for checking against docs/design (milestone 2, phase 3; the
 //! Keychain controls from milestone 4, the SFTP screen's from milestone 5,
-//! and milestone 6's switch, swatches, rule cards, host chips and broadcast
-//! strip).
+//! milestone 6's switch, swatches, rule cards, host chips and broadcast
+//! strip, and milestone 7's History rows and saved output, palette rows,
+//! update notice and First run cards).
 
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -12,6 +13,10 @@ use crate::ui::files::{
     FileRow, breadcrumbs, check_box, file_header, file_row, nav_button, permissions_grid, progress_bar, selection_bar,
 };
 use crate::ui::power::{RuleCard, broadcast_strip, host_chip, kind_tag, rule_card, swatch};
+use crate::ui::ship::{
+    HistoryRow, first_run_link, history_header, history_row, import_card, key_chip, log_output, palette_row,
+    palette_section, update_card,
+};
 use crate::ui::{
     Button, ButtonKind, CalloutKind, Checkbox, Segmented, Select, SelectEvent, Tag, TextField, TextFieldEvent, callout,
     code_box, dialog, dialog_buttons, field, fieldset, group_square, key_values, modal, section_label,
@@ -52,6 +57,9 @@ pub struct Gallery {
     rules_on: [bool; 2],
     swatch: usize,
     chips: [bool; 4],
+    /// Milestone 7 section: the selected History row and palette row.
+    hist_row: usize,
+    palette_at: usize,
     log: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -122,6 +130,8 @@ impl Gallery {
             rules_on: [true, false],
             swatch: 1,
             chips: [true, true, false, false],
+            hist_row: 0,
+            palette_at: 0,
             log: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -748,6 +758,135 @@ impl Render for Gallery {
                 }))
         };
 
+        let ship = {
+            let rows = [
+                (
+                    "prod-web-02",
+                    Some(theme::group_violet()),
+                    "Terminal",
+                    "24 Nov 2026, 15:12",
+                    "42 min",
+                    "Primary",
+                    "1.2 MB",
+                ),
+                ("nas-01", Some(theme::group_mint()), "SFTP", "24 Nov 2026, 09:03", "6 min", "Tailscale", "No log"),
+                ("deploy@10.0.0.4", None, "Terminal", "Today, 13:40", "Open", "Primary", "Writing"),
+            ];
+            let table = div()
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::line())
+                .rounded(theme::RADIUS_LG)
+                .child(history_header())
+                .children(rows.into_iter().enumerate().map(|(i, (host, color, kind, started, length, route, log))| {
+                    history_row(
+                        SharedString::from(format!("g-hist-{i}")),
+                        HistoryRow {
+                            selected: self.hist_row == i,
+                            color,
+                            host: host.into(),
+                            kind,
+                            started: started.into(),
+                            length: length.into(),
+                            route: route.into(),
+                            log: log.into(),
+                        },
+                    )
+                    .on_click(cx.listener(move |g, _, _, cx| {
+                        g.hist_row = i;
+                        g.note(format!("history row {i}"), cx);
+                    }))
+                }));
+            let output = log_output(
+                "g-hist-output",
+                vec![
+                    ("Showing the last 400 of 1,204 lines. Export log for all of them.".into(), true),
+                    ("deploy@prod-web-02:~$ systemctl status nginx".into(), false),
+                    ("● nginx.service - A high performance web server and a reverse proxy server".into(), false),
+                    ("     Active: active (running) since Mon 2026-11-24 15:12:40 UTC; 42min ago".into(), false),
+                    (crate::history::FULL_SCREEN_NOTE.into(), true),
+                ],
+            )
+            .h(px(150.))
+            .min_h(px(150.));
+            let entries = [
+                ("HOSTS", Some(theme::group_violet()), "prod-web-02", "Go to session"),
+                ("HOSTS", Some(theme::group_mint()), "nas-01", "Connect"),
+                ("SNIPPETS", None, "Disk usage", "Run in active session"),
+                ("ACTIONS", None, "New host", "Action · Ctrl Shift N"),
+            ];
+            let mut palette = div()
+                .max_w(px(640.))
+                .flex()
+                .flex_col()
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::line_strong())
+                .rounded(px(14.))
+                .overflow_hidden()
+                .pb(theme::SPACE_2);
+            let mut last = "";
+            for (i, (section, color, title, hint)) in entries.into_iter().enumerate() {
+                if section != last {
+                    palette = palette.child(palette_section(section));
+                    last = section;
+                }
+                palette = palette.child(
+                    palette_row(
+                        SharedString::from(format!("g-pal-{i}")),
+                        self.palette_at == i,
+                        color,
+                        title.into(),
+                        hint.into(),
+                    )
+                    .on_click(cx.listener(move |g, _, _, cx| {
+                        g.palette_at = i;
+                        g.note(format!("palette row {i}"), cx);
+                    })),
+                );
+            }
+            let update = update_card(
+                "0.2.0",
+                crate::updates::CURRENT,
+                "2 Dec 2026",
+                Button::primary("g-update-view", "View release on GitHub")
+                    .on_click(cx.listener(|g, _, _, cx| g.note("update: View release on GitHub".into(), cx))),
+                Button::secondary("g-update-later", "Later")
+                    .on_click(cx.listener(|g, _, _, cx| g.note("update: Later".into(), cx))),
+            );
+            let first_run = div()
+                .grid()
+                .grid_cols(3)
+                .gap(px(12.))
+                .child(
+                    import_card(
+                        "g-first-0",
+                        "Windows OpenSSH",
+                        "~/.ssh/config",
+                        "Hosts, users, ports, keys and jump hosts.",
+                    )
+                    .on_click(cx.listener(|g, _, _, cx| g.note("first run: import card".into(), cx))),
+                )
+                .child(
+                    first_run_link(
+                        "g-first-1",
+                        "Bring your known_hosts",
+                        "Keep the server keys you have already trusted.",
+                    )
+                    .on_click(cx.listener(|g, _, _, cx| g.note("first run: link".into(), cx))),
+                )
+                .child(div().flex().items_center().gap(theme::SPACE_2).child(key_chip("Enter")).child(key_chip("Esc")));
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_4)
+                .child(table)
+                .child(output)
+                .child(palette)
+                .child(update)
+                .child(first_run)
+        };
+
         let log = div()
             .text_mono_small()
             .text_color(theme::ink_dim())
@@ -784,6 +923,7 @@ impl Render for Gallery {
                 .child(Self::section("Keychain", keychain))
                 .child(Self::section("Files", files))
                 .child(Self::section("Power features", power))
+                .child(Self::section("History, palette, updates and first run", ship))
                 .child(Self::section("Events", log)),
         );
 

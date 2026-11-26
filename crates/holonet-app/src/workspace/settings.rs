@@ -956,50 +956,18 @@ impl Workspace {
         let version = tag.trim_start_matches(['v', 'V']).to_string();
         let url = crate::updates::release_page(&tag);
         let released = super::hosts::format_date(published);
-        Some(
-            div()
-                .mt(theme::SPACE_5)
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_x(theme::SPACE_4)
-                .gap_y(theme::SPACE_3)
-                .px(px(18.))
-                .py(theme::SPACE_4)
-                .bg(theme::card())
-                .border_1()
-                .border_color(theme::accent())
-                .rounded(theme::RADIUS_XL)
-                .child(crate::ui::icon("download", px(20.), theme::accent()))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(280.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .font_family(theme::DISPLAY)
-                                .text_size(px(16.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::ink())
-                                .child(SharedString::from(format!("Holonet {version} is available"))),
-                        )
-                        .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(format!(
-                            "You have {}. Released on GitHub on {released}.",
-                            crate::updates::CURRENT
-                        )))),
-                )
-                .child(
-                    Button::primary("update-view", "View release on GitHub")
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                )
-                .child(Button::secondary("update-later", "Later").on_click(cx.listener(move |this, _, _, cx| {
-                    let tag = tag.clone();
-                    this.save(move |d| d.settings.updates.dismissed = Some(tag), cx);
-                }))),
-        )
+        let view = Button::primary("update-view", "View release on GitHub").on_click(move |_, _, cx| cx.open_url(&url));
+        let later = Button::secondary("update-later", "Later").on_click(cx.listener(move |this, _, _, cx| {
+            let tag = tag.clone();
+            this.save(move |d| d.settings.updates.dismissed = Some(tag), cx);
+        }));
+        Some(div().mt(theme::SPACE_5).child(crate::ui::ship::update_card(
+            &version,
+            crate::updates::CURRENT,
+            &released,
+            view,
+            later,
+        )))
     }
 
     /// "Last checked": when, and what it found.

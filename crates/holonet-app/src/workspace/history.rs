@@ -2,7 +2,7 @@
 //! output where the host logs. Connect again, export the log as text, or
 //! delete it.
 
-use gpui::{AnyElement, Context, Div, Entity, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Div, Entity, IntoElement, SharedString, Window, div, prelude::*, px};
 use holonet_model::{RecordId, SessionKind, SessionRecord, Timestamp, VaultData};
 
 use super::{Page, Workspace};
@@ -183,61 +183,26 @@ impl Workspace {
 
     fn history_table(&self, data: &VaultData, rows: &[&SessionRecord], cx: &mut Context<Self>) -> Div {
         let now = Timestamp::now();
-        // History.dc.html: minmax(0, 1.3fr) 150px 90px 100px 80px.
-        let columns = |d: Div| d.flex().items_center().gap(theme::SPACE_3).px(theme::SPACE_4);
-        let cell = |w: f32| div().w(px(w)).flex_none().min_w_0().truncate();
-        let header = columns(div().py(px(10.)))
-            .text_label()
-            .text_color(theme::ink_muted())
-            .border_b_1()
-            .border_color(theme::line())
-            .child(div().flex_1().min_w_0().child("HOST"))
-            .child(cell(150.).child("STARTED"))
-            .child(cell(90.).child("LENGTH"))
-            .child(cell(100.).child("ROUTE"))
-            .child(cell(80.).child("LOG"));
+        let header = crate::ui::ship::history_header();
         let lines = rows.iter().map(|r| {
-            let on = self.hist.selected == Some(r.id);
             let id = r.id;
             let color = r.host.and_then(|h| data.host(h)).and_then(|h| super::GroupTag::of(data, h)).map(|t| t.color);
             let length = if r.ended.is_none() { "Open".to_string() } else { r.length(now) };
-            columns(div())
-                .id(SharedString::from(format!("hist-{}", r.id.0)))
-                .min_h(px(48.))
-                .border_b_1()
-                .border_color(theme::line())
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::card_selected()))
-                .when(!on, |d| d.hover(|s| s.bg(theme::raised())))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(icon("role-server", px(16.), color.unwrap_or_else(theme::no_group)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_body()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::ink())
-                                .child(SharedString::from(r.host_name.clone())),
-                        )
-                        .child(div().flex_none().text_meta().text_color(theme::ink_muted()).child(r.kind.label())),
-                )
-                .child(cell(150.).text_meta().text_color(theme::ink_muted()).child(format_start(r.started)))
-                .child(cell(90.).text_mono_small().text_color(theme::ink_muted()).child(length))
-                .child(cell(100.).text_meta().text_color(theme::ink_muted()).child(SharedString::from(r.route.clone())))
-                .child(
-                    cell(80.)
-                        .text_mono_small()
-                        .text_color(theme::ink_muted())
-                        .child(if r.ended.is_none() && r.logged { "Writing".to_string() } else { r.log_size() }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_record(id, cx)))
+            let log = if r.ended.is_none() && r.logged { "Writing".to_string() } else { r.log_size() };
+            crate::ui::ship::history_row(
+                SharedString::from(format!("hist-{}", r.id.0)),
+                crate::ui::ship::HistoryRow {
+                    selected: self.hist.selected == Some(r.id),
+                    color,
+                    host: r.host_name.clone().into(),
+                    kind: r.kind.label(),
+                    started: format_start(r.started).into(),
+                    length: length.into(),
+                    route: r.route.clone().into(),
+                    log: log.into(),
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.select_record(id, cx)))
         });
         let empty = rows.is_empty().then(|| {
             div()
@@ -315,25 +280,7 @@ impl Workspace {
             }
             (_, true, None) => Vec::new(),
         };
-        let output = div()
-            .id("hist-output")
-            .flex_1()
-            .min_h(px(240.))
-            .overflow_scroll()
-            .bg(theme::terminal())
-            .border_1()
-            .border_color(theme::line())
-            .rounded(theme::RADIUS_MD)
-            .px(px(14.))
-            .py(theme::SPACE_3)
-            .text_mono_small()
-            .children(lines.into_iter().map(|(t, dim)| {
-                // Saved lines keep their layout; Holonet's notes wrap.
-                div()
-                    .when(!dim, |d| d.whitespace_nowrap())
-                    .text_color(if dim { theme::ink_dim() } else { theme::ink_soft() })
-                    .child(t)
-            }));
+        let output = crate::ui::ship::log_output("hist-output", lines);
 
         let facts = div()
             .flex()

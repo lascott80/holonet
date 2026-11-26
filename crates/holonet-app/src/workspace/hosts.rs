@@ -335,29 +335,7 @@ impl Workspace {
 
         let card =
             |i: usize, (name, place, about): (&'static str, &'static str, &'static str), cx: &mut Context<Self>| {
-                div()
-                    .id(SharedString::from(format!("first-import-{i}")))
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .p(px(18.))
-                    .bg(theme::card())
-                    .border_1()
-                    .border_color(theme::line())
-                    .rounded(theme::RADIUS_XL)
-                    .cursor_pointer()
-                    .hover(|s| s.shadow(theme::shadow_hover()))
-                    .child(
-                        div()
-                            .font_family(theme::DISPLAY)
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ink())
-                            .child(name),
-                    )
-                    .child(div().text_mono_small().text_color(theme::ink_muted()).child(place))
-                    .child(div().text_meta().text_color(theme::ink_muted()).child(about))
+                crate::ui::ship::import_card(SharedString::from(format!("first-import-{i}")), name, place, about)
                     .on_click(cx.listener(move |this, _, _, cx| this.import_choice(ImportKind::Config, i, cx)))
             };
         let cards: Vec<_> = ImportKind::Config.choices().into_iter().enumerate().map(|(i, c)| card(i, c, cx)).collect();
@@ -367,23 +345,7 @@ impl Workspace {
             .child(heading("IMPORT WHAT YOU ALREADY HAVE"))
             .child(div().grid().grid_cols(3).gap(px(12.)).children(cards));
 
-        let link = |id: &'static str, title: &'static str, about: &'static str| {
-            div()
-                .id(id)
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(theme::SPACE_1)
-                .px(px(18.))
-                .py(px(16.))
-                .border_1()
-                .border_color(theme::line())
-                .rounded(theme::RADIUS_XL)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme::card()))
-                .child(div().text_body().font_weight(FontWeight::MEDIUM).text_color(theme::ink()).child(title))
-                .child(div().text_meta().text_color(theme::ink_muted()).child(about))
-        };
+        let link = crate::ui::ship::first_run_link;
         let more = div()
             .grid()
             .grid_cols(3)

@@ -2837,3 +2837,54 @@ The spike program `m7_update.rs` is gone, replaced by `updates.rs`. `serde_json`
 - **SmartScreen:** starting the exe through ShellExecute did not prompt. A double-click from Explorer may still warn once; README.txt explains that warning.
 - **Cleanup:** the download, the test vault copy and `dist/` were removed. No `%APPDATA%\Holonet` exists.
 - **Checks:** fmt, clippy `-D warnings` and the `holonet-app` tests (52) pass.
+
+
+## Milestone 7 phase 10: wrap-up
+
+**Gallery:**
+- History's rows, saved output, palette rows and sections, the update notice, and First run's cards moved from their pages into `ui/ship.rs`. The pages and `--gallery` now draw the same code.
+- The gallery's new section, "History, palette, updates and first run", has three History rows (selectable), saved output with Holonet's notes, a palette with three sections (selectable rows), the update notice with its two buttons, an import card, a First run link, and key chips. Each click is listed under Events.
+- The palette's sample rows use the real palette's hints, so the gallery matches the design: the title takes the space and the hint sits on the right.
+
+**Fixed during the done check:**
+- **Save as host kept the old name on the open tab:**
+  - After a quick connect was saved as "done7", its tab and pane still read "127.0.0.1". A pane keeps its own copy of the host.
+  - Saving a host now gives every open pane for it the new label through `HolonetApp::host_renamed`. Only the name changes; the connection keeps its details. This also covers renaming a host while it is connected.
+  - Checked live: a quick connect to `localhost` saved as "quick7" now shows "quick7" on its tab and pane.
+
+**`CLAUDE.md`:** milestone 7 is listed as done. It now covers:
+- the crates' new parts and the console behaviour
+- `HOLONET_UPDATE_REPO` and `HOLONET_UPDATE_HOST`
+- the release process
+- a note that the repository is public, and to check test data for personal details before committing it
+
+The next task is publishing 0.1.0, which is the owner's.
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| First run | Creating the vault opened Welcome to Holonet, with Connect now, the three import cards and the three next steps |
+| Quick connect without saving | `holotest@127.0.0.1 -p 2222` from Welcome: the host key prompt ("Trust and connect" saved it to Known hosts), then the password prompt saying the host is not saved. The shell ran a command. The tab offered Save as host and hid Open SFTP |
+| Save as host | The form opened filled in (address, port 2222, user, the password typed). It was saved as "done7" with "Save terminal output to History" on, and the tab became a saved host's (Open SFTP here) |
+| Command palette | Ctrl Shift P, "done7": "Go to session" and "Open SFTP". After a restart, Enter connected done7 with its saved password |
+| History with opt-in logging | done7's status bar read "Logging to History". After `exit`, History listed done7 (2 KB, Closed by you, signed in as holotest) and the quick session ("No log"). Saved output ended with the commands typed and `logout`. The log file beside the vault did not contain the output in plain text |
+| OpenSSH config import | Import → Another config file, then a two-block config. The preview listed imp7 (`holotest@127.0.0.1:2222 · Password`) and "Show what is not imported (1)" (the `Host *` block). Import 1 host added it, and the notice said "Imported 1 host. 1 entry was not imported." |
+| The new-release notice | With `HOLONET_UPDATE_REPO` pointed at a public repository with a newer release, the check at unlock showed "Holonet 1.30.2 is available" in Settings and the Settings dot. Later hid both |
+| Release | Phase 9: the `v0.1.0-rc1` draft release's ARM64 zip ran here |
+
+Earlier phases checked the rest live: known_hosts import and export, Quick fill, Restore open sessions, the accent, private key export and the vault backup.
+
+**Not checked by me:** the window's own X and Minimize buttons. Synthetic clicks do not reach GPUI's caption buttons (phase 8); WM_CLOSE works. The owner should click X once.
+
+**Cleanup and checks:**
+- The throwaway vault, its logs and the test config were removed. No `%APPDATA%\Holonet` exists.
+- "Connect once" kept `localhost` out of Known hosts.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-app` 52, `holonet-model` 29, `holonet-vault` 22, `holonet-import` 18, and the rest.
+
+**Milestone 7 is done.** What is left is the owner's: merge PRs #1 to #7, delete the `v0.1.0-rc1` draft and tag, tag `v0.1.0` on `main`, and publish the draft the workflow makes.
+
+Carried forward, not done:
+- **The Hosts search placeholder** is cut off by the Ctrl Shift P chip when the detail panel is open. The design's field shrinks the same way (`min-width: 0`); a wider window shows all of it.
+- **Ctrl Enter on a host that already has a session** goes to that session rather than opening a split, because the palette offers "Go to session" for it.
+- **31 crates ship no licence file;** the third-party list gives their declared licence only.

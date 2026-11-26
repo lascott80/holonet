@@ -239,19 +239,6 @@ impl CommandPalette {
     }
 }
 
-fn chip(text: &'static str) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(px(6.))
-        .py(px(2.))
-        .border_1()
-        .border_color(theme::line_strong())
-        .rounded(px(4.))
-        .text_mono_small()
-        .text_color(theme::ink_muted())
-        .child(text)
-}
-
 impl Render for CommandPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -260,49 +247,26 @@ impl Render for CommandPalette {
             let e = &self.entries[i];
             if section != Some(e.section) {
                 section = Some(e.section);
-                rows.push(
-                    div()
-                        .px(theme::SPACE_4)
-                        .pt(theme::SPACE_3)
-                        .pb(px(6.))
-                        .text_label()
-                        .text_color(theme::ink_muted())
-                        .child(e.section.label())
-                        .into_any_element(),
-                );
+                rows.push(crate::ui::ship::palette_section(e.section.label()).into_any_element());
             }
             let on = pos == self.selected;
+            let hint = match e.keys {
+                Some(keys) => SharedString::from(format!("{} · {keys}", e.hint)),
+                None => SharedString::from(e.hint.clone()),
+            };
             rows.push(
-                div()
-                    .id(SharedString::from(format!("palette-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .min_h(px(44.))
-                    .px(theme::SPACE_4)
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::raised()))
-                    .when(!on, |d| d.hover(|s| s.bg(theme::card_selected())))
-                    .children(e.color.map(|c| div().flex_none().size(px(8.)).rounded(px(2.)).bg(c)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_body()
-                            .text_color(theme::ink())
-                            .child(SharedString::from(e.title.clone())),
-                    )
-                    .child(div().flex_none().text_meta().text_color(theme::ink_muted()).child(match e.keys {
-                        Some(keys) => SharedString::from(format!("{} · {keys}", e.hint)),
-                        None => SharedString::from(e.hint.clone()),
-                    }))
-                    .when(on, |d| d.child(chip("Enter")))
-                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
-                        let split = ev.modifiers().control;
-                        this.choose(Some(pos), split, cx)
-                    }))
-                    .into_any_element(),
+                crate::ui::ship::palette_row(
+                    SharedString::from(format!("palette-{i}")),
+                    on,
+                    e.color,
+                    SharedString::from(e.title.clone()),
+                    hint,
+                )
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                    let split = ev.modifiers().control;
+                    this.choose(Some(pos), split, cx)
+                }))
+                .into_any_element(),
             );
         }
         if rows.is_empty() {
@@ -342,7 +306,7 @@ impl Render for CommandPalette {
                     .border_color(theme::line())
                     .child(icon("search", px(16.), theme::ink_muted()))
                     .child(div().flex_1().min_w_0().child(self.field.clone()))
-                    .child(chip("Esc")),
+                    .child(crate::ui::ship::key_chip("Esc")),
             )
             .child(div().id("palette-rows").max_h(px(460.)).overflow_y_scroll().pb(theme::SPACE_2).children(rows))
             .child(

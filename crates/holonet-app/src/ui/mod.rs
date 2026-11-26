@@ -6,6 +6,7 @@ pub mod files;
 pub mod lists;
 pub mod power;
 pub mod select;
+pub mod ship;
 pub mod slider;
 pub mod text_field;
 
