@@ -2990,6 +2990,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonet-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "holonet-model",
+ "holonet-ssh",
+ "russh",
+ "thiserror 2.0.21",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "holonet-model"
 version = "0.1.0"
 dependencies = [

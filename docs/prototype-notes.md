@@ -1425,3 +1425,51 @@ fmt, clippy and the unit tests pass.
 - After restarting Holonet, all four had kept their new values.
 
 fmt, clippy, and the unit tests (35, 16, 12, 7, 13 and 16) pass.
+
+## Milestone 5, phase 2: file operations (25 Nov 2026)
+
+**New crate `holonet-files`** (no window; depends on `holonet-ssh`):
+- `Entry`:
+  - name to show, and the raw name bytes
+  - `Kind`: Folder, File, `Link { folder, broken }`, Other
+  - size, modified, permission bits, uid, gid, hidden
+  - `symbolic_mode()` gives `-rwxr-x---`
+- `sort` puts folders and links to folders first, then names ignoring case.
+- `RemotePath` is bytes: `join`, `parent`, `file_name`, and `components` for breadcrumbs. Its `Display` is lossy.
+- `FileError` covers NotFound, PermissionDenied, AlreadyExists, Lost, TimedOut, and Other. Each has interface text, and each maps from `russh-sftp`'s status codes and from `std::io`.
+
+**`remote::Remote`** (over `Session::open_sftp`):
+- `home` (canonical `.`) and `canonicalize` (relative paths start at home)
+- `list`: a link is `stat`ed to learn whether it opens as a folder or is broken
+- `entry`, `exists`
+- `rename` and `create_folder`: both refuse to replace something
+- `remove`: recursive, never following links, returns the count
+- `set_mode`: permission bits only
+- `symlink` and `read_link`
+- **Symlink order:** OpenSSH-style servers are recognised by the `statvfs@openssh.com` extension (`fs_info` returns `Some`), and get the target first.
+- **Hidden** on a host means a leading dot.
+
+**`local`:**
+- `drives()` (with `Drive::display()`, as in "Local Disk (C:)") and `profile()`
+- `list`, `entry`, `rename`, `create_folder`
+- `recycle(paths)`: `SHFileOperationW` with undo, no Windows confirmation, and an error if anything was aborted
+- **Hidden** on this PC means the hidden or system attribute.
+
+**Tests:**
+- **Unit (7):**
+  - sorting
+  - remote paths, including non-UTF-8 bytes and breadcrumbs
+  - symbolic modes
+  - local list, rename, create and AlreadyExists
+  - hidden follows the attribute, not the dot
+  - drives include `C:\`
+  - Recycle Bin, gated by `HOLONET_TEST_RECYCLE=1` because it puts two items there. It ran once and passed, and its two items were then removed from the Recycle Bin.
+- **WSL (5),** `cargo test -p holonet-files --test wsl`:
+  - kinds, links to a folder, a file and nowhere, hidden files, sizes and modes
+  - folder create, rename and AlreadyExists, and recursive remove (7 items, with a link to `/etc` removed and not followed)
+  - `set_mode`, and a link made in the server's order, with the home folder checked for stray links (none)
+  - a non-UTF-8 name listed by its bytes and renamed by them
+  - NotFound, PermissionDenied (`/root`), and relative canonicalisation
+  - All passed on the first run. Each test uses its own folder and removes it, and the test account's home folder was left as it was.
+
+fmt, clippy, and the unit tests pass (`holonet-files` 7, the others as before).
