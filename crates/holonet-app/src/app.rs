@@ -246,7 +246,8 @@ impl HolonetApp {
         cx: &mut Context<Self>,
     ) -> Option<Entity<Pane>> {
         let data = self.vault_data(cx)?;
-        let host = data.host(id).cloned()?;
+        // With its identity's username and sign-in, if it has one.
+        let host = data.resolved(data.host(id)?);
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } => None,
@@ -292,7 +293,7 @@ impl HolonetApp {
             && pane.read(cx).is_stopped()
             && let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(&pane))
             && let Some(data) = self.vault_data(cx)
-            && let Some(host) = data.host(id).cloned()
+            && let Some(host) = data.host(id).map(|h| data.resolved(h))
         {
             let key = match &host.auth {
                 holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),

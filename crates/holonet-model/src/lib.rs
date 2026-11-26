@@ -780,6 +780,46 @@ impl VaultData {
         }
     }
 
+    /// A copy of `host` with its identity's username and sign-in in place
+    /// of its own, for connecting and for showing. `identity` stays set, so
+    /// callers can still say where the sign-in comes from.
+    pub fn resolved(&self, host: &Host) -> Host {
+        let mut resolved = host.clone();
+        let (user, auth) = self.sign_in(host);
+        resolved.username = user.to_string();
+        resolved.auth = auth.clone();
+        resolved
+    }
+
+    /// Where a host's sign-in is stored: its identity's when it has one that
+    /// still exists, otherwise its own. For saving a password typed at a
+    /// prompt.
+    pub fn sign_in_auth_mut(&mut self, host: HostId) -> Option<&mut Auth> {
+        let identity = self.host(host)?.identity.filter(|id| self.identity(*id).is_some());
+        match identity {
+            Some(id) => self.identities.iter_mut().find(|i| i.id == id).map(|i| &mut i.auth),
+            None => self.host_mut(host).map(|h| &mut h.auth),
+        }
+    }
+
+    /// Hosts that use an identity.
+    pub fn identity_users(&self, identity: IdentityId) -> Vec<HostId> {
+        self.hosts.iter().filter(|h| h.identity == Some(identity)).map(|h| h.id).collect()
+    }
+
+    /// Delete an identity. Hosts that used it keep a copy of its username
+    /// and sign-in as their own, so they still connect.
+    pub fn delete_identity(&mut self, identity: IdentityId) -> Option<Identity> {
+        let index = self.identities.iter().position(|i| i.id == identity)?;
+        let removed = self.identities.remove(index);
+        for host in self.hosts.iter_mut().filter(|h| h.identity == Some(identity)) {
+            host.identity = None;
+            host.username = removed.username.clone();
+            host.auth = removed.auth.clone();
+        }
+        Some(removed)
+    }
+
     /// Hosts and identities that sign in with a key. A host counts when it
     /// uses the key itself or through its identity.
     pub fn key_users(&self, key_id: KeyId) -> (Vec<HostId>, Vec<IdentityId>) {
@@ -1115,6 +1155,37 @@ mod tests {
         assert_eq!(h.problems(), vec![HostProblem::TailscaleAddressInvalid]);
         h.tailscale_address = Some("  ".into());
         assert!(h.problems().is_empty() && h.tailscale().is_none());
+    }
+
+    #[test]
+    fn resolved_hosts_and_identity_deletion() {
+        let mut d = VaultData::default();
+        let identity = Identity {
+            id: IdentityId::new(),
+            name: "deploy".into(),
+            username: "deploy".into(),
+            auth: Auth::Password { saved: None },
+        };
+        let mut a = Host::new("a");
+        a.identity = Some(identity.id);
+        let mut b = Host::new("b");
+        b.identity = Some(identity.id);
+        let c = Host::new("c");
+        d.identities.push(identity.clone());
+        d.hosts.extend([a.clone(), b.clone(), c.clone()]);
+        assert_eq!(d.resolved(&a).username, "deploy");
+        assert_eq!(d.identity_users(identity.id), [a.id, b.id]);
+        // A password typed for a host goes to its identity, shared by both.
+        if let Some(Auth::Password { saved }) = d.sign_in_auth_mut(a.id) {
+            *saved = Some(Secret::new("typed"));
+        }
+        assert!(matches!(d.resolved(&b).auth, Auth::Password { saved: Some(_) }));
+        assert!(matches!(d.host(c.id).unwrap().auth, Auth::Password { saved: None }));
+        // Deleting the identity leaves each host its own copy.
+        d.delete_identity(identity.id).unwrap();
+        let a_after = d.host(a.id).unwrap();
+        assert_eq!((a_after.identity, a_after.username.as_str()), (None, "deploy"));
+        assert!(matches!(a_after.auth, Auth::Password { saved: Some(_) }));
     }
 
     #[test]

@@ -1081,3 +1081,47 @@ fmt, clippy, and the unit tests (28, 13, 12, 7, 13 and 16) pass.
 - Workspace notices stay until dismissed, so an old "Imported …" message can sit above later actions, as on other pages.
 
 fmt, clippy, and the unit tests (32 in the app) pass.
+
+## Milestone 4, phase 5: Identities (25 Nov 2026)
+
+An identity is a name, a username and a sign-in (a key, or a password that is saved or asked on connect), shared by several hosts.
+
+**Keychain:**
+- The Identities section sits between Keys and the public key, as drawn.
+- **Cards:**
+  - the name
+  - the sign-in: "Key work-ed25519", "Password, stored in vault" or "Password, asked on connect"
+  - a faint line, "User deploy · 2 hosts"
+- A dashed **New identity** card is always last. With no identities, a line explains what they are.
+- **The dialog (undrawn):** Name, Username, and Authentication (SSH key with a key list, or Password with "Save in the encrypted vault"). It shows Add identity or Save identity, and Delete identity when editing. Each field is required, with a message.
+- **Delete identity** names the hosts that use it: "wsl-a and wsl-b use it. They keep its username and sign-in as their own, so they still connect." `VaultData::delete_identity` copies them onto each host.
+- Deleting a key now also names the identities that use it.
+
+**Host form:** Authentication offers SSH key, Password and **Identity**, the last once the vault has one. It takes the place the design gives "SSH agent", which comes in milestone 6.
+- With Identity chosen, the Username field is hidden. An identity list and a line take its place: "Signs in as holotest with a password stored in the vault. Edit the identity in the Keychain; every host that uses it changes too."
+- The summary shows "Identity holotest-shared", and the equivalent command uses the identity's username.
+- The host's own sign-in is kept underneath, unchanged.
+
+**Using it everywhere** (`VaultData::resolved`):
+- Panes, the host cards and list, the detail panel and the new-tab picker all work on the host with its identity's username and sign-in.
+- The detail panel says "holotest-shared (Password)".
+- A password typed at a prompt and saved goes to the identity (`sign_in_auth_mut`), so every host using it gets it.
+- Install on host already used `sign_in` (phase 4).
+
+**Checked against WSL** (the phase 4 test vault):
+
+| Check | Result |
+| --- | --- |
+| New identity "holotest-shared": holotest, password saved | Card: "Password, stored in vault · User holotest · no hosts" |
+| wsl-a → Identity; wsl-b → Identity, Save and connect | wsl-b connected with the identity's password. The card reads "2 hosts" |
+| Edit the identity's username to `nobody-test` | Both host cards show `nobody-test@127.0.0.1:2222`. Connecting wsl-a offered a password for nobody-test and was refused |
+| Username back to holotest | wsl-a connected |
+| Delete the identity | Both hosts show holotest and Password as their own, with nothing missing |
+
+**Fixed on the way:**
+- The Hosts detail panel used the stored host rather than the resolved one, so it showed the host's old username and "Missing key" from wsl-b's deleted key. It now uses the resolved host.
+- `HostForm::new` takes the vault data instead of separate lists. Clippy's argument limit prompted it.
+
+**Noted, older behaviour:** a host whose key was deleted opens in the form with the first key in the vault selected, without saying its own key is gone. Saving would quietly switch it to that key. Recorded for the wrap-up.
+
+fmt, clippy, and the unit tests (32, 14, 12, 7, 13 and 16) pass.

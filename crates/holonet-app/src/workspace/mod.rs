@@ -156,11 +156,9 @@ impl Workspace {
     /// New host (`None`) or Edit host.
     pub(crate) fn open_form(&mut self, host: Option<Host>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
-        let keys = data.keys.clone();
-        let known = data.known_hosts.clone();
         let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
         let runtime = self.runtime.clone();
-        let form = cx.new(|cx| HostForm::new(host, keys, known, timeout, runtime, window, cx));
+        let form = cx.new(|cx| HostForm::new(host, data, timeout, runtime, window, cx));
         self._subscriptions.push(cx.subscribe_in(
             &form,
             window,

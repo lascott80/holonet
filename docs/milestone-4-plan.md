@@ -100,7 +100,7 @@ Each phase ends with a commit and a check.
 | 2 | **SSH** *(done; PuTTY files checked against PuTTY 0.83's own puttygen)*: key generation, `.ppk` import, jump-host connect, install public key, connect to a chosen address | WSL tests: sign in with each generated key type, through a jump host, and after install on host |
 | 3 | **`holonet-net`** *(done)*: Tailscale status, route planning, the no-route check | Unit tests for planning; live check with Tailscale running and stopped |
 | 4 | **Keychain** *(done)*: table, generate, three imports, copy, rename, delete, install on host, side navigation | Generate, install and sign in end to end; import from a file, `~/.ssh` and WSL |
-| 5 | **Identities:** cards, create, edit, delete, choosing one on the host form | Two hosts share an identity; editing it changes both |
+| 5 | **Identities** *(done)*: cards, create, edit, delete, choosing one on the host form | Two hosts share an identity; editing it changes both |
 | 6 | **Routes:** host form, detail and cards, the connecting, timed-out, reconnecting and Tailscale-not-running states, the fallback wait setting | Unreachable primary falls back to Tailscale; Primary-only shows "Try Tailscale"; Tailscale stopped is reported |
 | 7 | **Jump hosts in panes:** host form select, `-J` command, prompts per hop, reconnect through the chain | Connect through a jump host from a clean Known hosts: two key prompts, then a shell; drop and reconnect |
 | 8 | **Lock and Windows Hello:** idle and Windows-lock locking, the Locked screen, Hello unlock and the password fallback, the Settings switch | Idle lock, Windows lock (Win L) and Hello unlock, each with a session open that survives |

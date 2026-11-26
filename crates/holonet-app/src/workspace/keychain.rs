@@ -1,7 +1,6 @@
-//! Keychain (Keychain.dc.html): the keys in the vault, the selected key's
-//! public key with Copy and Install on host, imports from a file, `~/.ssh`
-//! or WSL, and the Generate key panel. Identities join in milestone 4
-//! phase 5.
+//! Keychain (Keychain.dc.html): the keys in the vault, identities (shared
+//! sign-ins), the selected key's public key with Copy and Install on host,
+//! imports from a file, `~/.ssh` or WSL, and the Generate key panel.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,7 +9,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, Div, Entity, FontWeight, IntoElement, PathPromptOptions, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
-use holonet_model::{Auth, HostId, KeyId, Secret, StoredKey, Timestamp, VaultData};
+use holonet_model::{Auth, HostId, Identity, IdentityId, KeyId, Secret, StoredKey, Timestamp, VaultData};
 use holonet_ssh::{
     BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, InstallOutcome, KeyKind, KeyStatus,
     PresentedKey, Prompts, SecretRequest, Session, algorithm_label,
@@ -73,6 +72,25 @@ enum KcDialog {
         secret: Entity<TextField>,
         state: InstallState,
     },
+    Identity(Box<IdentityForm>),
+    DeleteIdentity {
+        id: IdentityId,
+    },
+}
+
+/// Create or edit an identity (undrawn: built from the host form's fields).
+struct IdentityForm {
+    /// `None` while creating.
+    id: Option<IdentityId>,
+    name: Entity<TextField>,
+    username: Entity<TextField>,
+    /// 0 = SSH key, 1 = password, as on the host form.
+    auth: usize,
+    key_ids: Vec<KeyId>,
+    key_select: Entity<Select>,
+    password: Entity<TextField>,
+    save_password: bool,
+    problem: Option<SharedString>,
 }
 
 #[derive(Clone)]
@@ -233,6 +251,7 @@ impl Workspace {
                 self.kc_table(&data, &keys, cx).into_any_element()
             });
 
+        let identities = self.kc_identities(&data, cx);
         let public = selected.map(|k| self.kc_public_key(&data, k, cx));
         let dialog = self.kc_dialog_layer(&data, cx);
 
@@ -250,6 +269,7 @@ impl Workspace {
                         .gap(px(22.))
                         .child(header)
                         .child(keys_section)
+                        .child(identities)
                         .children(public),
                 ),
             )
@@ -779,6 +799,10 @@ impl Workspace {
                     );
                 }
             }
+            Some(KcDialog::Identity(form)) => {
+                self.kc.dialog = Some(KcDialog::Identity(form));
+                self.save_identity(cx);
+            }
             install @ Some(KcDialog::Install { .. }) => {
                 self.kc.dialog = install;
                 self.run_install(window, cx);
@@ -935,6 +959,177 @@ impl Workspace {
         cx.notify();
     }
 
+    // --------------------------------------------------------- identities --
+
+    fn kc_identities(&self, data: &VaultData, cx: &mut Context<Self>) -> Div {
+        let mut identities: Vec<&Identity> = data.identities.iter().collect();
+        identities.sort_by_key(|i| i.name.to_lowercase());
+        let card = |id: SharedString| {
+            div()
+                .id(id)
+                .flex_grow()
+                .flex_basis(px(220.))
+                .min_w(px(220.))
+                .max_w(px(360.))
+                .px(theme::SPACE_4)
+                .py(px(14.))
+                .rounded(theme::RADIUS_LG)
+                .border_1()
+                .cursor_pointer()
+        };
+        let cards = identities.iter().map(|identity| {
+            let id = identity.id;
+            let how = match &identity.auth {
+                Auth::Key { key_id, .. } => match data.key(*key_id) {
+                    Some(k) => format!("Key {}", k.name),
+                    None => "Key no longer in the vault".to_string(),
+                },
+                Auth::Password { saved: Some(_) } => "Password, stored in vault".to_string(),
+                Auth::Password { saved: None } => "Password, asked on connect".to_string(),
+            };
+            let users = data.identity_users(id).len();
+            let meta = format!(
+                "{} · {}",
+                if identity.username.is_empty() {
+                    "No username".to_string()
+                } else {
+                    format!("User {}", identity.username)
+                },
+                match users {
+                    0 => "no hosts".to_string(),
+                    1 => "1 host".to_string(),
+                    n => format!("{n} hosts"),
+                }
+            );
+            card(SharedString::from(format!("kc-identity-{}", id.0)))
+                .bg(theme::card())
+                .border_color(theme::line())
+                .hover(|s| s.bg(theme::tab_hover()))
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_1)
+                .child(
+                    div()
+                        .text_body()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::ink())
+                        .truncate()
+                        .child(SharedString::from(identity.name.clone())),
+                )
+                .child(div().text_meta().text_color(theme::ink_muted()).truncate().child(SharedString::from(how)))
+                .child(div().text_meta().text_color(theme::ink_faint()).truncate().child(SharedString::from(meta)))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_identity(Some(id), window, cx)))
+        });
+        let new_card = card("kc-identity-new".into())
+            .border_color(theme::line_strong())
+            .border_dashed()
+            .hover(|s| s.bg(theme::card()))
+            .flex()
+            .items_center()
+            .gap(theme::SPACE_2)
+            .text_body()
+            .text_color(theme::ink_muted())
+            .child(icon("plus", px(16.), theme::ink_muted()))
+            .child("New identity")
+            .on_click(cx.listener(|this, _, window, cx| this.open_identity(None, window, cx)));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_label("Identities"))
+            .when(identities.is_empty(), |d| {
+                d.child(div().text_body().text_color(theme::ink_muted()).child(
+                    "An identity is a username and a key or password that several hosts can share. Choose it on a host as its authentication.",
+                ))
+            })
+            .child(div().flex().flex_wrap().gap(theme::SPACE_3).children(cards).child(new_card))
+    }
+
+    fn open_identity(&mut self, id: Option<IdentityId>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
+        let existing = id.and_then(|id| data.identity(id)).cloned();
+        let mut keys: Vec<&StoredKey> = data.keys.iter().collect();
+        keys.sort_by_key(|k| k.name.to_lowercase());
+        let key_ids: Vec<KeyId> = keys.iter().map(|k| k.id).collect();
+        let (auth, key_index, saved) = match existing.as_ref().map(|i| &i.auth) {
+            Some(Auth::Key { key_id, .. }) => (0, key_ids.iter().position(|k| k == key_id).unwrap_or(0), None),
+            Some(Auth::Password { saved }) => (1, 0, saved.clone()),
+            None => (if keys.is_empty() { 1 } else { 0 }, 0, None),
+        };
+        let options = keys.iter().map(|k| SharedString::from(format!("{} ({})", k.name, type_label(k)))).collect();
+        let key_select = cx.new(|cx| Select::new(cx, options, key_index).mono());
+        let name = cx.new(|cx| {
+            TextField::new(cx, "e.g. deploy").with_text(existing.as_ref().map(|i| i.name.clone()).unwrap_or_default())
+        });
+        let username = cx.new(|cx| {
+            TextField::new(cx, "e.g. deploy")
+                .mono()
+                .with_text(existing.as_ref().map(|i| i.username.clone()).unwrap_or_default())
+        });
+        let password = cx.new(|cx| {
+            TextField::new(cx, "Leave empty to be asked on connect")
+                .password()
+                .with_text(saved.as_ref().map(|s| s.expose().to_string()).unwrap_or_default())
+        });
+        for f in [&name, &username, &password] {
+            self.kc_subscribe_dialog_field(f, window, cx);
+        }
+        name.read(cx).focus(window);
+        self.kc.dialog = Some(KcDialog::Identity(Box::new(IdentityForm {
+            id,
+            name,
+            username,
+            auth,
+            key_ids,
+            key_select,
+            password,
+            save_password: existing.is_none() || saved.is_some(),
+            problem: None,
+        })));
+        cx.notify();
+    }
+
+    fn save_identity(&mut self, cx: &mut Context<Self>) {
+        let Some(KcDialog::Identity(form)) = self.kc.dialog.as_mut() else { return };
+        let name = form.name.read(cx).text().trim().to_string();
+        let username = form.username.read(cx).text().trim().to_string();
+        let problem = if name.is_empty() {
+            Some("Name the identity, for example deploy.")
+        } else if username.is_empty() {
+            Some("Enter the username these hosts sign in as.")
+        } else if form.auth == 0 && form.key_ids.is_empty() {
+            Some("Choose a key, or use a password.")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            form.problem = Some(problem.into());
+            cx.notify();
+            return;
+        }
+        let auth = if form.auth == 0 {
+            Auth::key(form.key_ids[form.key_select.read(cx).selected().min(form.key_ids.len() - 1)])
+        } else {
+            let password = form.password.read(cx).text().to_string();
+            Auth::Password { saved: (form.save_password && !password.is_empty()).then(|| Secret::new(password)) }
+        };
+        let id = form.id.unwrap_or_default();
+        let identity = Identity { id, name: name.clone(), username, auth };
+        let editing = form.id.is_some();
+        self.save(
+            move |d| match d.identities.iter_mut().find(|i| i.id == id) {
+                Some(existing) => *existing = identity,
+                None => d.identities.push(identity),
+            },
+            cx,
+        );
+        self.kc.dialog = None;
+        if !editing {
+            self.notice = Some(format!("Added the identity {name}. Choose it on a host as its authentication.").into());
+        }
+        cx.notify();
+    }
+
     // ------------------------------------------------------------ dialogs --
 
     fn kc_dialog_layer(&self, data: &VaultData, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1065,8 +1260,20 @@ impl Workspace {
             KcDialog::Delete { key } => {
                 let key = *key;
                 let name = data.key(key).map(|k| k.name.clone()).unwrap_or_default();
-                let (hosts, _) = data.key_users(key);
+                let (hosts, identities) = data.key_users(key);
                 let names: Vec<String> = hosts.iter().filter_map(|h| data.host(*h)).map(|h| h.display_name().to_string()).collect();
+                let identity_names: Vec<String> =
+                    identities.iter().filter_map(|i| data.identity(*i)).map(|i| i.name.clone()).collect();
+                let also = if identity_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " The {} {} {} it too.",
+                        if identity_names.len() == 1 { "identity" } else { "identities" },
+                        name_list(&identity_names),
+                        if identity_names.len() == 1 { "uses" } else { "use" }
+                    )
+                };
                 let body = if names.is_empty() {
                     "No hosts sign in with it. The key is removed from the vault; any copies elsewhere are not touched.".to_string()
                 } else {
@@ -1075,7 +1282,7 @@ impl Workspace {
                         name_list(&names),
                         if names.len() == 1 { "signs in" } else { "sign in" }
                     )
-                };
+                } + &also;
                 (
                     460.,
                     dialog(true, format!("Delete {name}?"), body)
@@ -1088,6 +1295,110 @@ impl Workspace {
                                     this.kc.selected = None;
                                 },
                             )),
+                        ]))
+                        .into_any_element(),
+                )
+            }
+            KcDialog::Identity(form) => {
+                let editing = form.id.is_some();
+                let mut card = dialog_card(
+                    if editing { "Edit identity" } else { "New identity" },
+                    "A username and a key or password that several hosts can share. Changing it changes every host that uses it.",
+                )
+                .child(field("Name", form.name.clone(), None).flex_none())
+                .child(field("Username", form.username.clone(), None).flex_none())
+                .child(
+                    div().flex().flex_col().gap(theme::SPACE_2).child(crate::ui::field_label("Authentication")).child(
+                        Segmented::new("kc-id-auth", vec!["SSH key".into(), "Password".into()], form.auth).on_change({
+                            let this = cx.weak_entity();
+                            move |i, _, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    if let Some(KcDialog::Identity(f)) = this.kc.dialog.as_mut() {
+                                        f.auth = i;
+                                        f.problem = None;
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ),
+                );
+                card = if form.auth == 0 {
+                    if form.key_ids.is_empty() {
+                        card.child(
+                            div()
+                                .text_body()
+                                .text_color(theme::ink_muted())
+                                .child("The vault has no keys yet. Import or generate one first, or use a password."),
+                        )
+                    } else {
+                        card.child(field("Key", form.key_select.clone(), None).flex_none())
+                    }
+                } else {
+                    let this = cx.weak_entity();
+                    card.child(field("Password", form.password.clone(), None).flex_none()).child(
+                        Checkbox::new("kc-id-save", "Save in the encrypted vault", form.save_password).on_toggle(
+                            move |v, _, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    if let Some(KcDialog::Identity(f)) = this.kc.dialog.as_mut() {
+                                        f.save_password = v;
+                                    }
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                    )
+                };
+                if let Some(problem) = &form.problem {
+                    card = card.child(div().text_meta().text_color(theme::warn()).child(problem.clone()));
+                }
+                let id = form.id;
+                let mut buttons = Vec::new();
+                if let Some(id) = id {
+                    buttons.push(
+                        Button::new("kc-id-delete", "Delete identity", ButtonKind::DestructiveOutline).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.kc.dialog = Some(KcDialog::DeleteIdentity { id });
+                                cx.notify();
+                            },
+                        )),
+                    );
+                }
+                buttons.push(cancel("kc-id-cancel", "Cancel"));
+                buttons.push(
+                    Button::primary("kc-id-save-button", if editing { "Save identity" } else { "Add identity" })
+                        .on_click(cx.listener(|this, _, _, cx| this.save_identity(cx))),
+                );
+                (480., card.child(dialog_buttons(buttons)).into_any_element())
+            }
+            KcDialog::DeleteIdentity { id } => {
+                let id = *id;
+                let name = data.identity(id).map(|i| i.name.clone()).unwrap_or_default();
+                let users: Vec<String> =
+                    data.identity_users(id).iter().filter_map(|h| data.host(*h)).map(|h| h.display_name().to_string()).collect();
+                let body = if users.is_empty() {
+                    "No hosts use it.".to_string()
+                } else {
+                    format!(
+                        "{} {} it. {} its username and sign-in as {} own, so {} still connect.",
+                        name_list(&users),
+                        if users.len() == 1 { "uses" } else { "use" },
+                        if users.len() == 1 { "It keeps" } else { "They keep" },
+                        if users.len() == 1 { "its" } else { "their" },
+                        if users.len() == 1 { "it can" } else { "they" },
+                    )
+                };
+                (
+                    460.,
+                    dialog(true, format!("Delete the identity {name}?"), body)
+                        .child(dialog_buttons([
+                            cancel("kc-id-delete-cancel", "Cancel"),
+                            Button::new("kc-id-delete-confirm", "Delete identity", ButtonKind::DestructiveFill).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.save(move |d| drop(d.delete_identity(id)), cx);
+                                    this.kc.dialog = None;
+                                }),
+                            ),
                         ]))
                         .into_any_element(),
                 )

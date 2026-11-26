@@ -779,15 +779,20 @@ impl Pane {
                             move |d| {
                                 if let Some(h) = d.host_mut(id) {
                                     h.last_connected_at = Some(Timestamp::now());
-                                    match (save, &mut h.auth) {
-                                        (Some((true, secret)), Auth::Password { saved }) => *saved = Some(secret),
-                                        (Some((false, secret)), Auth::Key { .. }) => {
-                                            if let Some(key) = key_id.and_then(|k| d.key_mut(k)) {
-                                                key.saved_passphrase = Some(secret);
-                                            }
+                                }
+                                // A password belongs to the host's identity when it has one.
+                                match save {
+                                    Some((true, secret)) => {
+                                        if let Some(Auth::Password { saved }) = d.sign_in_auth_mut(id) {
+                                            *saved = Some(secret);
                                         }
-                                        _ => {}
                                     }
+                                    Some((false, secret)) => {
+                                        if let Some(key) = key_id.and_then(|k| d.key_mut(k)) {
+                                            key.saved_passphrase = Some(secret);
+                                        }
+                                    }
+                                    None => {}
                                 }
                             },
                             cx,

@@ -10,7 +10,7 @@ use gpui::{
     Context, Entity, EventEmitter, IntoElement, PathPromptOptions, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use holonet_model::{Auth, Host, HostId, KeyId, KnownHost, Secret, StoredKey};
+use holonet_model::{Auth, Host, HostId, Identity, KeyId, KnownHost, Secret, StoredKey};
 use holonet_ssh::{ConnectError, KeyStatus, PresentedKey, algorithm_label, classify};
 
 use crate::theme::{self, TypeStyles};
@@ -52,9 +52,11 @@ pub struct HostForm {
     password: Entity<TextField>,
     passphrase: Entity<TextField>,
     key_select: Entity<Select>,
-    /// 0 = SSH key, 1 = password.
+    /// 0 = SSH key, 1 = password, 2 = identity (offered once there is one).
     auth: usize,
     keys: Vec<StoredKey>,
+    identities: Vec<Identity>,
+    identity_select: Entity<Select>,
     new_keys: Vec<StoredKey>,
     save_password: bool,
     save_passphrase: bool,
@@ -81,17 +83,20 @@ fn key_option(key: &StoredKey) -> SharedString {
 }
 
 impl HostForm {
-    /// `host` is `None` for a new host. `keys` and `known_hosts` are
-    /// snapshots from the vault.
+    /// `host` is `None` for a new host. The form keeps snapshots of the
+    /// vault's keys, identities and known hosts.
     pub fn new(
         host: Option<Host>,
-        keys: Vec<StoredKey>,
-        known_hosts: Vec<KnownHost>,
+        data: &holonet_model::VaultData,
         connect_timeout: Duration,
         runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let keys: Vec<StoredKey> = data.keys.clone();
+        let mut identities: Vec<Identity> = data.identities.clone();
+        identities.sort_by_key(|i| i.name.to_lowercase());
+        let known_hosts: Vec<KnownHost> = data.known_hosts.clone();
         let h = host.clone().unwrap_or_else(|| Host::new(""));
         let text = |cx: &mut Context<Self>, placeholder: &str, value: String, mono: bool| {
             cx.new(|cx| {
@@ -113,6 +118,15 @@ impl HostForm {
         };
         // A new host defaults to a key when the vault has one.
         let auth = if host.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
+        let identity_index = h.identity.and_then(|id| identities.iter().position(|i| i.id == id));
+        let auth = if identity_index.is_some() { 2 } else { auth };
+        let identity_select = cx.new(|cx| {
+            Select::new(
+                cx,
+                identities.iter().map(|i| SharedString::from(i.name.clone())).collect(),
+                identity_index.unwrap_or(0),
+            )
+        });
         let password = cx.new(|cx| {
             TextField::new(cx, "Leave empty to be asked on connect")
                 .password()
@@ -140,6 +154,7 @@ impl HostForm {
                 }
             }));
         }
+        subscriptions.push(cx.observe(&identity_select, |_: &mut Self, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&key_select, |this: &mut Self, _, cx| {
             this.test = TestState::Idle;
             cx.notify();
@@ -165,6 +180,8 @@ impl HostForm {
             key_select,
             auth,
             keys,
+            identities,
+            identity_select,
             new_keys: Vec::new(),
             show_problems: false,
             import_message: None,
@@ -185,6 +202,13 @@ impl HostForm {
         self.keys.get(self.key_select.read(cx).selected())
     }
 
+    fn selected_identity(&self, cx: &Context<Self>) -> Option<&Identity> {
+        if self.auth != 2 {
+            return None;
+        }
+        self.identities.get(self.identity_select.read(cx).selected())
+    }
+
     fn port(&self, cx: &Context<Self>) -> Option<u16> {
         let text = self.text(&self.port, cx);
         if text.is_empty() { Some(22) } else { text.parse::<u16>().ok().filter(|p| *p > 0) }
@@ -200,7 +224,16 @@ impl HostForm {
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         host.keep_alive = self.keep_alive;
-        host.auth = if self.auth == 1 {
+        host.identity = self.selected_identity(cx).map(|i| i.id);
+        if let Some(identity) = self.selected_identity(cx) {
+            // The summary and equivalent command show who signs in.
+            host.username = identity.username.clone();
+        }
+        host.auth = if self.auth == 2 {
+            // The identity signs in; the host's own sign-in is kept as it was,
+            // and comes back if the identity is ever deleted.
+            self.original.as_ref().map(|h| h.auth.clone()).unwrap_or_default()
+        } else if self.auth == 1 {
             let password = self.password.read(cx).text().to_string();
             Auth::Password { saved: (self.save_password && !password.is_empty()).then(|| Secret::new(password)) }
         } else {
@@ -395,6 +428,9 @@ impl HostForm {
     }
 
     fn auth_summary(&self, cx: &Context<Self>) -> SharedString {
+        if let Some(identity) = self.selected_identity(cx) {
+            return format!("Identity {}", identity.name).into();
+        }
         if self.auth == 1 {
             let saved = self.save_password && !self.password.read(cx).text().is_empty();
             if saved { "Password, saved".into() } else { "Password, asked on connect".into() }
@@ -452,7 +488,13 @@ impl Render for HostForm {
             .child(field("Tags", self.tags.clone(), None));
 
         let entity = cx.entity();
-        let auth_choice = Segmented::new("auth", vec!["SSH key".into(), "Password".into()], self.auth).on_change({
+        // "Identity" takes the place the design gives "SSH agent", which
+        // comes in milestone 6. It is offered once the vault has an identity.
+        let mut auth_options: Vec<SharedString> = vec!["SSH key".into(), "Password".into()];
+        if !self.identities.is_empty() {
+            auth_options.push("Identity".into());
+        }
+        let auth_choice = Segmented::new("auth", auth_options, self.auth).on_change({
             let entity = entity.clone();
             move |i, _, cx| {
                 entity.update(cx, |f, cx| {
@@ -462,10 +504,32 @@ impl Render for HostForm {
                 })
             }
         });
+        let identity = self.selected_identity(cx).cloned();
         let mut credentials = fieldset("Credentials")
-            .child(field("Username", self.username.clone(), None))
+            // An identity brings its own username.
+            .when(identity.is_none(), |d| d.child(field("Username", self.username.clone(), None)))
             .child(field("Authentication", auth_choice, None));
-        if self.auth == 0 {
+        if self.auth == 2 {
+            let how = identity.as_ref().map(|i| match &i.auth {
+                Auth::Password { saved: Some(_) } => "a password stored in the vault".to_string(),
+                Auth::Password { saved: None } => "a password asked on connect".to_string(),
+                Auth::Key { key_id, .. } => match self.keys.iter().find(|k| &k.id == key_id) {
+                    Some(k) => format!("the key {}", k.name),
+                    None => "a key that is no longer in the vault".to_string(),
+                },
+            });
+            let user = identity
+                .as_ref()
+                .map(|i| if i.username.is_empty() { "no username".to_string() } else { i.username.clone() });
+            credentials =
+                credentials
+                    .child(field("Identity", self.identity_select.clone(), None))
+                    .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(format!(
+                    "Signs in as {} with {}. Edit the identity in the Keychain; every host that uses it changes too.",
+                    user.unwrap_or_default(),
+                    how.unwrap_or_default()
+                ))));
+        } else if self.auth == 0 {
             let encrypted = self.selected_key(cx).is_some_and(|k| k.encrypted);
             let import = Button::secondary("import-key", "Import key file…")
                 .on_click(cx.listener(|this, _, window, cx| this.import_key(window, cx)));
@@ -536,6 +600,7 @@ impl Render for HostForm {
                 );
             }
         } else {
+            // Password (1).
             credentials = credentials.child(field("Password", self.password.clone(), None)).child(
                 Checkbox::new("save-password", "Save in the encrypted vault", self.save_password).on_toggle({
                     let entity = entity.clone();

@@ -57,13 +57,18 @@ fn last_connected(host: &Host) -> SharedString {
     }
 }
 
+/// How a (resolved) host signs in, as the cards and detail panel say it.
 fn sign_in(host: &Host, data: &VaultData) -> SharedString {
-    match &host.auth {
+    let how: SharedString = match &host.auth {
         Auth::Password { saved: Some(_) } => "Password".into(),
         Auth::Password { saved: None } => "Password, asked".into(),
         Auth::Key { key_id, .. } => {
             data.key(*key_id).map(|k| k.name.clone()).unwrap_or_else(|| "Missing key".into()).into()
         }
+    };
+    match host.identity.and_then(|id| data.identity(id)) {
+        Some(identity) => format!("{} ({how})", identity.name).into(),
+        None => how,
     }
 }
 
@@ -85,7 +90,9 @@ impl Workspace {
             return self.welcome(cx).into_any_element();
         }
         let query = self.search.read(cx).text().trim().to_string();
-        let mut hosts: Vec<&Host> = data.hosts.iter().filter(|h| matches(h, &query)).collect();
+        // Shown with their identity's username and sign-in.
+        let resolved: Vec<Host> = data.hosts.iter().map(|h| data.resolved(h)).collect();
+        let mut hosts: Vec<&Host> = resolved.iter().filter(|h| matches(h, &query)).collect();
         hosts.sort_by_key(|h| h.display_name().to_lowercase());
         // Keep a selection while there is something to select.
         if self.selected.is_none_or(|id| !hosts.iter().any(|h| h.id == id)) {
@@ -167,7 +174,8 @@ impl Workspace {
             self.host_list(&hosts, selected, &data, cx).into_any_element()
         };
 
-        let detail = selected.and_then(|id| data.host(id)).map(|h| self.host_detail(h, &data, cx));
+        let detail =
+            selected.and_then(|id| resolved.iter().find(|h| h.id == id)).map(|h| self.host_detail(h, &data, cx));
 
         div()
             .size_full()
