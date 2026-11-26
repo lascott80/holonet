@@ -2317,3 +2317,46 @@ Carried forward, not tested or not built:
 - Debug builds keep their console for logs.
 
 Cleanup: the downloaded exe and its folder, and the throwaway vault folder, were removed.
+
+## Milestone 7, phase 1: model and vault (26 Nov 2026)
+
+**Model (`holonet-model`, schema 4):**
+
+- **`history` module:** `SessionRecord` (host and its name at the time, kind, start, end, route, user, how it ended, whether output was logged, and the log's size), `SessionKind`, `SessionEnd` and `LogKeep` (7, 30 or 90 days, or forever).
+  - `length()` and `log_size()` read as History draws them: "38 min", "1 h 12 min", "84 KB", "No log".
+  - An SFTP record is never marked logged, whatever is asked.
+- **`VaultData.history`** holds the records, with:
+  - `logs_output(host)`: the host's own switch, or else the Settings default
+  - `record`, `record_mut`, `delete_record` and `host_history`
+  - `expire_history(now)`: removes records that ended longer ago than Settings keeps them, and returns them so their logs can go. Open records stay.
+  - `close_open_records(last_seen)`: a record a crash left open is closed as "Connection dropped", at its log's last write
+- **`Host.log_output: Option<bool>`.** `None` follows Settings.
+- **Settings:**
+  - Connection gains `log_default` (off), `log_keep` (30 days) and `restore_sessions` (off).
+  - New `AppearanceSettings { windows_accent }` and `UpdateSettings { check, last_checked, latest, dismissed }`, where `due()` says when a check should run.
+- **Why schema 4 with nothing to migrate:** an older build would read the vault but drop the history and new settings on its next save. With the higher number, an older build reports "saved by a newer version" instead.
+
+**Vault (`holonet-vault::logs`):**
+
+- **Where logs live:** each log is a file named by its record id, in a folder named after the vault file, for example `vault.holonet.logs\<id>.log`. Naming the folder after the vault keeps two vaults in one folder (as test vaults often are) from sharing logs.
+- **Keys:**
+  - `UnlockedVault::log_key()` derives a log key from the data key.
+  - Each file's key is SHA-256 over a domain string, that log key and the record id.
+  - A password change keeps the data key, so logs stay readable.
+  - The app keeps a `LogStore` (folder and key) after locking, so open sessions keep logging.
+- **Chunks:**
+  - `LogWriter` seals text in chunks of up to 64 KB, cut on a character boundary, as it arrives, and `flush()` seals the rest.
+  - Each chunk's associated data is the file header (magic, version, record id) and its number.
+  - Swapped chunks, a file renamed to another log's name, and a flipped bit are all refused.
+  - A torn last chunk is skipped and reported as `torn`.
+- **The rest of `LogStore`:** `read`, `delete` (a missing file counts as deleted), `last_write`, `remove_orphans` (deletes `.log` files with no record and leaves other files alone), and `create`, which never overwrites an existing log.
+- **`export_backup(dest)`:**
+  - Writes the vault, encrypted as it is saved, to another file. It opens with the same password.
+  - It refuses the vault's own path and its `.bak`.
+  - Logs are not included.
+
+**Check:**
+- A copy of the milestone 6 test vault (schema 3, 8 hosts, 3 keys) opened, saved with a record and reopened as schema 4 with its hosts unchanged. The throwaway program and the copy were removed.
+- `decisions.md` records where logs live.
+
+fmt, clippy `-D warnings` and the unit tests pass. `holonet-model` has 27 and `holonet-vault` 22, with new tests for the milestone 6 vault, history ageing, closing open records, update timing, log chunks, a torn chunk, tampering, orphans, backup export and logs across a password change.

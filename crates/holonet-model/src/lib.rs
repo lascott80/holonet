@@ -4,9 +4,8 @@
 //! Plain data with serde, no I/O. The vault (`holonet-vault`) encrypts and
 //! stores a [`VaultData`]; everything else reads and edits it.
 //!
-//! Fields for later milestones (logging, history) are added when their
-//! milestone lands. `#[serde(default)]` on every
-//! collection and optional field keeps older vault files readable.
+//! `#[serde(default)]` on every collection and optional field keeps older
+//! vault files readable.
 
 use std::fmt;
 
@@ -22,7 +21,11 @@ use zeroize::Zeroizing;
 /// 3 (milestone 6): hosts can take their route, jump host and key from a
 /// group ([`FromGroup`]). The migration marks a host's route and jump host
 /// as following the group where they hold the defaults.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// 4 (milestone 7): session history, logging and update settings. Nothing
+/// moves, but an older build would drop the history on its next save, so
+/// the number tells it to refuse the vault instead.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Seconds since the Unix epoch, UTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -91,13 +94,16 @@ id_type!(IdentityId);
 id_type!(GroupId);
 id_type!(SnippetId);
 id_type!(ForwardRuleId);
+id_type!(RecordId);
 
 mod forward;
 mod group;
+pub mod history;
 pub mod snippet;
 
 pub use forward::{ForwardKind, ForwardProblem, ForwardRule, LOOPBACK};
 pub use group::{FromGroup, Group, GroupColor, GroupKey};
+pub use history::{LogKeep, SessionEnd, SessionKind, SessionRecord};
 pub use snippet::Snippet;
 
 /// Icon shown for a host. Chosen by the person; defaults to a server.
@@ -207,6 +213,10 @@ pub struct Host {
     pub compression: bool,
     #[serde(default = "yes")]
     pub keep_alive: bool,
+    /// "Save terminal output to History". `None` follows the Settings
+    /// default ([`ConnectionSettings::log_default`]).
+    #[serde(default)]
+    pub log_output: Option<bool>,
     /// Where the host's side of an SFTP tab starts; `None` is the sign-in's
     /// home folder (NewHost.dc.html, "Default SFTP folder").
     #[serde(default)]
@@ -273,6 +283,7 @@ impl Host {
             agent_forwarding: false,
             compression: false,
             keep_alive: true,
+            log_output: None,
             sftp_folder: None,
             sftp_local_folder: None,
             tags: Vec::new(),
@@ -507,6 +518,10 @@ pub struct Settings {
     pub connection: ConnectionSettings,
     #[serde(default)]
     pub sftp: SftpSettings,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
 }
 
 fn default_connect_timeout() -> u32 {
@@ -528,6 +543,52 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             connection: ConnectionSettings::default(),
             sftp: SftpSettings::default(),
+            appearance: AppearanceSettings::default(),
+            updates: UpdateSettings::default(),
+        }
+    }
+}
+
+/// Settings, Appearance (Settings.dc.html). The app theme stays dark gray:
+/// "Follow Windows" needs a light theme that is not designed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// "Use Windows accent color".
+    pub windows_accent: bool,
+}
+
+/// "Look for new releases" (Settings, About and updates).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheck {
+    /// When Holonet starts.
+    #[default]
+    Start,
+    Daily,
+    Never,
+}
+
+/// The new-release check (`decisions.md`: a notice only, nothing installs).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    pub check: UpdateCheck,
+    pub last_checked: Option<Timestamp>,
+    /// The newest release found, as its tag (`v0.2.0`), with when GitHub
+    /// published it.
+    pub latest: Option<(String, Timestamp)>,
+    /// The release whose notice "Later" hid. A newer one shows again.
+    pub dismissed: Option<String>,
+}
+
+impl UpdateSettings {
+    /// Whether a check is due at `now`.
+    pub fn due(&self, now: Timestamp, at_start: bool) -> bool {
+        match self.check {
+            UpdateCheck::Never => false,
+            UpdateCheck::Start => at_start,
+            UpdateCheck::Daily => self.last_checked.is_none_or(|t| now.0 - t.0 >= 24 * 60 * 60),
         }
     }
 }
@@ -742,11 +803,25 @@ pub struct ConnectionSettings {
     /// (`decisions.md`: on, 5 attempts).
     pub reconnect: bool,
     pub fallback_wait: FallbackWait,
+    /// "Save terminal output to History" for hosts that do not set their
+    /// own (`decisions.md`: off by default).
+    pub log_default: bool,
+    /// How long History keeps records and logs.
+    pub log_keep: LogKeep,
+    /// "Restore open sessions on launch".
+    pub restore_sessions: bool,
 }
 
 impl Default for ConnectionSettings {
     fn default() -> Self {
-        Self { keep_alive: KeepAlive::Secs30, reconnect: true, fallback_wait: FallbackWait::default() }
+        Self {
+            keep_alive: KeepAlive::Secs30,
+            reconnect: true,
+            fallback_wait: FallbackWait::default(),
+            log_default: false,
+            log_keep: LogKeep::default(),
+            restore_sessions: false,
+        }
     }
 }
 
@@ -823,6 +898,9 @@ pub struct VaultData {
     pub snippets: Vec<Snippet>,
     #[serde(default)]
     pub forward_rules: Vec<ForwardRule>,
+    /// Session records, oldest first.
+    #[serde(default)]
+    pub history: Vec<SessionRecord>,
     #[serde(default)]
     pub settings: Settings,
 }
@@ -838,6 +916,7 @@ impl Default for VaultData {
             groups: Vec::new(),
             snippets: Vec::new(),
             forward_rules: Vec::new(),
+            history: Vec::new(),
             settings: Settings::default(),
         }
     }
@@ -1095,6 +1174,57 @@ impl VaultData {
             }
         }
         self.schema = SCHEMA_VERSION;
+    }
+
+    /// Whether a terminal to `host` saves its output: the host's own
+    /// switch, or else the Settings default.
+    pub fn logs_output(&self, host: &Host) -> bool {
+        host.log_output.unwrap_or(self.settings.connection.log_default)
+    }
+
+    pub fn record(&self, id: RecordId) -> Option<&SessionRecord> {
+        self.history.iter().find(|r| r.id == id)
+    }
+
+    pub fn record_mut(&mut self, id: RecordId) -> Option<&mut SessionRecord> {
+        self.history.iter_mut().find(|r| r.id == id)
+    }
+
+    /// Remove a record, returning it so the caller can delete its log.
+    pub fn delete_record(&mut self, id: RecordId) -> Option<SessionRecord> {
+        let i = self.history.iter().position(|r| r.id == id)?;
+        Some(self.history.remove(i))
+    }
+
+    /// Records for one host, newest first ("Connect again" and the host's
+    /// last session).
+    pub fn host_history(&self, host: HostId) -> impl Iterator<Item = &SessionRecord> {
+        self.history.iter().rev().filter(move |r| r.host == Some(host))
+    }
+
+    /// Remove records that ended longer ago than Settings keeps them, and
+    /// return them so their logs can be deleted. Open records stay.
+    pub fn expire_history(&mut self, now: Timestamp) -> Vec<SessionRecord> {
+        let Some(max) = self.settings.connection.log_keep.max_age_secs() else { return Vec::new() };
+        let (old, keep): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.history).into_iter().partition(|r| r.ended.is_some_and(|e| now.0 - e.0 > max));
+        self.history = keep;
+        old
+    }
+
+    /// A Holonet that closed mid-session leaves records with no end. Close
+    /// them as dropped, at the time `last_seen` gives (the log's last write,
+    /// say) or else at their start. Returns how many were closed.
+    pub fn close_open_records(&mut self, last_seen: impl Fn(&SessionRecord) -> Option<Timestamp>) -> usize {
+        let mut closed = 0;
+        for r in &mut self.history {
+            if r.ended.is_none() {
+                r.ended = Some(last_seen(r).unwrap_or(r.started).max(r.started));
+                r.end = Some(SessionEnd::Dropped);
+                closed += 1;
+            }
+        }
+        closed
     }
 
     pub fn known_host(&self, host: &str, port: u16) -> Option<&KnownHost> {
@@ -1519,7 +1649,7 @@ mod tests {
             "settings":{"lock_after_idle_mins":15}}"#;
         let mut d: VaultData = serde_json::from_str(old).unwrap();
         d.migrate();
-        assert_eq!(d.schema, 3);
+        assert_eq!(d.schema, SCHEMA_VERSION);
         assert_eq!(d.hosts[0].from_group, FromGroup { route: true, jump_host: true, key: false });
         assert_eq!(d.hosts[1].from_group, FromGroup { route: false, jump_host: false, key: false });
         // New fields and lists take their defaults; old values are kept.
@@ -1740,5 +1870,85 @@ mod tests {
             (GroupColor::Cyan, GroupKey::AskEachTime, Route::Automatic, false)
         );
         assert_eq!(GroupColor::ALL.map(GroupColor::label), ["Cyan", "Violet", "Mint", "Gray", "Rose", "Lime"]);
+    }
+
+    #[test]
+    fn milestone_6_vault_reads_with_history_defaults() {
+        // A host, group, snippet and settings as a milestone 6 vault wrote them.
+        let old = r#"{"schema":3,
+            "hosts":[{"id":"00000000-0000-0000-0000-000000000001","address":"a","created_at":0,
+                "group":"00000000-0000-0000-0000-000000000009","compression":true,
+                "from_group":{"route":true,"jump_host":true,"key":false}}],
+            "groups":[{"id":"00000000-0000-0000-0000-000000000009","name":"Lab","color":"mint","warn":true}],
+            "snippets":[{"id":"00000000-0000-0000-0000-000000000005","name":"df","command":"df -h"}],
+            "settings":{"lock_after_idle_mins":15,"connection":{"keep_alive":"secs60","reconnect":true}}}"#;
+        let mut d: VaultData = serde_json::from_str(old).unwrap();
+        d.migrate();
+        assert_eq!(d.schema, 4);
+        let host = d.hosts[0].clone();
+        assert_eq!((host.log_output, host.compression), (None, true));
+        assert!(d.history.is_empty());
+        let c = &d.settings.connection;
+        assert_eq!(
+            (c.keep_alive, c.log_default, c.log_keep, c.restore_sessions),
+            (KeepAlive::Secs60, false, LogKeep::Days30, false)
+        );
+        assert_eq!(d.settings.updates, UpdateSettings::default());
+        assert!(!d.settings.appearance.windows_accent);
+        // Logging follows Settings until the host sets its own.
+        assert!(!d.logs_output(&host));
+        d.settings.connection.log_default = true;
+        assert!(d.logs_output(&host));
+        d.hosts[0].log_output = Some(false);
+        assert!(!d.logs_output(&d.hosts[0].clone()));
+        // Round trip keeps everything.
+        let back: VaultData = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn history_ages_out_and_open_records_close() {
+        let mut d = VaultData::default();
+        let day = 24 * 60 * 60;
+        let now = Timestamp(100 * day);
+        let mut rec = |started: i64, ended: Option<i64>| {
+            let mut r = SessionRecord::new(None, "h", SessionKind::Terminal, true);
+            r.started = Timestamp(started);
+            r.ended = ended.map(Timestamp);
+            d.history.push(r.clone());
+            r.id
+        };
+        let old = rec(60 * day, Some(60 * day + 600));
+        let recent = rec(80 * day, Some(80 * day + 600));
+        let open = rec(10 * day, None);
+        // 30 days by default: the one that ended 40 days ago goes.
+        let gone = d.expire_history(now);
+        assert_eq!(gone.iter().map(|r| r.id).collect::<Vec<_>>(), [old]);
+        assert_eq!(d.history.iter().map(|r| r.id).collect::<Vec<_>>(), [recent, open]);
+        // Forever keeps everything.
+        d.settings.connection.log_keep = LogKeep::Forever;
+        assert!(d.expire_history(Timestamp(1000 * day)).is_empty());
+        // An open record left by a crash closes at its last write, as dropped.
+        assert_eq!(d.close_open_records(|r| (r.id == open).then_some(Timestamp(10 * day + 300))), 1);
+        let r = d.record(open).unwrap();
+        assert_eq!((r.ended, r.end), (Some(Timestamp(10 * day + 300)), Some(SessionEnd::Dropped)));
+        assert_eq!(d.close_open_records(|_| None), 0);
+        // Then it ages out like the others.
+        d.settings.connection.log_keep = LogKeep::Days7;
+        assert_eq!(d.expire_history(now).len(), 2);
+        assert!(d.delete_record(recent).is_none());
+    }
+
+    #[test]
+    fn update_checks_fall_due() {
+        let mut u = UpdateSettings::default();
+        assert!(u.due(Timestamp(0), true) && !u.due(Timestamp(0), false));
+        u.check = UpdateCheck::Daily;
+        assert!(u.due(Timestamp(5), false));
+        u.last_checked = Some(Timestamp(1000));
+        assert!(!u.due(Timestamp(1000 + 23 * 3600), true));
+        assert!(u.due(Timestamp(1000 + 24 * 3600), false));
+        u.check = UpdateCheck::Never;
+        assert!(!u.due(Timestamp(1 << 40), true));
     }
 }

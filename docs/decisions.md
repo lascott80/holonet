@@ -38,7 +38,7 @@ All of these were decided on 25 November 2026. The live copy, with the original 
 
 | Topic | Decision |
 | --- | --- |
-| Session logging | Off by default, with a per-host switch and a global default in Settings. Logs are stored in the vault. SFTP sessions are never logged. |
+| Session logging | Off by default, with a per-host switch and a global default in Settings. Logs are stored in the vault. SFTP sessions are never logged. Owner decision, milestone 7: each log is an encrypted file beside the vault file, under the vault's key, and the session records are inside the vault. |
 | Default terminal font | JetBrainsMono Nerd Font at 13px, bundled, once the licences are confirmed. The Mono, Propo and NL builds are also offered, plus Cascadia Mono, Consolas and any installed font. |
 | Broadcast input | An amber strip while it is on, counting hosts in "warn" groups. One confirmation is required when a group marked "warn" is included. |
 | Snippet variables | `${name}` in a command asks for a value on every run. |
