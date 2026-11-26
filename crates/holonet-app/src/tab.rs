@@ -150,6 +150,8 @@ pub enum TabEvent {
         host: HostId,
         remembered: crate::session::Remembered,
     },
+    /// The drawer's "Manage snippets": the Snippets page.
+    ManageSnippets,
 }
 
 pub struct Tab {
@@ -161,6 +163,8 @@ pub struct Tab {
     /// The split menu, while open: its axis and the hosts it offers.
     menu: Option<(Axis, Vec<(HostId, SharedString)>)>,
     find: Option<FindBar>,
+    /// The Snippets drawer is open (Terminal.dc.html).
+    drawer: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -177,6 +181,7 @@ impl Tab {
             drag: None,
             menu: None,
             find: None,
+            drawer: false,
             _subscriptions: subscriptions,
         }
     }
@@ -208,6 +213,138 @@ impl Tab {
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self.root.split(&target, axis, pane.clone());
         self.activate(pane, window, cx);
+    }
+
+    /// Add a pane beside or below `target` without making it active
+    /// (a multi-host run lays out its panes this way).
+    pub fn add_pane(&mut self, target: &Entity<Pane>, axis: Axis, pane: Entity<Pane>, cx: &mut Context<Self>) {
+        if !self.can_split() {
+            return;
+        }
+        self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
+        self.root.split(target, axis, pane);
+        self.mark_panes(cx);
+        cx.notify();
+    }
+
+    /// The Snippets button: open or close the drawer.
+    pub fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawer = !self.drawer;
+        cx.notify();
+    }
+
+    /// Run a snippet from the drawer in the active pane.
+    fn run_from_drawer(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active.clone();
+        if !pane.read(cx).can_run() {
+            return;
+        }
+        pane.update(cx, |p, cx| {
+            p.run_snippet(snippet, cx);
+            p.focus(window, cx);
+        });
+    }
+
+    /// The Snippets drawer (Terminal.dc.html): the library, what a click
+    /// runs in, and "Manage snippets".
+    fn drawer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.drawer {
+            return None;
+        }
+        let snippets = self.app.upgrade().map(|app| app.read(cx).snippets(cx)).unwrap_or_default();
+        let ready = self.active.read(cx).can_run();
+        let target = if ready { "Runs in active pane" } else { "Connect the active pane first" };
+        let items = snippets.into_iter().enumerate().map(|(i, s)| {
+            let name = s.display_name().to_string();
+            let command = s.command.replace(['\r', '\n'], " ");
+            div()
+                .id(("drawer-snippet", i))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(theme::SPACE_3)
+                .rounded(theme::RADIUS_MD)
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::line())
+                .when(ready, |d| {
+                    d.cursor_pointer()
+                        .hover(|d| d.border_color(theme::line_strong()))
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_from_drawer(s.clone(), window, cx)))
+                })
+                .when(!ready, |d| d.opacity(0.5))
+                .child(
+                    div().text_body().font_weight(FontWeight::MEDIUM).text_color(theme::ink()).truncate().child(name),
+                )
+                .child(div().flex().child(
+                    div().flex_1().min_w_0().text_mono_small().text_color(theme::ink_muted()).truncate().child(command),
+                ))
+        });
+        let items: Vec<_> = items.collect();
+        let empty = items.is_empty();
+        Some(
+            div()
+                .w(px(260.))
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .p(px(14.))
+                .rounded(theme::RADIUS_MD)
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::line())
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(
+                            div()
+                                .font_family(theme::DISPLAY)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::ink())
+                                .child("Snippets"),
+                        )
+                        .child(div().text_meta().text_color(theme::ink_muted()).child(target)),
+                )
+                .child(
+                    div()
+                        .id("drawer-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .when(empty, |d| {
+                            d.child(div().text_body().text_color(theme::ink_muted()).child("No snippets yet."))
+                        })
+                        .children(items),
+                )
+                .child(
+                    div()
+                        .id("manage-snippets")
+                        .flex_none()
+                        .py(px(12.))
+                        .flex()
+                        .justify_center()
+                        .rounded(theme::RADIUS_MD)
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme::line_strong())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .text_body()
+                        .text_color(theme::ink_muted())
+                        .child("Manage snippets")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(TabEvent::ManageSnippets))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Remove a pane. Returns true when the tab has none left.
@@ -686,6 +823,7 @@ impl Render for Tab {
         let can_split = self.can_split();
         let files = self.is_files(cx);
         let body = self.render_node(&self.root, Vec::new(), cx);
+        let drawer = if files { None } else { self.drawer(cx) };
         div()
             .size_full()
             .flex()
@@ -783,12 +921,46 @@ impl Render for Tab {
                                         .child("Find")
                                         .on_click(cx.listener(|this, _, window, cx| this.toggle_find(window, cx)))
                                 })
+                            })
+                            // Terminal.dc.html: the Snippets drawer's toggle.
+                            .when(!files, |d| {
+                                let on = self.drawer;
+                                d.child(
+                                    div()
+                                        .id("snippets-toggle")
+                                        .h(theme::CONTROL)
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme::SPACE_2)
+                                        .rounded(theme::RADIUS_MD)
+                                        .border_1()
+                                        .border_color(if on { theme::accent() } else { theme::line() })
+                                        .bg(theme::card())
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::raised()))
+                                        .text_body()
+                                        .text_color(theme::ink())
+                                        .child(icon("snippets", px(16.), theme::ink_muted()))
+                                        .child("Snippets")
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx))),
+                                )
                             }),
                     ),
             )
             .children(find_bar)
             // Gutter and panes.
-            .child(div().flex_1().min_h_0().p(theme::SPACE_2).bg(theme::sunken()).child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .p(theme::SPACE_2)
+                    .bg(theme::sunken())
+                    .flex()
+                    .gap(theme::SPACE_2)
+                    .child(div().flex_1().min_w_0().h_full().child(body))
+                    .children(drawer),
+            )
             .child(status)
     }
 }

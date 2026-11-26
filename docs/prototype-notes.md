@@ -2086,3 +2086,45 @@ fmt, clippy `-D warnings`, the workspace tests and the five WSL forward tests pa
 The pane writes the note before the server's welcome text arrives, so it ends up above the welcome text. That is acceptable while phase 6 replaces the note with the value prompt.
 
 fmt, clippy `-D warnings` and the workspace tests pass, plus a new test for the startup note wording. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 6: snippets in sessions and multi-host runs (26 Nov 2026)
+
+**What was built:**
+
+- **`snippet_run.rs`: the run prompt** (not drawn). One popup covers the cases a snippet asks about before it runs:
+  - It has one field per `${name}` variable, and shows the command as it will be typed, filled in as you type.
+  - The title names the target ("Run Mark word on wsl-a"), with a question mark when the snippet asks before running or reaches a warn group.
+  - A run that reaches hosts in groups marked "warn" turns the dialog amber. It says "This runs on 2 Production hosts. Check the command before running it." and the button reads "Run anyway".
+  - An empty value is caught ("Enter a value for word."). Enter runs it and Escape or the backdrop cancels.
+  - Values are remembered per snippet in `HolonetApp` until Holonet closes, never in the vault. A remembered value comes back selected, so typing replaces it.
+  - `warn_text` counts the hosts in warn groups ("1 Production host", "3 hosts in Production and Staging") and has a unit test.
+  - `RunPrompt::needed` decides whether to ask at all. A snippet with no variables, no confirmation and no warn group runs straight away.
+- **Snippets drawer** (`Terminal.dc.html`):
+  - The tab header's Snippets button opens a panel beside the panes with the library ("Runs in active pane") and a dashed "Manage snippets", which opens the Snippets page.
+  - A click runs the snippet in the active pane. While that pane is not connected, the items are dimmed and the note says "Connect the active pane first".
+  - SFTP tabs have no drawer.
+- **The pane** (`session.rs`):
+  - `run_snippet` types the snippet, or first asks for `ask`. The prompt is built on the pane's next render, which has the window to focus its field, and drawn over that pane alone.
+  - `queue_input` holds text until the shell first opens.
+  - Startup snippets with variables or "Ask before running" now open the prompt in their pane instead of phase 5's note.
+- **Run on** (`Snippets.dc.html`): the editor has a chip per host with its group colour.
+  - The button reads "Run in active session", "Run on 1 host" or "Run on n hosts".
+  - "Run in active session" types into the active pane of the session tab shown last, and switches to that tab. With no hosts chosen and no open terminal, a line explains both ways instead of a button that does nothing.
+  - "Run on n hosts" opens a tab per four hosts, laid out as 1, side by side, then a 2 × 2 grid (`Tab::add_pane`). Each pane signs in its own way and types the filled command once its shell opens.
+  - The page asks the app through `window.defer`, since opening panes reads the vault while the page is being updated.
+- **Focus:** a pane that connects takes the keyboard only if it is its tab's active pane. Otherwise the panes of a multi-host run each grabbed focus as they connected, and the last one won.
+
+**Live check** (WSL server, a copy of the test vault, a snippet `echo ${word} >> ~/p6mark.txt`):
+
+| Check | Result |
+| --- | --- |
+| Drawer in a wsl-a terminal, value "one" | The prompt opened in the pane with its field focused; the file had "one" |
+| Run on wsl-a, wsl-b and jump-a | One tab with three panes (two left, one right); each typed the command once connected; three new lines |
+| Run on behind-a (in a warn group "Production") and wsl-a | The amber dialog; Enter with an empty field gave the message; "Run anyway" added two lines |
+| wsl-a's startup snippet set to it, Save and connect | The prompt opened in the new pane with the last value selected, and ran |
+| Kill the session | The pane reconnected with no prompt and nothing typed |
+| Split right to wsl-a | The new pane asked; the value typed there ran |
+
+One step went wrong in the harness. A value typed in a separate command right after a screenshot never reached the field, so the prompt ran with the remembered value. Typing in the same step as opening the prompt worked every time, in the drawer, the startup prompt of a split, and the page. This looks like Windows refusing the foreground switch for that one command, not the app.
+
+fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.

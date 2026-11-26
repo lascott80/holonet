@@ -36,6 +36,7 @@ use crate::files_view::FilesView;
 use crate::hops::{self, Hop, RouteEvent, Routed};
 use crate::host_form::describe_error;
 use crate::shell::TabState;
+use crate::snippet_run::{RunPrompt, RunPromptEvent};
 use crate::terminal::GridSize;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{self, TypeStyles};
@@ -341,6 +342,11 @@ pub struct Pane {
     /// The host's startup snippet has had its one chance: it is sent after
     /// the shell first opens and never replayed (decisions.md).
     startup_done: bool,
+    /// Filled snippets from a multi-host run, typed once the shell opens.
+    queued: Vec<String>,
+    /// A snippet waiting for its run prompt, and the prompt while open.
+    ask: Option<holonet_model::Snippet>,
+    prompt: Option<(Entity<RunPrompt>, Subscription)>,
     /// The last sleep, wake or network change, and when.
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
@@ -452,6 +458,9 @@ impl Pane {
             reconnect: None,
             reconnect_task: None,
             startup_done: false,
+            queued: Vec::new(),
+            ask: None,
+            prompt: None,
             disturbance: None,
             _subscriptions: subscriptions,
         };
@@ -1167,31 +1176,66 @@ impl Pane {
         if std::mem::replace(&mut self.startup_done, true) {
             return;
         }
-        let Some(snippet) = self.app.upgrade().and_then(|app| app.read(cx).startup_snippet(self.host.id, cx)) else {
-            return;
-        };
-        let name = snippet.display_name().to_string();
-        let variables = snippet.variables();
-        // Values and the confirmation are asked in a popup, which a pane
-        // that just connected does not open by itself.
-        let skipped = if !variables.is_empty() {
-            Some(format!("it asks for {}", variables.join(", ")))
-        } else if snippet.confirm {
-            Some("it asks before running".to_string())
-        } else {
-            None
-        };
-        match skipped {
-            Some(why) => {
-                let line =
-                    format!("\x1b[2m-- The startup snippet \u{201c}{name}\u{201d} was not run: {why}. --\x1b[0m\r\n");
-                self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
-            }
-            None => {
-                let text = snippet.input(&Default::default());
-                self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
-            }
+        if let Some(snippet) = self.app.upgrade().and_then(|app| app.read(cx).startup_snippet(self.host.id, cx)) {
+            self.run_snippet(snippet, cx);
         }
+        // Then what a multi-host run asked this pane to type.
+        for text in std::mem::take(&mut self.queued) {
+            self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+        }
+    }
+
+    /// The pane's shell is open and takes input.
+    pub fn can_run(&self) -> bool {
+        self.mode == PaneMode::Terminal && matches!(self.state, State::Connected) && self.reconnect.is_none()
+    }
+
+    /// Run a snippet here: at once, or after the run prompt when it has
+    /// variables or asks before running.
+    pub fn run_snippet(&mut self, snippet: holonet_model::Snippet, cx: &mut Context<Self>) {
+        if RunPrompt::needed(&snippet, false) {
+            // The prompt is built on the next render, which has the window
+            // to focus its first field.
+            self.prompt = None;
+            self.ask = Some(snippet);
+            cx.notify();
+            return;
+        }
+        let text = snippet.input(&Default::default());
+        self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+    }
+
+    /// Type `text` (a filled snippet) now, or once the shell first opens.
+    pub fn queue_input(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.startup_done && self.can_run() {
+            self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+            self.focus_pending = true;
+        } else {
+            self.queued.push(text);
+        }
+    }
+
+    /// Build the run prompt asked for by [`Self::run_snippet`].
+    fn open_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snippet) = self.ask.take() else { return };
+        let last = self.app.upgrade().map(|app| app.read(cx).snippet_values(snippet.id)).unwrap_or_default();
+        let target = self.name().to_string();
+        let run = snippet.clone();
+        let prompt = cx.new(|cx| RunPrompt::new(snippet, target, None, &last, window, cx));
+        let sub = cx.subscribe(&prompt, move |this: &mut Self, _, event: &RunPromptEvent, cx| {
+            if let RunPromptEvent::Run(values) = event {
+                if let Some(app) = this.app.upgrade() {
+                    let values = values.clone();
+                    app.update(cx, |app, _| app.remember_snippet_values(run.id, values));
+                }
+                let text = run.input(values);
+                this.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+            }
+            this.prompt = None;
+            this.focus_pending = true;
+            cx.notify();
+        });
+        self.prompt = Some((prompt, sub));
     }
 
     fn finish(&mut self, result: Result<(Session, Opened), ConnectError>, cx: &mut Context<Self>) {
@@ -1238,7 +1282,9 @@ impl Pane {
                     }
                 }
                 self.state = State::Connected;
-                self.focus_pending = true;
+                // Only the tab's active pane takes the keyboard: a multi-host
+                // run's panes connect in any order.
+                self.focus_pending = self.active;
                 // Each hop's typed secret is remembered for reconnecting, and
                 // saved when asked.
                 let mut saves = Vec::new();
@@ -2119,7 +2165,10 @@ impl Pane {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.focus_pending) {
+        if self.ask.is_some() {
+            self.open_prompt(window, cx);
+        }
+        if std::mem::take(&mut self.focus_pending) && self.prompt.is_none() {
             self.focus(window, cx);
         }
         // A terminal that is no longer drawn (the pane failed, or shows a
@@ -2239,7 +2288,14 @@ impl Render for Pane {
                             .child(state_word),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(content)
+                    .children(self.prompt.as_ref().map(|(p, _)| p.clone())),
+            )
     }
 }
 

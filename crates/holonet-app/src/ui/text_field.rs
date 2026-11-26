@@ -171,6 +171,12 @@ impl TextField {
         cx.notify();
     }
 
+    /// Select all of the text, so typing replaces it.
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx);
+    }
+
     /// Show the field as having a problem (`warn` border).
     pub fn set_problem(&mut self, problem: bool, cx: &mut Context<Self>) {
         if self.problem != problem {

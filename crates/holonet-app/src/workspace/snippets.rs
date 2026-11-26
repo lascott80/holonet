@@ -1,11 +1,12 @@
 //! The Snippets page (Snippets.dc.html): the library as cards with a
-//! filter, the editor on the right, and the delete prompt. Running a
-//! snippet from here ("Run on") comes with the drawer in phase 6.
+//! filter, the editor on the right with "Run on" (the active session, or
+//! new panes on chosen hosts), and the delete prompt.
 
 use gpui::{AnyElement, Context, Entity, IntoElement, SharedString, Subscription, Window, div, prelude::*, px};
-use holonet_model::{Snippet, SnippetId, VaultData};
+use holonet_model::{HostId, Snippet, SnippetId, VaultData};
 
 use super::{Page, Workspace};
+use crate::snippet_run::{RunPrompt, RunPromptEvent, warn_text};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{
     Button, ButtonKind, Checkbox, TextField, TextFieldEvent, dialog, dialog_buttons, field, field_help, modal,
@@ -26,6 +27,10 @@ pub(crate) struct SnippetsUi {
     /// The delete prompt is open.
     delete: bool,
     problem: Option<SharedString>,
+    /// "Run on": the hosts chosen, in the order they were chosen.
+    targets: Vec<HostId>,
+    /// The run prompt, while open.
+    prompt: Option<(Entity<RunPrompt>, Subscription)>,
 }
 
 impl SnippetsUi {
@@ -39,6 +44,8 @@ impl SnippetsUi {
             confirm: false,
             delete: false,
             problem: None,
+            targets: Vec::new(),
+            prompt: None,
         }
     }
 
@@ -264,6 +271,7 @@ impl Workspace {
             )
             .child(self.snippet_editor(&data, cx))
             .children(self.snippet_delete_dialog(&data, cx))
+            .children(self.sn.prompt.as_ref().map(|(p, _)| p.clone()))
             .into_any_element()
     }
 
@@ -367,8 +375,10 @@ impl Workspace {
             .children(ui.editing.map(|id| {
                 div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(startup_note(data, id)))
             }))
+            .child(self.run_on(data, cx))
             .children(ui.problem.clone().map(|p| field_help(p, true)))
             .child(div().flex_1())
+            .child(self.run_button(data, cx))
             .child(
                 div()
                     .flex()
@@ -401,6 +411,130 @@ impl Workspace {
                     }),
             )
             .into_any_element()
+    }
+
+    /// Snippets.dc.html's "Run on": a chip per host, with its group color.
+    fn run_on(&self, data: &VaultData, cx: &mut Context<Self>) -> AnyElement {
+        let mut hosts: Vec<_> = data.hosts.iter().collect();
+        hosts.sort_by_key(|h| h.display_name().to_lowercase());
+        let chips = hosts.into_iter().map(|h| {
+            let id = h.id;
+            let on = self.sn.targets.contains(&id);
+            let color = crate::workspace::GroupTag::color_of(crate::workspace::GroupTag::of(data, h).as_ref());
+            div()
+                .id(SharedString::from(format!("run-on-{}", id.0)))
+                .h(theme::CONTROL)
+                .px(theme::SPACE_3)
+                .flex()
+                .items_center()
+                .gap(theme::SPACE_2)
+                .rounded(px(22.))
+                .border_1()
+                .border_color(if on { theme::accent() } else { theme::line() })
+                .bg(if on { theme::raised() } else { theme::card() })
+                .cursor_pointer()
+                .text_body()
+                .text_color(theme::ink())
+                .child(crate::ui::group_square(color))
+                .child(h.display_name().to_string())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let targets = &mut this.sn.targets;
+                    match targets.iter().position(|t| *t == id) {
+                        Some(i) => drop(targets.remove(i)),
+                        None => targets.push(id),
+                    }
+                    cx.notify()
+                }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme::SPACE_2)
+            .child(crate::ui::section_label("Run on"))
+            .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
+            .into_any_element()
+    }
+
+    /// "Run in active session", "Run on 1 host" or "Run on n hosts".
+    fn run_button(&self, data: &VaultData, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.sn.targets.iter().filter(|h| data.host(**h).is_some()).count();
+        let active = self.app.upgrade().and_then(|app| app.read(cx).active_session_name(cx));
+        if count == 0 && active.is_none() {
+            return field_help(
+                "Choose hosts to run it on, or open a terminal and it runs in the active session.",
+                false,
+            )
+            .into_any_element();
+        }
+        let label = match count {
+            0 => "Run in active session".to_string(),
+            1 => "Run on 1 host".to_string(),
+            n => format!("Run on {n} hosts"),
+        };
+        Button::primary("run-snippet", label)
+            .full_width()
+            .on_click(cx.listener(|this, _, window, cx| this.run_snippet(window, cx)))
+            .into_any_element()
+    }
+
+    /// Run what the editor shows: after the run prompt when it has
+    /// variables, asks before running, or reaches a "warn" group.
+    fn run_snippet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(data) = self.vault_data().cloned() else { return };
+        let snippet = self.edited_snippet(cx);
+        if snippet.command.is_empty() {
+            self.sn.problem = Some("Write the command to run.".into());
+            cx.notify();
+            return;
+        }
+        let hosts: Vec<HostId> = self.sn.targets.iter().copied().filter(|h| data.host(*h).is_some()).collect();
+        let Some(app) = self.app.upgrade() else { return };
+        let target = match hosts.as_slice() {
+            [] => match app.read(cx).active_session_name(cx) {
+                Some(name) => name.to_string(),
+                None => return,
+            },
+            [one] => data.host(*one).map(|h| h.display_name().to_string()).unwrap_or_default(),
+            many => format!("{} hosts", many.len()),
+        };
+        let warn = warn_text(&data, &hosts);
+        if !RunPrompt::needed(&snippet, warn.is_some()) {
+            let text = snippet.input(&Default::default());
+            self.dispatch_run(hosts, text, window, cx);
+            return;
+        }
+        let last = app.read(cx).snippet_values(snippet.id);
+        let run = snippet.clone();
+        let prompt = cx.new(|cx| RunPrompt::new(snippet, target, warn, &last, window, cx));
+        let sub = cx.subscribe_in(&prompt, window, move |this: &mut Self, _, event: &RunPromptEvent, window, cx| {
+            this.sn.prompt = None;
+            if let RunPromptEvent::Run(values) = event {
+                if let Some(app) = this.app.upgrade() {
+                    let values = values.clone();
+                    app.update(cx, |app, _| app.remember_snippet_values(run.id, values));
+                }
+                let text = run.input(values);
+                this.dispatch_run(hosts.clone(), text, window, cx);
+            }
+            cx.notify();
+        });
+        self.sn.prompt = Some((prompt, sub));
+        cx.notify();
+    }
+
+    /// Hand the filled command to the app: new panes on `hosts`, or the
+    /// active session. Deferred, since opening panes reads the vault here.
+    fn dispatch_run(&mut self, hosts: Vec<HostId>, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, cx| {
+                if hosts.is_empty() {
+                    app.run_in_active_session(text, window, cx)
+                } else {
+                    app.run_on_hosts(&hosts, text, window, cx)
+                }
+            });
+        });
     }
 
     fn snippet_delete_dialog(&self, data: &VaultData, cx: &mut Context<Self>) -> Option<AnyElement> {
