@@ -26,6 +26,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 unicode-segmentation = "1.13.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_RemoteDesktop", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_RemoteDesktop", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_Networking_WinHttp"] }
 # Windows Hello (hello.rs).
 windows = { version = "0.62", features = ["Foundation", "Security_Credentials", "Security_Cryptography", "Storage_Streams"] }
+
+[dev-dependencies]
+# Spike examples (milestone 7 phase 0).
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"

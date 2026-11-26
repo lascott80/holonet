@@ -2282,3 +2282,38 @@ Carried forward, not tested or not built:
 - **"Windows' OpenSSH agent is not running"** was not shown live: that needs the service stopped, which Holonet's work never does.
 - **The dynamic rule's port placeholder** still reads 8080, where 1080 would suit SOCKS better.
 - **A snippet run from the editor before it is saved** remembers its values under a new id each time, so they are not offered on the next run.
+
+## Milestone 7, phase 0: spikes (26 Nov 2026)
+
+**(a) A release build from CI, downloaded and run here.**
+
+- `.github/workflows/release.yml` builds `holonet.exe` for ARM64 and x64 and keeps them as workflow artifacts. For now it runs only when the file itself changes on `milestone-7`; phase 9 adds `v*` tags and the release.
+- A cold build took 18 minutes on `windows-11-arm` and 24 on `windows-latest`. The exe is 66 MB, most of it the bundled fonts.
+- The ARM64 exe, downloaded to a folder in Downloads, opened its window both as it was and with an internet mark added (`Zone.Identifier`, `ZoneId=3`, as a browser download carries). `--parse-bench` printed from it too.
+- **Smart App Control is now off on this PC.** Both `CI\Policy` in the registry and `Get-MpComputerStatus` say so; milestone 1 found it on. Windows cannot turn it back on without a reinstall, so it no longer stands in the way of unsigned builds here.
+- **Not checked:** a double-click from Explorer, where SmartScreen may still warn the first time, as `decisions.md` expects. Phase 9 checks that with the zip from a draft release.
+
+**(b) The update check.**
+
+- `examples/m7_update.rs` asks `api.github.com/repos/<repo>/releases/latest` through WinHTTP, Windows' own HTTP client, which follows the system proxy and certificates and needs no new crate (only the `Win32_Networking_WinHttp` feature of `windows-sys`).
+- Public repositories answered in about 150 ms with `tag_name` and `published_at`.
+- This repository answers 404 while it is private. A public repository with no releases also gives 404, so Holonet will read 404 as "no release yet", not as an error.
+- A host that cannot be resolved fails at once (WinHTTP error 12007). Each step has a 10-second timeout.
+- `releases/latest` never returns drafts or pre-releases, so a draft release cannot reach the notice.
+- GitHub allows 60 unauthenticated requests an hour per address, far more than a daily check needs.
+
+**(c) The log writer.**
+
+- `examples/m7_log.rs` strips escape sequences with `vte` (through `alacritty_terminal`), keeping printed text and line ends. `\r` and backspace overwrite within the line, so a redrawn progress bar is saved once, as its last state.
+- It then seals 64 KB chunks with XChaCha20-Poly1305: a length, a nonce, then the ciphertext, with the chunk number as associated data so chunks cannot be reordered.
+- 10 MB of coloured output became 7.4 MB of plain text in 102 chunks. Stripping took 31 ms and sealing and writing 13 ms, about 204 MB/s for the whole writer. Reading it back took 14 ms.
+- For comparison, `--stream-bench` moves output through the terminal to the screen at 86 MB/s. A writer on its own thread will not slow the terminal.
+- A file cut off 100 bytes short of its end read back 101 of its 102 chunks, dropping only the torn one.
+
+**(d) No console window.**
+
+- `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` makes release builds Windows apps: subsystem 2 in the PE header. Started from Explorer, the app has no console.
+- The hidden modes (`--gallery`, `--parse-bench` and the rest) call `AttachConsole(ATTACH_PARENT_PROCESS)` when they have no output handle. Their output reached both a pipe and a real console window.
+- Debug builds keep their console for logs.
+
+Cleanup: the downloaded exe and its folder, and the throwaway vault folder, were removed.

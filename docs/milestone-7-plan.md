@@ -155,7 +155,7 @@ Each phase ends with a commit and a check.
 
 | # | Phase | Exit check |
 | --- | --- | --- |
-| 0 | **Spikes:** (a) build a release exe in CI on `windows-11-arm`, download it here and run it under Smart App Control; (b) the update check against GitHub's releases API (a public repository's, since this one is private until the release); (c) the log writer at `--stream-bench` speed with encryption; (d) `windows_subsystem = "windows"` with the hidden modes still printing in a terminal | Notes record each result. (a) decides whether an unsigned download can be the way this PC gets Holonet |
+| 0 | **Spikes** *(done; a CI build runs here, Smart App Control is now off, WinHTTP reads releases, the log writer is faster than the terminal, and release builds have no console)*: (a) build a release exe in CI on `windows-11-arm`, download it here and run it under Smart App Control; (b) the update check against GitHub's releases API (a public repository's, since this one is private until the release); (c) the log writer at `--stream-bench` speed with encryption; (d) `windows_subsystem = "windows"` with the hidden modes still printing in a terminal | Notes record each result. (a) decides whether an unsigned download can be the way this PC gets Holonet |
 | 1 | **Model and vault:** records, host and settings fields, schema 4, the log files and their key, backup export | A milestone 6 vault opens; unit tests for log chunks, a torn last chunk, and clean-up by age |
 | 2 | **`holonet-import`:** config, `known_hosts` and Quick fill parsers | Unit tests cover `Include`, `Host *`, patterns, `ProxyJump` chains, hashed `known_hosts` and command lines |
 | 3 | **Logging and History:** the host form switch, the Settings default and kept time, the status bar item, the History page | A logged session shows its output, survives a reconnect and exports; a host with logging off shows "No log"; an SFTP tab leaves a record only |
@@ -191,7 +191,7 @@ The drawings show the populated pages. These are not drawn:
 
 ## Risks
 
-- **Smart App Control is On on this PC** (milestone 1 notes). It may block a downloaded, unsigned `holonet.exe`, which would undo the "unsigned GitHub releases" decision for this PC. Spike (a) settles it before anything else depends on it. If it is blocked, the choices are yours: run builds made on this PC, or change how Holonet is signed.
+- **Smart App Control** *(settled in phase 0)*: it is now off on this PC, and a downloaded build with an internet mark ran. SmartScreen may still warn once on a double-click from Explorer, which phase 9 checks.
 - **This repository is private** until the release (owner decision 1). Until then the update check can only be tested against a stand-in release feed, and spike (b) checks that path.
 - **OpenSSH config is wide.** Holonet reads the keywords it can act on and lists the rest instead of guessing.
 - **Logging cost.** Writing every byte of a busy shell must not slow the terminal. Spike (c) measures it; the writer batches on a background thread.
