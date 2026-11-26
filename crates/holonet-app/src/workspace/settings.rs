@@ -252,12 +252,12 @@ impl SettingsUi {
             cx.subscribe(&self.on_conflict, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
                 let choice = ON_CONFLICT[i.min(2)];
-                this.save(|d| d.settings.sftp.on_conflict = choice, cx);
+                this.set_sftp(|s| s.on_conflict = choice, cx);
             }),
             cx.subscribe(&self.at_once, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
                 let n = AT_ONCE[i.min(2)];
-                this.save(|d| d.settings.sftp.at_once = n, cx);
+                this.set_sftp(|s| s.at_once = n, cx);
             }),
             cx.subscribe(&self.lock_after, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -281,6 +281,17 @@ impl SettingsUi {
 impl Workspace {
     fn terminal_settings(&self) -> TerminalSettings {
         self.vault_data().map(|d| d.settings.terminal.clone()).unwrap_or_default()
+    }
+
+    /// Change and save SFTP settings; open SFTP tabs follow.
+    pub(super) fn set_sftp(&mut self, change: impl FnOnce(&mut holonet_model::SftpSettings), cx: &mut Context<Self>) {
+        self.save(|d| change(&mut d.settings.sftp), cx);
+        let Some(settings) = self.vault_data().map(|d| d.settings.sftp.clone()) else { return };
+        let app = self.app.clone();
+        // Deferred: the app may be the one updating this workspace right now.
+        cx.defer(move |cx| {
+            let _ = app.update(cx, |app, cx| app.apply_sftp_settings(&settings, cx));
+        });
     }
 
     /// Change and save terminal settings, then show them in the preview and in
@@ -773,7 +784,7 @@ impl Workspace {
                 show_hidden,
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.save(|d| d.settings.sftp.show_hidden = !d.settings.sftp.show_hidden, cx);
+                    this.set_sftp(|s| s.show_hidden = !s.show_hidden, cx);
                 }),
             ),
         ]))

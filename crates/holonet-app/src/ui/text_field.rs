@@ -86,6 +86,9 @@ pub struct TextField {
     mono: bool,
     password: bool,
     revealed: bool,
+    /// `control-compact` high, for pane headers (Sftp.dc.html's Filter).
+    compact: bool,
+    leading_icon: Option<&'static str>,
     problem: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -113,6 +116,8 @@ impl TextField {
             mono: false,
             password: false,
             revealed: false,
+            compact: false,
+            leading_icon: None,
             problem: false,
             selected_range: 0..0,
             selection_reversed: false,
@@ -122,6 +127,18 @@ impl TextField {
             scroll_x: px(0.),
             is_selecting: false,
         }
+    }
+
+    /// `control-compact` high, as the SFTP panes' Filter box.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// An icon before the text ("search" for filter boxes).
+    pub fn leading_icon(mut self, name: &'static str) -> Self {
+        self.leading_icon = Some(name);
+        self
     }
 
     /// Mono family, for addresses, ports, paths and commands (Field.md).
@@ -691,10 +708,10 @@ impl Render for TextField {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .h(theme::CONTROL)
+            .h(if self.compact { theme::CONTROL_COMPACT } else { theme::CONTROL })
             .w_full()
             .min_w(px(80.))
-            .pl(theme::SPACE_3)
+            .pl(if self.compact { px(10.) } else { theme::SPACE_3 })
             .pr(if self.password { theme::SPACE_1 } else { theme::SPACE_3 })
             .flex()
             .items_center()
@@ -706,6 +723,7 @@ impl Render for TextField {
             .when(self.mono, |d| d.text_mono())
             .when(!self.mono, |d| d.text_body())
             .text_color(theme::ink())
+            .when_some(self.leading_icon, |d, name| d.child(crate::ui::icon(name, px(16.), theme::ink_muted())))
             .child(div().flex().flex_1().min_w_0().overflow_hidden().child(TextElement { field: cx.entity() }))
             .when(self.password, |d| {
                 d.child(

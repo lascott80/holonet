@@ -1566,3 +1566,67 @@ An SFTP tab is a tab with one pane in Files mode. It reuses the terminal pane's 
 - **The reconnecting state was too brief to capture** here; it is the milestone 3 view with the files view under it.
 
 fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 5: file panes (25 Nov 2026)
+
+`files_view.rs` now draws Sftp.dc.html's two panes and a first transfers strip.
+
+**Each side:**
+- **Places:**
+  - "This PC" lists the drives; opening one goes to its root.
+  - A folder on this PC, or a folder on the host.
+- **Header and navigation:**
+  - The header has the title and a Filter box. `TextField` gained `compact()` (36 px) and `leading_icon()` for it.
+  - Back, Up and Refresh. Refresh is in phase 7's list, but costs nothing here.
+  - Breadcrumbs. A long path keeps the first crumb and the last three; "…" opens the folder before those.
+  - The Bookmarks button drawn there has no milestone yet, so it is left out.
+- **Columns:** Name, Size, Modified ("24 Nov 2026 16:02" here, "24 Nov 2026" on the host), and Permissions on the host. Folders come first.
+- **The list:** a `uniform_list`, so only visible rows are drawn. Listings load off the UI thread: this PC through `spawn_blocking`, the host through SFTP. An older answer is dropped when a newer load has started.
+- **States:**
+  - Loading.
+  - The server's message in amber ("Permission denied.").
+  - "This folder is empty."
+  - "Nothing here matches "…"".
+  - A folder of only hidden files says so and points at Settings.
+- **Hidden files:** Settings' switch applies to both sides, including open tabs: `HolonetApp::apply_sftp_settings` reaches each pane, as terminal settings already do. Transfers at once applies the same way.
+- **Links:** a link to a folder opens like a folder (violet folder icon). Other links show the link icon.
+- **The local folder** is saved on the host (`sftp_local_folder`) when it changes, so the next SFTP tab for that host starts there. Checked across app restarts.
+
+**Selection:**
+- A click toggles a row, Shift click adds the range from the last click, and the header box selects or clears every shown row. A filter drops selected rows it hides.
+- The action bar shows the count, then Upload → or ← Download to the other side's current folder, Copy path (one path per line), and Clear.
+- Rename, Permissions and Delete come in phase 7, so they are not shown yet.
+- **Double click opens the row the first click hit.** The first click selects the row, the action bar appears, and the rows move down by its height. Using the row now under the pointer, a test double click on `holonet-p5` opened `.ssh`, the row above. The pane's mouse-down handler now opens the remembered row instead.
+
+**Drag:**
+- A row drags the selection when it is part of it, otherwise itself. The chip under the pointer shows the name or "n items".
+- **Drop targets:**
+  - Dropping on the other pane uses its current folder.
+  - Dropping on a folder row uses that folder; the row highlights.
+  - The host's pane also takes `ExternalPaths` from Explorer.
+- A target outlines in dashed accent, and "Drop to upload into /…" floats over the bottom of the pane. The first version put that banner above the list, which moved the rows mid-drag, so a drop meant for a folder row landed on the pane.
+- **Transfers:** plan (`plan_upload` or `plan_download`), apply Settings' conflict choice, create folders, queue on the tab's `Engine`.
+  - Until phase 6's conflict popup, "Ask" skips names that already exist.
+  - Skipped items and failures show in the transfers strip ("Skipped 2 items, such as link-to-folder: Links to folders are not copied.").
+  - Both panes refresh 0.4 s after transfers finish.
+- **The transfers strip** shows "Transfers", the engine's summary, or the drawn empty text. Phase 6 adds the rows and their controls.
+
+**Reconnecting:** an SFTP tab's reconnect footnote now reads "Both folders are kept. Transfers continue after reconnecting." The host side keeps its listing, and Refresh and drops are disabled until the connection is back.
+
+**Check (WSL server, release build, throwaway folders `%LOCALAPPDATA%\Temp\holonet-p5` and `~/holonet-p5`, both removed afterwards):**
+
+| Test | Result |
+| --- | --- |
+| Browse with the filter and double clicks to the test folder, with hidden files switched on in Settings while the tab was open | Both sides followed the switch; AppData, then Local, Temp and the folder opened |
+| Restart the app and open SFTP again | This PC started in the test folder |
+| Drag a folder (with a subfolder) and a file to the host's pane | Banner and outline shown; `site/`, `site/css/a.css`, `site/index.html` and `deploy.sh` arrived; the host's list refreshed |
+| Drag a host file onto the local `site` folder row | Landed in `site\notes.txt` |
+| A name that exists, with Settings on Keep both | `notes (1).txt` on the host |
+| ← Download of six items: an empty folder, a folder link, a broken link, a folder and two files that exist here | `existing\` (empty), `site (1)\` with its contents, `deploy (1).sh` and `notes (1).txt`; "Skipped 2 items, such as link-to-folder: …" |
+| Open `link-to-folder` on the host, then Back | Entered the link's folder, then returned |
+| Shift click from the first row to the last, then Copy path | Six rows selected, the header box checked, and the clipboard held the six host paths |
+| "This PC" crumb | Local Disk (C:) listed; Up disabled |
+| Kill the connection's server processes | Reconnecting banner over both panes with their folders kept; reconnected in about a second |
+| A file dragged from another app (a WinForms `DoDragDrop` with a file list, Explorer's format) onto the host's pane | Dashed outline while over it; the file arrived on the host |
+
+fmt, clippy and all workspace tests pass.

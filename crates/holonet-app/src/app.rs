@@ -265,6 +265,14 @@ impl HolonetApp {
         }
     }
 
+    /// SFTP settings changed in Settings: every SFTP tab follows.
+    pub fn apply_sftp_settings(&mut self, settings: &holonet_model::SftpSettings, cx: &mut Context<Self>) {
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
+        for pane in panes {
+            pane.update(cx, |p, cx| p.set_sftp_settings(settings, cx));
+        }
+    }
+
     /// Settings, Connection, "Reconnect after sleep or network change".
     /// While locked the vault cannot be read; reconnecting stays on.
     pub fn reconnect_enabled(&self, cx: &App) -> bool {
@@ -326,6 +334,7 @@ impl HolonetApp {
             keep_alive: data.settings.connection.keep_alive_for(&host),
             terminal: data.settings.terminal.clone(),
             fallback_wait: data.settings.connection.fallback_wait.duration(),
+            sftp: data.settings.sftp.clone(),
         };
         let jumps = crate::hops::jumps(data, &host);
         let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, opening, window, cx));
@@ -373,6 +382,7 @@ impl HolonetApp {
                 keep_alive: data.settings.connection.keep_alive_for(&host),
                 terminal: data.settings.terminal.clone(),
                 fallback_wait: data.settings.connection.fallback_wait.duration(),
+                sftp: data.settings.sftp.clone(),
             };
             pane.update(cx, |p, cx| p.retry_with(host, key, jumps, limits, cx));
             self.select(Some(index), window, cx);

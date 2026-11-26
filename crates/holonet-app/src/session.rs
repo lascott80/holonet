@@ -360,6 +360,8 @@ pub struct Limits {
     pub terminal: holonet_model::TerminalSettings,
     /// How long Automatic waits on the primary address (Settings, Connection).
     pub fallback_wait: Duration,
+    /// Settings, SFTP (Files mode).
+    pub sftp: holonet_model::SftpSettings,
 }
 
 impl Pane {
@@ -367,6 +369,14 @@ impl Pane {
     pub fn set_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
         self.limits.terminal = settings.clone();
         self.terminal.update(cx, |t, cx| t.set_settings(settings.clone(), cx));
+    }
+
+    /// Settings, SFTP changed: the files view follows.
+    pub fn set_sftp_settings(&mut self, settings: &holonet_model::SftpSettings, cx: &mut Context<Self>) {
+        self.limits.sftp = settings.clone();
+        if let Some(files) = self.files.clone() {
+            files.update(cx, |f, cx| f.set_settings(settings.clone(), cx));
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // GPUI context plus the connection's inputs
@@ -1163,7 +1173,8 @@ impl Pane {
                             Some(files) => files,
                             None => {
                                 let (host, runtime) = (self.host.clone(), self.runtime.clone());
-                                let files = cx.new(|cx| FilesView::new(&host, runtime, cx));
+                                let (app, settings) = (self.app.clone(), self.limits.sftp.clone());
+                                let files = cx.new(|cx| FilesView::new(&host, runtime, app, settings, cx));
                                 self.files = Some(files.clone());
                                 files
                             }
@@ -1611,7 +1622,11 @@ impl Pane {
                     .py(theme::SPACE_2)
                     .text_meta()
                     .text_color(theme::ink_muted())
-                    .child("Scrollback is kept. The shell session itself restarts after reconnecting."),
+                    .child(if self.mode == PaneMode::Files {
+                        "Both folders are kept. Transfers continue after reconnecting."
+                    } else {
+                        "Scrollback is kept. The shell session itself restarts after reconnecting."
+                    }),
             )
             .into_any_element()
     }
