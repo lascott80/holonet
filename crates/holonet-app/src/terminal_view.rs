@@ -75,6 +75,8 @@ pub struct TerminalView {
     sent_size: Option<GridSize>,
     /// When the last keystroke was sent, until the first output after it.
     echo_pending: Option<Instant>,
+    /// The session log, while History saves this terminal's output.
+    log_tap: Option<crate::history::LogTap>,
     last_echo_ms: Option<f64>,
     selecting: bool,
     dragged: bool,
@@ -227,6 +229,7 @@ impl TerminalView {
             input: None,
             sent_size: None,
             echo_pending: None,
+            log_tap: None,
             last_echo_ms: None,
             selecting: false,
             dragged: false,
@@ -405,6 +408,11 @@ impl TerminalView {
 
     /// Show an open shell: its output is parsed here and keystrokes go to it.
     /// The caller keeps the `Session` alive.
+    /// Send shell output to a session log too, or stop.
+    pub fn set_log(&mut self, tap: Option<crate::history::LogTap>) {
+        self.log_tap = tap;
+    }
+
     pub fn attach(&mut self, shell: holonet_ssh::Shell, cx: &mut Context<Self>) {
         let holonet_ssh::Shell { input, mut events } = shell;
         self.input = Some(input);
@@ -442,6 +450,9 @@ impl TerminalView {
                 ShellEvent::Output(bytes) => {
                     if let Some(sent) = self.echo_pending.take() {
                         self.last_echo_ms = Some(sent.elapsed().as_secs_f64() * 1e3);
+                    }
+                    if let Some(tap) = &self.log_tap {
+                        tap.output(&bytes);
                     }
                     self.model.advance(&bytes);
                     self.blink_reset = Instant::now();

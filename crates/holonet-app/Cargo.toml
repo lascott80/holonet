@@ -31,6 +31,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 windows = { version = "0.62", features = ["Foundation", "Security_Credentials", "Security_Cryptography", "Storage_Streams"] }
 
 [dev-dependencies]
-# Spike examples (milestone 7 phase 0).
-chacha20poly1305 = "0.11.0"
-getrandom = "0.4.3"
+tempfile = "3.27.0"

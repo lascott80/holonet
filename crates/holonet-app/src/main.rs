@@ -25,6 +25,7 @@ mod font_check;
 mod forwards;
 mod gallery;
 mod hello;
+mod history;
 mod hops;
 mod host_form;
 mod host_picker;

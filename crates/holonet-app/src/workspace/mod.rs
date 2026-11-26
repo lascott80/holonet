@@ -3,6 +3,7 @@
 
 mod forwarding;
 mod groups;
+mod history;
 mod hosts;
 mod keychain;
 mod known_hosts;
@@ -48,12 +49,13 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 6] = [
+const PAGES: [NavEntry; 7] = [
     NavEntry::Hosts,
     NavEntry::Keychain,
     NavEntry::PortForwarding,
     NavEntry::Snippets,
     NavEntry::KnownHosts,
+    NavEntry::History,
     NavEntry::Settings,
 ];
 
@@ -65,6 +67,7 @@ pub(crate) enum Page {
     Form(Entity<HostForm>),
     Keychain,
     KnownHosts,
+    History,
     Settings,
 }
 
@@ -100,6 +103,7 @@ pub struct Workspace {
     forwarder: Entity<crate::forwards::Forwarder>,
     fw: forwarding::ForwardingUi,
     sn: snippets::SnippetsUi,
+    hist: history::HistoryUi,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -145,6 +149,13 @@ impl Workspace {
         let fw_subs = fw.subscribe(&forwarder, cx);
         let sn = snippets::SnippetsUi::new(cx);
         let sn_subs = sn.subscribe(cx);
+        let hist = history::HistoryUi::new(cx);
+        let hist_sub = cx.subscribe(&hist.search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+            TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+            _ => cx.notify(),
+        });
+        let mut subscriptions = subscriptions;
+        subscriptions.push(hist_sub);
         Self {
             app,
             vault: Some(vault),
@@ -159,6 +170,7 @@ impl Workspace {
             forwarder,
             fw,
             sn,
+            hist,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -428,6 +440,7 @@ impl Render for Workspace {
             Page::Keychain => NavEntry::Keychain,
             Page::Forwarding => NavEntry::PortForwarding,
             Page::Snippets => NavEntry::Snippets,
+            Page::History => NavEntry::History,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -439,6 +452,7 @@ impl Render for Workspace {
             Page::Snippets => self.snippets_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
             Page::Keychain => self.keychain_page(cx),
+            Page::History => self.history_page(window, cx),
         };
         let app = self.app.clone();
         let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
@@ -455,6 +469,10 @@ impl Render for Workspace {
                             entity.update(cx, |this, cx| {
                                 if entry == NavEntry::Snippets {
                                     this.open_snippets(None, cx);
+                                    return;
+                                }
+                                if entry == NavEntry::History {
+                                    this.open_history(cx);
                                     return;
                                 }
                                 this.page = match entry {

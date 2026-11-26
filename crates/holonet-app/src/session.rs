@@ -353,6 +353,11 @@ pub struct Pane {
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
+    /// This session's History record, from its first connection until it
+    /// ends (closed, the shell exits, or reconnecting gives up).
+    record: Option<holonet_model::RecordId>,
+    /// Its saved output, when the host logs.
+    history_log: Option<crate::history::SessionLog>,
     /// Held while no field or terminal in the pane can take focus
     /// (connecting, a card, a failure), so app shortcuts such as Ctrl Shift
     /// T still dispatch from inside the pane.
@@ -415,6 +420,14 @@ impl Pane {
                 TerminalEvent::Ended(reason) => {
                     this.state = State::Ended(reason.clone().into());
                     this.session = None;
+                    // Typing exit ends it as closed by you; a channel the
+                    // server closed counts as dropped.
+                    let end = if reason.starts_with("The shell exited") {
+                        holonet_model::SessionEnd::ClosedByYou
+                    } else {
+                        holonet_model::SessionEnd::Dropped
+                    };
+                    this.end_record(end, cx);
                 }
                 TerminalEvent::Lost(reason) => this.on_lost(reason.clone(), cx),
                 // The tab listens for these itself (broadcast).
@@ -456,6 +469,8 @@ impl Pane {
             info: SessionInfo::default(),
             attempt: 0,
             focus_pending: false,
+            record: None,
+            history_log: None,
             focus_handle: cx.focus_handle(),
             active: true,
             alone: true,
@@ -712,6 +727,7 @@ impl Pane {
         let enabled = self.app.upgrade().map(|app| app.read(cx).reconnect_enabled(cx)).unwrap_or(true);
         if !enabled {
             self.state = State::Ended(reason.to_string().into());
+            self.end_record(holonet_model::SessionEnd::Dropped, cx);
             return;
         }
         // A drop is noticed up to three missed keep-alives after it happens
@@ -746,6 +762,7 @@ impl Pane {
             let last = r.last_error.clone().unwrap_or_else(|| r.cause.clone());
             self.reconnect = None;
             self.reconnect_task = None;
+            self.end_record(holonet_model::SessionEnd::Dropped, cx);
             self.fail(
                 Failure::GaveUp,
                 format!("Holonet could not reconnect to {}", self.host.display_name()),
@@ -820,6 +837,33 @@ impl Pane {
         self.state = State::Connecting;
         self.schedule_reconnect(cx);
         true
+    }
+
+    /// History's Route column: the jump hosts, else the address used.
+    fn route_label(&self) -> String {
+        if !self.jumps.is_empty() {
+            return self.jumps.iter().map(|j| j.name()).collect::<Vec<_>>().join(", ");
+        }
+        match self.via {
+            Some(Via::Tailscale) => "Tailscale".into(),
+            _ => "Primary".into(),
+        }
+    }
+
+    /// The session is over: end its record and seal its log. Deferred, as
+    /// this can run while the app is mid-update (closing a tab).
+    fn end_record(&mut self, end: holonet_model::SessionEnd, cx: &mut Context<Self>) {
+        let Some(id) = self.record.take() else { return };
+        let log = self.history_log.take();
+        if log.is_some() {
+            self.terminal.update(cx, |t, _| t.set_log(None));
+        }
+        let app = self.app.clone();
+        cx.defer(move |cx| {
+            if let Some(app) = app.upgrade() {
+                app.update(cx, |app, cx| app.end_record(id, end, log, cx));
+            }
+        });
     }
 
     /// Whether the pane stopped without a working session (failed or ended).
@@ -1283,6 +1327,9 @@ impl Pane {
                         "\r\n\x1b[2m-- Reconnected at {time}. The shell restarted; the output above is from the previous session. --\x1b[0m\r\n"
                     );
                     self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
+                    if let Some(log) = &self.history_log {
+                        log.note(format!("-- Reconnected at {time}. The shell restarted. --"));
+                    }
                 }
                 self.info = session.info().clone();
                 self.note(
@@ -1347,7 +1394,24 @@ impl Pane {
                 let typed: Vec<(holonet_model::HostId, (bool, Secret))> = (0..self.signs.len())
                     .filter_map(|hop| self.signs[hop].remembered.clone().map(|r| (self.hop_host(hop).id, r)))
                     .collect();
+                // The first connection of a session opens its History record.
+                let new_record = self.record.is_none().then(|| {
+                    let kind = match self.mode {
+                        PaneMode::Files => holonet_model::SessionKind::Sftp,
+                        PaneMode::Terminal => holonet_model::SessionKind::Terminal,
+                    };
+                    (self.host.clone(), kind, self.route_label(), self.host.username.clone())
+                });
                 if let Some(app) = self.app.upgrade() {
+                    if let Some((host, kind, route, user)) = new_record {
+                        let (id, log) = app.update(cx, |app, cx| app.start_record(&host, kind, route, user, cx));
+                        self.record = Some(id);
+                        if let Some(log) = &log {
+                            let tap = log.tap();
+                            self.terminal.update(cx, |t, _| t.set_log(Some(tap)));
+                        }
+                        self.history_log = log;
+                    }
                     app.update(cx, |app, cx| {
                         // Rules set to start with this host start now.
                         app.host_connected(id, typed, cx);
@@ -1378,6 +1442,7 @@ impl Pane {
                 if matches!(self.state, State::KeyChanged { .. } | State::Failed { .. }) {
                     self.reconnect = None;
                     self.reconnect_task = None;
+                    self.end_record(holonet_model::SessionEnd::Dropped, cx);
                     cx.notify();
                     return;
                 }
@@ -1385,6 +1450,9 @@ impl Pane {
                     cx.notify();
                     return;
                 }
+                // A reconnect that cannot go on (a refused sign-in) ends the
+                // session that dropped.
+                self.end_record(holonet_model::SessionEnd::Dropped, cx);
                 // Which hop failed: each jump host wraps the error once.
                 let (e, wrappers) = e.innermost();
                 let hop = self.jumps.len().saturating_sub(wrappers.len());
@@ -1595,7 +1663,8 @@ impl Pane {
     }
 
     /// Close the connection (on tab close).
-    pub fn disconnect(&mut self) {
+    pub fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.end_record(holonet_model::SessionEnd::ClosedByYou, cx);
         if let Some(watch) = self.lost_watch.take() {
             watch.abort();
         }
@@ -2189,6 +2258,9 @@ impl Pane {
         if !self.jumps.is_empty() && matches!(self.state, State::Connected) {
             let names: Vec<&str> = self.jumps.iter().map(|j| j.name()).collect();
             items.push(format!("Through {}", names.join(", ")).into());
+        }
+        if self.history_log.is_some() {
+            items.push("Logging to History".into());
         }
         if matches!(self.state, State::Connected) && self.mode == PaneMode::Terminal {
             if !matches!(self.info.compression.as_str(), "" | "none") {

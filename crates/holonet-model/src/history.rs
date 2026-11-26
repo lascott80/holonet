@@ -80,6 +80,9 @@ pub struct SessionRecord {
     /// Size of the saved output, in bytes of plain text.
     #[serde(default)]
     pub log_bytes: u64,
+    /// The saved output was deleted from History; the record stays.
+    #[serde(default)]
+    pub log_deleted: bool,
 }
 
 impl SessionRecord {
@@ -97,16 +100,17 @@ impl SessionRecord {
             // SFTP sessions are never logged (`decisions.md`).
             logged: logged && kind == SessionKind::Terminal,
             log_bytes: 0,
+            log_deleted: false,
         }
     }
 
-    /// History's Length column: "38 min", "1 h 12 min", "Under a minute".
+    /// History's Length column: "38 min", "1 h 12 min", "< 1 min".
     /// An open session counts up to `now`.
     pub fn length(&self, now: Timestamp) -> String {
         let secs = (self.ended.unwrap_or(now).0 - self.started.0).max(0);
         let mins = secs / 60;
         match mins {
-            0 => "Under a minute".into(),
+            0 => "< 1 min".into(),
             1..=59 => format!("{mins} min"),
             _ if mins % 60 == 0 => format!("{} h", mins / 60),
             _ => format!("{} h {} min", mins / 60, mins % 60),
@@ -115,6 +119,9 @@ impl SessionRecord {
 
     /// History's Log column: "84 KB", "No log".
     pub fn log_size(&self) -> String {
+        if self.log_deleted {
+            return "Deleted".into();
+        }
         if !self.logged {
             return "No log".into();
         }
@@ -176,7 +183,7 @@ mod tests {
         assert_eq!(at(0, Some(38 * 60 + 20)).length(Timestamp(0)), "38 min");
         assert_eq!(at(0, Some(72 * 60)).length(Timestamp(0)), "1 h 12 min");
         assert_eq!(at(0, Some(120 * 60)).length(Timestamp(0)), "2 h");
-        assert_eq!(at(0, Some(30)).length(Timestamp(0)), "Under a minute");
+        assert_eq!(at(0, Some(30)).length(Timestamp(0)), "< 1 min");
         // Open: counts up to now.
         assert_eq!(at(0, None).length(Timestamp(9 * 60)), "9 min");
         let mut r = at(0, None);
@@ -188,6 +195,8 @@ mod tests {
         assert_eq!(r.log_size(), "2.5 MB");
         r.logged = false;
         assert_eq!(r.log_size(), "No log");
+        r.log_deleted = true;
+        assert_eq!(r.log_size(), "Deleted");
     }
 
     #[test]

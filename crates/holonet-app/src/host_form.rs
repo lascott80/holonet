@@ -3,7 +3,8 @@
 //! password, keep-alive. Milestone 4 adds identities, the Tailscale address
 //! and route, and the jump host. Milestone 5 adds the SFTP folder. Milestone
 //! 6 adds the group: route, jump host and sign-in can follow the group's
-//! defaults, shown "from group" until changed. Logging comes in milestone 7.
+//! defaults, shown "from group" until changed, and "Save terminal output to
+//! History", which follows Settings until changed.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,6 +84,10 @@ pub struct HostForm {
     /// Connection: "Agent forwarding" and "Compression".
     agent_forwarding: bool,
     compression: bool,
+    /// "Save terminal output to History": the host's own choice, or `None`
+    /// to follow Settings (`log_default`).
+    log_output: Option<bool>,
+    log_default: bool,
     /// "Jump host": None, then these saved hosts (by name).
     jump_options: Vec<(HostId, String)>,
     jump_select: Entity<Select>,
@@ -335,6 +340,8 @@ impl HostForm {
             keep_alive: h.keep_alive,
             agent_forwarding: h.agent_forwarding,
             compression: h.compression,
+            log_output: h.log_output,
+            log_default: data.settings.connection.log_default,
             jump_options,
             jump_select,
             all_hosts: data.hosts.clone(),
@@ -505,6 +512,7 @@ impl HostForm {
         host.keep_alive = self.keep_alive;
         host.agent_forwarding = self.agent_forwarding;
         host.compression = self.compression;
+        host.log_output = self.log_output;
         let folder = self.text(&self.sftp_folder, cx);
         host.sftp_folder = (!folder.is_empty()).then_some(folder);
         host.jump_host = self.own_jump;
@@ -886,6 +894,17 @@ impl Render for HostForm {
             .child(field("Tags", self.tags.clone(), None));
 
         let entity = cx.entity();
+        // Settings.dc.html's warning, shown while this host logs.
+        let logging = self.log_output.unwrap_or(self.log_default);
+        let log_note = format!(
+            "{}{}",
+            if self.log_output.is_none() { "From Settings. " } else { "" },
+            if logging {
+                "Logs can contain anything typed or printed, including secrets. They are encrypted with the vault."
+            } else {
+                "Output is not saved. SFTP sessions are never logged."
+            }
+        );
         // NewHost.dc.html: SSH key, Password, SSH agent; then Identity once
         // the vault has one. Each option carries its `auth` code.
         let mut auth_codes = vec![0, 1, AUTH_AGENT];
@@ -1108,7 +1127,8 @@ impl Render for HostForm {
                         None,
                     ))),
             )
-            // NewHost.dc.html: Agent forwarding, Keep connection alive, Compression in a row.
+            // NewHost.dc.html: Agent forwarding, Keep connection alive,
+            // Compression and Save terminal output to History in a row.
             .child(
                 div()
                     .flex()
@@ -1141,7 +1161,37 @@ impl Render for HostForm {
                                 cx.notify()
                             })
                         }
-                    })),
+                    }))
+                    .child(
+                        Checkbox::new("log-output", "Save terminal output to History", logging).on_toggle({
+                            let entity = entity.clone();
+                            move |v, _, cx| {
+                                entity.update(cx, |f, cx| {
+                                    f.log_output = Some(v);
+                                    cx.notify()
+                                })
+                            }
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::SPACE_3)
+                    .child(crate::ui::field_help(log_note, logging))
+                    .when(self.log_output.is_some(), |d| {
+                        d.child(Button::quiet("log-default", "Use the Settings default").compact().on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |f, cx| {
+                                    f.log_output = None;
+                                    cx.notify()
+                                })
+                            }
+                        }))
+                    }),
             )
             .when(self.agent_forwarding, |d| {
                 d.child(crate::ui::field_help(

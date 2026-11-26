@@ -80,6 +80,8 @@ pub(crate) struct SettingsUi {
     scrollback: Entity<Select>,
     keep_alive: Entity<Select>,
     fallback_wait: Entity<Select>,
+    /// "Keep logs for": 7, 30 or 90 days, or forever.
+    log_keep: Entity<Select>,
     on_conflict: Entity<Select>,
     at_once: Entity<Select>,
     /// "Lock vault after": 15 minutes, 1 hour, Never.
@@ -127,6 +129,13 @@ const FALLBACK_WAITS: [holonet_model::FallbackWait; 4] = [
     holonet_model::FallbackWait::Secs3,
     holonet_model::FallbackWait::Secs5,
     holonet_model::FallbackWait::Secs10,
+];
+
+const LOG_KEEP: [holonet_model::LogKeep; 4] = [
+    holonet_model::LogKeep::Days7,
+    holonet_model::LogKeep::Days30,
+    holonet_model::LogKeep::Days90,
+    holonet_model::LogKeep::Forever,
 ];
 
 fn keep_alive_index(k: KeepAlive) -> usize {
@@ -178,6 +187,13 @@ impl SettingsUi {
                 FALLBACK_WAITS.iter().position(|w| *w == settings.connection.fallback_wait).unwrap_or(1),
             )
         });
+        let log_keep = cx.new(|cx| {
+            Select::new(
+                cx,
+                LOG_KEEP.iter().map(|k| k.label().into()).collect(),
+                LOG_KEEP.iter().position(|k| *k == settings.connection.log_keep).unwrap_or(1),
+            )
+        });
         let lock_after = cx.new(|cx| {
             Select::new(
                 cx,
@@ -211,6 +227,7 @@ impl SettingsUi {
         Self {
             unknown_keys,
             fallback_wait,
+            log_keep,
             lock_after,
             on_conflict,
             at_once,
@@ -268,6 +285,11 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let w = FALLBACK_WAITS[i.min(3)];
                 this.save(|d| d.settings.connection.fallback_wait = w, cx);
+            }),
+            cx.subscribe(&self.log_keep, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let keep = LOG_KEEP[i.min(LOG_KEEP.len() - 1)];
+                this.save(|d| d.settings.connection.log_keep = keep, cx);
             }),
             cx.subscribe(&self.keep_alive, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -758,6 +780,30 @@ impl Workspace {
                     cx.notify();
                 }),
             ),
+            // Settings.dc.html's wording; the help is amber while it is on.
+            check_row_with(
+                "log-default",
+                "Save terminal output to History",
+                Some(
+                    "Off by default. Logs can contain anything typed or printed, including secrets. You can turn it on for single hosts instead."
+                        .into(),
+                ),
+                connection.log_default,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| d.settings.connection.log_default = !d.settings.connection.log_default, cx);
+                    cx.notify();
+                }),
+            ),
+            setting_row(
+                "Keep logs for",
+                Some(
+                    "History removes sessions, and their saved output, this long after they end. Checked when Holonet starts."
+                        .into(),
+                ),
+                div().w(px(200.)).child(self.settings_ui.log_keep.clone()),
+            )
+            .into_any_element(),
         ]))
     }
 

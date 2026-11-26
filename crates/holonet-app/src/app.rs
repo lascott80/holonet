@@ -102,7 +102,18 @@ pub struct HolonetApp {
     snippet_values: std::collections::HashMap<holonet_model::SnippetId, std::collections::HashMap<String, String>>,
     /// The session tab last shown, for "Run in active session".
     last_session: Option<gpui::WeakEntity<Tab>>,
+    /// The vault's session logs. Kept while locked, so open sessions keep
+    /// logging (decisions.md: sessions stay connected while locked).
+    logs: Option<holonet_vault::LogStore>,
+    /// History changes made while the vault was locked, saved at unlock.
+    pending_history: Vec<VaultChange>,
+    /// Records a crash left open and records past their kept time are
+    /// cleaned up once, at the first unlock.
+    history_cleaned: bool,
 }
+
+/// A change to the vault waiting to be saved.
+type VaultChange = Box<dyn FnOnce(&mut VaultData)>;
 
 /// How often the idle time is checked.
 const IDLE_CHECK: Duration = Duration::from_secs(10);
@@ -157,6 +168,9 @@ impl HolonetApp {
             last_input: Rc::new(Cell::new(Instant::now())),
             snippet_values: Default::default(),
             last_session: None,
+            logs: None,
+            pending_history: Vec::new(),
+            history_cleaned: false,
         }
     }
 
@@ -165,9 +179,111 @@ impl HolonetApp {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
         let forwarder = self.forwarder.clone();
-        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx)));
+        let logs = vault.logs();
+        self.logs = Some(logs.clone());
+        let workspace = cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx));
+        // History from before this unlock: changes made while locked, then
+        // (once per start) the clean-up.
+        let pending = std::mem::take(&mut self.pending_history);
+        let clean = !std::mem::replace(&mut self.history_cleaned, true);
+        workspace.update(cx, |w, cx| {
+            for change in pending {
+                w.save(change, cx);
+            }
+            if clean {
+                w.save(move |d| clean_history(d, &logs), cx);
+            }
+        });
+        self.stage = Stage::Open(workspace);
         self.last_input.set(Instant::now());
         cx.notify();
+    }
+
+    /// Change History: saved now, or at the next unlock while locked.
+    pub fn history_change(&mut self, change: impl FnOnce(&mut VaultData) + 'static, cx: &mut Context<Self>) {
+        match self.workspace().cloned() {
+            Some(w) => w.update(cx, |w, cx| w.save(change, cx)),
+            None => self.pending_history.push(Box::new(change)),
+        }
+    }
+
+    /// A session connected for the first time: its History record, and its
+    /// log when the host saves output. `host` is the pane's resolved copy.
+    pub fn start_record(
+        &mut self,
+        host: &holonet_model::Host,
+        kind: holonet_model::SessionKind,
+        route: String,
+        user: String,
+        cx: &mut Context<Self>,
+    ) -> (holonet_model::RecordId, Option<crate::history::SessionLog>) {
+        // While locked the Settings default cannot be read: only a host's
+        // own switch turns logging on.
+        let wanted = match self.vault_data(cx) {
+            Some(d) => d.host(host.id).map(|h| d.logs_output(h)).unwrap_or_else(|| d.logs_output(host)),
+            None => host.log_output.unwrap_or(false),
+        };
+        let mut record = holonet_model::SessionRecord::new(Some(host.id), host.display_name(), kind, wanted);
+        record.route = route;
+        record.user = user;
+        let log = if record.logged {
+            match self.logs.as_ref().map(|l| l.create(record.id)) {
+                Some(Ok(writer)) => Some(crate::history::SessionLog::start(writer)),
+                _ => {
+                    record.logged = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let id = record.id;
+        self.history_change(move |d| d.history.push(record), cx);
+        (id, log)
+    }
+
+    /// A session ended: its record's end, then its log's final size once
+    /// the log thread has sealed the rest.
+    pub fn end_record(
+        &mut self,
+        id: holonet_model::RecordId,
+        end: holonet_model::SessionEnd,
+        log: Option<crate::history::SessionLog>,
+        cx: &mut Context<Self>,
+    ) {
+        let bytes = log.as_ref().map(|l| l.bytes());
+        self.history_change(
+            move |d| {
+                if let Some(r) = d.record_mut(id) {
+                    r.ended = Some(Timestamp::now());
+                    r.end = Some(end);
+                    if let Some(b) = bytes {
+                        r.log_bytes = b;
+                    }
+                }
+            },
+            cx,
+        );
+        let Some(log) = log else { return };
+        let handle = log.finish();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { handle.join() }).await;
+            let bytes = match result {
+                Ok(Ok(bytes)) => bytes,
+                _ => return,
+            };
+            let _ = this.update(cx, |app, cx| {
+                app.history_change(
+                    move |d| {
+                        if let Some(r) = d.record_mut(id) {
+                            r.log_bytes = bytes;
+                        }
+                    },
+                    cx,
+                )
+            });
+        })
+        .detach();
     }
 
     /// "Lock now".
@@ -633,7 +749,7 @@ impl HolonetApp {
         }
         pane.update(cx, |p, cx| {
             p.stop_transfers(cx);
-            p.disconnect()
+            p.disconnect(cx)
         });
         let tab = self.tabs[index].clone();
         if tab.update(cx, |t, cx| t.remove(pane, window, cx)) {
@@ -662,7 +778,7 @@ impl HolonetApp {
         for pane in tab.read(cx).panes() {
             pane.update(cx, |p, cx| {
                 p.stop_transfers(cx);
-                p.disconnect()
+                p.disconnect(cx)
             });
         }
         let next = match self.active {
@@ -986,4 +1102,21 @@ impl Render for HolonetApp {
             .children(picker)
             .children(closing)
     }
+}
+
+/// Once per start: close records a crash left open (at their log's last
+/// write), drop records past Settings' kept time with their logs, and
+/// delete log files that belong to no record.
+fn clean_history(d: &mut VaultData, logs: &holonet_vault::LogStore) {
+    // A log a crash left open never reported its size: count what it kept.
+    for r in d.history.iter_mut().filter(|r| r.ended.is_none() && r.logged) {
+        if let Ok(text) = logs.read(r.id) {
+            r.log_bytes = text.text.len() as u64;
+        }
+    }
+    d.close_open_records(|r| logs.last_write(r.id));
+    for old in d.expire_history(Timestamp::now()) {
+        let _ = logs.delete(old.id);
+    }
+    logs.remove_orphans(d.history.iter().filter(|r| r.logged).map(|r| r.id));
 }

@@ -2406,3 +2406,98 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 - **Errors, with their messages:** empty text, no address, an unclosed quote, and a block of patterns only.
 
 `holonet-import` has 18 unit tests, covering `Include`, `Host *` in both places, patterns and negation, jump chains, hashed and ported names, skipped lines, export, and command lines in their forms. fmt and clippy `-D warnings` pass.
+
+## Milestone 7, phase 3: logging and History (26 Nov 2026)
+
+**Records (`app.rs`, `session.rs`):**
+
+- **When a record is made:** a pane makes its record on its first successful connection.
+  - **Route:** the jump hosts' names, else "Primary" or "Tailscale".
+  - **User:** the sign-in's user name.
+  - **Kind:** Terminal or SFTP.
+- **When it ends:**
+  - **Closed by you:** the pane or tab is closed (`disconnect`), or the shell exits.
+  - **Connection dropped:**
+    - the server closes the channel
+    - a drop with reconnect off
+    - reconnecting giving up
+    - a reconnect refused at sign-in
+    - a changed key while reconnecting
+  - A Retry after that starts a new record.
+- **Avoiding re-entry:** the pane ends its record through `cx.defer`, because closing a tab runs inside the app's update, and the app may not be updated while it is mid-update.
+- **While locked:** record changes made while the vault is locked wait in `HolonetApp::pending_history` and are saved at the next unlock. The app keeps the vault's `LogStore` (folder and key) from the first unlock, so locked sessions keep logging.
+- **Clean-up once per start, at the first unlock:**
+  - A log a crash left open is read to count its size.
+  - Its record is closed as dropped, at the log's last write.
+  - Records past "Keep logs for" go, with their logs.
+  - `.log` files with no logged record are deleted.
+
+**Logs (`history.rs`):**
+
+- **Where output comes from:** the terminal view sends each output batch to a `LogTap`.
+- **The writer:** a thread per log (`holonet-log`) turns the batches into plain text and appends them to the `LogWriter`.
+  - It seals what it has every 2 seconds, so a crash loses at most that, and History can show an open session's log.
+  - `finish` returns the thread's handle. The app joins it off the UI thread and then records the final size.
+- **The stripper (`Plain`):** extends spike (c).
+  - Cursor left and right, column moves, erase-line and delete-character work within the line, so a command line edited with readline is saved as it last looked.
+  - Window titles are not text.
+  - **Full-screen programs:** the alternate screen (`?1049`, `?1047` and `?47`) is left out. A line says "A full-screen program ran here. Its screen is not saved." Without this, `less`, `vim` or `top` would fill the log with screen redraws.
+- A reconnect writes "-- Reconnected at 14:54. The shell restarted. --".
+- **Status bar:** shows "Logging to History" while a log is open.
+
+**Settings and the host form:**
+
+- **Host form:** "Save terminal output to History" joins Agent forwarding, Keep connection alive and Compression, as drawn.
+  - While it follows Settings, the note starts "From Settings."
+  - While it is on, the note is amber: "Logs can contain anything typed or printed, including secrets. They are encrypted with the vault."
+  - "Use the Settings default" goes back to following.
+- **Settings, Connection:**
+  - "Save terminal output to History", with the drawn help.
+  - "Keep logs for": 7, 30 or 90 days, or Forever, with 30 the default.
+
+**History page (`workspace/history.rs`):**
+
+- **Navigation:** the Sessions section of the side navigation shows History.
+- **The table:** columns as drawn (Host with the group colour and kind, Started, Length, Route, Log), newest first, with "Filter by host" and "No sessions match this filter."
+  - An open session reads "Writing" in the Log column.
+  - Length reads "< 1 min" instead of "Under a minute", to fit the drawn 90px column.
+- **The 380px panel:**
+  - The colour, name, and start · length · route.
+  - **Connect again** opens the same kind of tab, when the host still exists.
+  - **Export log** writes the whole log as CRLF text to a file you choose, named like "wsl-a 2026-11-26 1454.txt", starting in Documents.
+  - **Saved output:** the last 400 lines, scrolling both ways. Holonet's own notes wrap; the saved lines keep their layout.
+  - "Signed in as" and "Ended".
+  - **Delete this log:** asks first, and is not offered while the session is still open.
+- **Not drawn:**
+  - The empty page.
+  - A deleted host ("This host was deleted.").
+  - An open session ("This session is still open. Pick it again to see newer output.").
+  - A deleted log: a new `log_deleted` field on the record, so the panel says "Its saved output was deleted." and the column says "Deleted", instead of claiming logging was off.
+
+**Live check** (copy of the test vault, WSL server):
+
+- **A logged session:** wsl-a with its switch on, through every kind of output:
+  - `ls --color`
+  - a `\r` progress line
+  - `less`
+  - a dropped connection that reconnected
+- **The export read:**
+  - colours gone
+  - the progress line as its final "done"
+  - the full-screen note in place of `less`
+  - the reconnect line, then the output after it
+- **What else was recorded:**
+  - an SFTP tab: a record with "No log", and no logging item in its status bar
+  - wsl-b, with logging off: "No log"
+  - `exit` there: "Closed by you"
+- **A crash:** Holonet killed during a logged session. At the next start, the record read "Connection dropped" with its output.
+  - This found that the size stayed 0 bytes, so the clean-up now reads the log to count it.
+- **Delete this log:** removed the file. This found the panel saying "Logging is off", which `log_deleted` now corrects.
+- **A shell ended while locked:** its record was ended and sized after unlocking.
+
+**Cleanup and checks:**
+- The test vault copy, its logs and the export were removed, and so was the `.lesshst` that `less` left in the test account.
+- The spike program `m7_log.rs` and its test-only dependencies are gone, replaced by `history.rs`.
+- fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 42 tests, including the stripper and the writer thread.
+
+**Left for wrap-up:** the History table row and log viewer in `--gallery`.
