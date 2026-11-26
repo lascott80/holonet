@@ -19,6 +19,7 @@ use tokio::net::TcpStream;
 use crate::hostkey::PresentedKey;
 
 /// Keep-alive interval from docs/decisions.md.
+/// Default keep-alive interval (`decisions.md`).
 pub const KEEPALIVE: Duration = Duration::from_secs(30);
 /// Most rounds of keyboard-interactive questions before giving up.
 const MAX_KBD_ROUNDS: usize = 5;
@@ -79,7 +80,9 @@ pub struct ConnectOptions {
     pub credential: Credential,
     /// Limit for the TCP connection to be established.
     pub connect_timeout: Duration,
-    pub keep_alive: bool,
+    /// Keep-alive interval; `None` sends none. Three unanswered keep-alives
+    /// end the connection as lost.
+    pub keep_alive: Option<Duration>,
     pub prompts: Arc<dyn Prompts>,
 }
 
@@ -137,6 +140,47 @@ pub(crate) struct Handler {
     prompts: Arc<dyn Prompts>,
     info: Arc<Mutex<SessionInfo>>,
     rejected: Arc<Mutex<bool>>,
+    /// Why the connection ended, once it has.
+    lost: Arc<Mutex<Option<LostReason>>>,
+}
+
+/// Why an established connection ended without the shell exiting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LostReason {
+    /// The server sent a disconnect message, with its text.
+    ServerDisconnected(String),
+    /// Keep-alives went unanswered (sleep, a network change, a dead route).
+    NoResponse,
+    /// The network connection failed or was reset.
+    Network(String),
+    /// Some other protocol error.
+    Other(String),
+}
+
+impl std::fmt::Display for LostReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServerDisconnected(m) if m.trim().is_empty() => f.write_str("The server closed the connection."),
+            Self::ServerDisconnected(m) => write!(f, "The server closed the connection: {}", m.trim()),
+            Self::NoResponse => f.write_str("The server stopped answering keep-alives."),
+            Self::Network(m) => write!(f, "The network connection failed: {m}"),
+            Self::Other(m) => write!(f, "The connection failed: {m}"),
+        }
+    }
+}
+
+impl LostReason {
+    fn from_error(e: &russh::Error) -> Self {
+        match e {
+            russh::Error::KeepaliveTimeout | russh::Error::InactivityTimeout => Self::NoResponse,
+            russh::Error::IO(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Self::Network("it closed without warning".into())
+            }
+            russh::Error::IO(io) => Self::Network(io.to_string()),
+            russh::Error::HUP | russh::Error::Disconnect => Self::Network("closed by the remote side".into()),
+            other => Self::Other(other.to_string()),
+        }
+    }
 }
 
 impl client::Handler for Handler {
@@ -172,15 +216,30 @@ impl client::Handler for Handler {
         info.cipher = names.cipher.as_ref().to_string();
         Ok(())
     }
+
+    async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<(), Self::Error> {
+        let lost = match &reason {
+            client::DisconnectReason::ReceivedDisconnect(info) => LostReason::ServerDisconnected(info.message.clone()),
+            client::DisconnectReason::Error(e) => LostReason::from_error(e),
+        };
+        self.lost.lock().unwrap().get_or_insert(lost);
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            client::DisconnectReason::Error(e) => Err(e),
+        }
+    }
 }
 
 pub(crate) type Handle = client::Handle<Handler>;
 
 /// Open TCP, run the handshake (with the host key decision) and sign in.
-pub(crate) async fn connect(opts: &ConnectOptions) -> Result<(Handle, SessionInfo), ConnectError> {
+pub(crate) async fn connect(
+    opts: &ConnectOptions,
+) -> Result<(Handle, SessionInfo, Arc<Mutex<Option<LostReason>>>), ConnectError> {
     let stream = open_tcp(&opts.host, opts.port, opts.connect_timeout).await?;
     let config =
-        Arc::new(client::Config { keepalive_interval: opts.keep_alive.then_some(KEEPALIVE), ..Default::default() });
+        Arc::new(client::Config { keepalive_interval: opts.keep_alive, keepalive_max: 3, ..Default::default() });
+    let lost = Arc::new(Mutex::new(None));
     let info = Arc::new(Mutex::new(SessionInfo::default()));
     let rejected = Arc::new(Mutex::new(false));
     let handler = Handler {
@@ -189,6 +248,7 @@ pub(crate) async fn connect(opts: &ConnectOptions) -> Result<(Handle, SessionInf
         prompts: opts.prompts.clone(),
         info: info.clone(),
         rejected: rejected.clone(),
+        lost: lost.clone(),
     };
     let mut handle = match client::connect_stream(config, stream, handler).await {
         Ok(handle) => handle,
@@ -198,7 +258,7 @@ pub(crate) async fn connect(opts: &ConnectOptions) -> Result<(Handle, SessionInf
     let method = sign_in(&mut handle, opts).await?;
     let mut info = info.lock().unwrap().clone();
     info.auth_method = method.to_string();
-    Ok((handle, info))
+    Ok((handle, info, lost))
 }
 
 async fn open_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, ConnectError> {
@@ -356,6 +416,7 @@ pub async fn probe(host: &str, port: u16, timeout: Duration) -> Result<Presented
         prompts: capture.clone(),
         info: Arc::new(Mutex::new(SessionInfo::default())),
         rejected: Arc::new(Mutex::new(false)),
+        lost: Arc::new(Mutex::new(None)),
     };
     let config = Arc::new(client::Config::default());
     let handshake = client::connect_stream(config, stream, handler);

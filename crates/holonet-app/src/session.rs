@@ -1,6 +1,7 @@
-//! A session tab: one host's connection, from connecting through the host key
+//! A pane: one host's connection, from connecting through the host key
 //! decision and sign-in to the terminal (Terminal.dc.html, HostKey.dc.html,
-//! ConnectStates.dc.html).
+//! ConnectStates.dc.html). A [`crate::tab::Tab`] holds one or more panes and
+//! draws the session header and status bar for its active pane.
 //!
 //! The SSH connection runs on Tokio. When russh needs a host key decision or
 //! a secret, [`UiPrompts`] sends the request over a channel to this entity and
@@ -64,16 +65,88 @@ pub struct KeyCheck {
 
 #[derive(Clone, Copy)]
 enum Failure {
-    /// Could not reach the host.
+    /// Could not reach the host (refused, unresolved, network error).
     Network,
+    /// The host never answered within the connect timeout.
+    TimedOut,
     /// The server refused the password (saved or typed).
     Password,
     /// The server refused the key.
-    Key,
+    KeyRefused,
+    /// The key's passphrase did not unlock it.
     Passphrase,
     /// "Refuse to connect" stopped an unknown key.
     RefusedUnknown,
+    /// Five reconnect attempts failed.
+    GaveUp,
     Other,
+}
+
+impl Failure {
+    /// The pane header's and status bar's word for this state
+    /// (ConnectStates.dc.html: "Timed out", "Sign-in refused").
+    fn state_word(&self) -> &'static str {
+        match self {
+            Failure::Network => "Not reachable",
+            Failure::TimedOut => "Timed out",
+            Failure::Password | Failure::KeyRefused => "Sign-in refused",
+            Failure::Passphrase => "Wrong passphrase",
+            Failure::RefusedUnknown => "Refused",
+            Failure::GaveUp => "Not reconnected",
+            Failure::Other => "Not connected",
+        }
+    }
+}
+
+/// The design's spinner: a `line` ring with an accent arc turning on it
+/// every 0.9 s (ConnectStates.dc.html). GPUI borders take one color, so the
+/// arc is an SVG laid over the ring.
+fn ring_spinner(size: gpui::Pixels, border: gpui::Pixels) -> Div {
+    div().size(size).flex_none().relative().rounded_full().border(border).border_color(theme::line()).child(
+        div().absolute().top(-border).left(-border).child(icon("spinner-arc", size, theme::accent()).with_animation(
+            "spin",
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+        )),
+    )
+}
+
+/// Why a host may not have answered, from its address (ConnectStates.dc.html,
+/// "Timed out"). Tailscale advice joins this in milestone 4.
+fn unanswered_reason(address: &str) -> String {
+    let private = match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || ip.is_unicast_link_local(),
+        Err(_) => address.ends_with(".local") || address.ends_with(".lan") || address.ends_with(".home.arpa"),
+    };
+    if private {
+        format!("{address} is a private address, so you may be away from its network.")
+    } else {
+        "The server may be down, or a firewall may be dropping the connection.".to_string()
+    }
+}
+
+/// decisions.md: 5 attempts. Waits before each (seconds).
+const RECONNECT_BACKOFF: [u64; 5] = [1, 2, 4, 8, 16];
+
+/// A lost connection being re-established (ConnectStates.dc.html,
+/// "Reconnecting"). The terminal and its scrollback stay; the shell restarts.
+struct Reconnect {
+    /// Attempts started so far (1-based once the first one starts).
+    attempt: usize,
+    /// "Connection lost when this PC went to sleep." and the like.
+    cause: SharedString,
+    /// When the next attempt starts, while waiting.
+    next_at: Option<std::time::Instant>,
+    /// The reason the last attempt failed.
+    last_error: Option<SharedString>,
+}
+
+/// Why a connection most likely dropped, from recent system events.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Disturbance {
+    Sleep,
+    Network,
 }
 
 enum State {
@@ -105,7 +178,7 @@ enum State {
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    /// The tab should close (Cancel, Disconnect, Close tab).
+    /// The pane should close (Cancel, Disconnect, Close tab).
     Close,
     /// Open the host form for this host.
     EditHost,
@@ -113,12 +186,12 @@ pub enum SessionEvent {
     ReviewKnownHost,
 }
 
-pub struct SessionTab {
+pub struct Pane {
     app: WeakEntity<HolonetApp>,
     pub host: Host,
     key: Option<StoredKey>,
     runtime: tokio::runtime::Handle,
-    connect_timeout: Duration,
+    limits: Limits,
     state: State,
     log: Vec<(SharedString, bool)>,
     terminal: Entity<TerminalView>,
@@ -132,34 +205,72 @@ pub struct SessionTab {
     attempt: u64,
     /// A typed password (true) or passphrase to save after a successful sign-in.
     pending_save: Option<(bool, Secret)>,
+    /// Drawn with the stronger border of the tab's active pane.
+    active: bool,
+    /// The only pane in its tab: "Close tab" instead of "Close pane".
+    alone: bool,
+    /// The attempt used a password saved in the vault (for the wording of
+    /// "The server refused the saved password").
+    used_saved_password: bool,
+    /// While reconnecting after a lost connection.
+    reconnect: Option<Reconnect>,
+    /// Waits for and starts the next reconnect attempt.
+    reconnect_task: Option<gpui::Task<()>>,
+    /// A password (true) or passphrase typed during this attempt, and the one
+    /// that worked, kept in memory so reconnecting does not ask again. Never
+    /// saved unless "Save in the encrypted vault" was ticked.
+    typed_secret: Option<(bool, Secret)>,
+    session_secret: Option<(bool, Secret)>,
+    /// The last sleep, wake or network change, and when.
+    disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
-impl EventEmitter<SessionEvent> for SessionTab {}
+impl EventEmitter<SessionEvent> for Pane {}
 
-impl SessionTab {
+/// Settings read when the tab is created.
+#[derive(Clone)]
+pub struct Limits {
+    pub connect_timeout: Duration,
+    /// Already combined with the host's own keep-alive switch.
+    pub keep_alive: Option<Duration>,
+    pub terminal: holonet_model::TerminalSettings,
+}
+
+impl Pane {
+    /// Settings changed: show them in this tab's terminal.
+    pub fn set_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
+        self.limits.terminal = settings.clone();
+        self.terminal.update(cx, |t, cx| t.set_settings(settings.clone(), cx));
+    }
+
     #[allow(clippy::too_many_arguments)] // GPUI context plus the connection's inputs
     pub fn new(
         app: WeakEntity<HolonetApp>,
         host: Host,
         key: Option<StoredKey>,
         runtime: tokio::runtime::Handle,
-        connect_timeout: Duration,
+        limits: Limits,
         size: GridSize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let terminal = cx.new(|cx| {
             let mut t = TerminalView::new(window, cx);
+            t.apply_settings(&limits.terminal, window, cx);
             t.set_embedded(size);
             t
         });
         let subscriptions = vec![cx.subscribe(&terminal, |this: &mut Self, _, event: &TerminalEvent, cx| {
-            let TerminalEvent::Ended(reason) = event;
-            this.state = State::Ended(reason.clone().into());
-            this.session = None;
+            match event {
+                TerminalEvent::Ended(reason) => {
+                    this.state = State::Ended(reason.clone().into());
+                    this.session = None;
+                }
+                TerminalEvent::Lost(reason) => this.on_lost(reason.clone(), cx),
+            }
             cx.notify();
         })];
         let mut tab = Self {
@@ -167,7 +278,7 @@ impl SessionTab {
             host,
             key,
             runtime,
-            connect_timeout,
+            limits,
             state: State::Connecting,
             log: Vec::new(),
             terminal,
@@ -178,6 +289,14 @@ impl SessionTab {
             attempt: 0,
             pending_save: None,
             focus_pending: false,
+            active: true,
+            alone: true,
+            used_saved_password: false,
+            reconnect: None,
+            reconnect_task: None,
+            typed_secret: None,
+            session_secret: None,
+            disturbance: None,
             _subscriptions: subscriptions,
         };
         tab.start(cx);
@@ -189,6 +308,9 @@ impl SessionTab {
     }
 
     pub fn tab_state(&self) -> TabState {
+        if self.reconnect.is_some() {
+            return TabState::Connecting;
+        }
         match self.state {
             State::Connected => TabState::Connected,
             State::Failed { .. } | State::Ended(_) | State::KeyChanged { .. } => TabState::Failed,
@@ -211,8 +333,186 @@ impl SessionTab {
         }
     }
 
+    /// "Offering password for root", once the host key is settled.
+    fn note_offer(&mut self) {
+        let user = if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
+        let line = match (&self.host.auth, &self.key) {
+            (Auth::Key { .. }, Some(key)) => format!("Offering key {} for {user}", key.name),
+            _ => format!("Offering password for {user}"),
+        };
+        self.note(line, false);
+    }
+
     fn target(&self) -> String {
         format!("{}:{}", self.host.address.trim(), self.host.port)
+    }
+
+    /// Where the pane sits in its tab (set by [`crate::tab::Tab`]).
+    pub fn set_place(&mut self, active: bool, alone: bool, cx: &mut Context<Self>) {
+        if (self.active, self.alone) != (active, alone) {
+            (self.active, self.alone) = (active, alone);
+            cx.notify();
+        }
+    }
+
+    pub fn terminal(&self) -> &Entity<TerminalView> {
+        &self.terminal
+    }
+
+    pub fn grid_size(&self, cx: &gpui::App) -> GridSize {
+        self.terminal.read(cx).grid_size()
+    }
+
+    fn close_label(&self) -> &'static str {
+        if self.alone { "Close tab" } else { "Close pane" }
+    }
+
+    /// `user@address:port`, for the session header.
+    pub fn target_line(&self) -> SharedString {
+        if self.host.username.is_empty() {
+            self.target().into()
+        } else {
+            format!("{}@{}", self.host.username, self.target()).into()
+        }
+    }
+
+    fn session_secret(&self, password: bool) -> Option<Secret> {
+        self.session_secret.as_ref().filter(|(p, _)| *p == password).map(|(_, s)| s.clone())
+    }
+
+    /// Sleep, wake or a network change (from the app's system listener).
+    pub fn on_system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+        use crate::platform::SystemEvent;
+        let kind = match event {
+            SystemEvent::Suspend | SystemEvent::Resume => Disturbance::Sleep,
+            SystemEvent::NetworkChanged => Disturbance::Network,
+        };
+        // Sleep explains a drop better than the network changes that follow a wake.
+        let keep_sleep = matches!(self.disturbance, Some((Disturbance::Sleep, at)) if at.elapsed().as_secs() < 120)
+            && kind == Disturbance::Network;
+        if !keep_sleep {
+            self.disturbance = Some((kind, std::time::Instant::now()));
+        }
+        // Waiting to reconnect: the network may be back, so try now.
+        if event != SystemEvent::Suspend && self.reconnect.as_ref().is_some_and(|r| r.next_at.is_some()) {
+            self.reconnect_now(cx);
+        }
+    }
+
+    /// The connection dropped under a running shell.
+    fn on_lost(&mut self, reason: holonet_ssh::LostReason, cx: &mut Context<Self>) {
+        self.session = None;
+        let enabled = self.app.upgrade().map(|app| app.read(cx).reconnect_enabled(cx)).unwrap_or(true);
+        if !enabled {
+            self.state = State::Ended(reason.to_string().into());
+            return;
+        }
+        // A drop is noticed up to three missed keep-alives after it happens
+        // (about 90 s at the default), so recent means five minutes.
+        let recent = self.disturbance.filter(|(_, at)| at.elapsed().as_secs() < 300).map(|(d, _)| d);
+        let cause: SharedString = match (recent, &reason) {
+            (Some(Disturbance::Sleep), _) => "Connection lost when this PC went to sleep.".into(),
+            (Some(Disturbance::Network), _) => "Connection lost after a network change.".into(),
+            (None, holonet_ssh::LostReason::NoResponse) => "The server stopped answering.".into(),
+            (None, holonet_ssh::LostReason::ServerDisconnected(_)) => "The server closed the connection.".into(),
+            (None, _) => "The connection was lost.".into(),
+        };
+        self.reconnect = Some(Reconnect { attempt: 0, cause, next_at: None, last_error: None });
+        self.state = State::Connecting;
+        self.schedule_reconnect(cx);
+    }
+
+    /// Wait before the next attempt, or give up after the fifth.
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.reconnect.as_mut() else { return };
+        let Some(wait) = RECONNECT_BACKOFF.get(r.attempt).copied() else {
+            let last = r.last_error.clone().unwrap_or_else(|| r.cause.clone());
+            self.reconnect = None;
+            self.reconnect_task = None;
+            self.fail(
+                Failure::GaveUp,
+                format!("Holonet could not reconnect to {}", self.host.display_name()),
+                format!("It tried {} times. {last}", RECONNECT_BACKOFF.len()),
+            );
+            cx.notify();
+            return;
+        };
+        let at = std::time::Instant::now() + Duration::from_secs(wait);
+        r.next_at = Some(at);
+        // Tick once a second for the countdown, then start the attempt.
+        self.reconnect_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let done = this.update(cx, |pane, cx| {
+                    if std::time::Instant::now() >= at {
+                        pane.reconnect_now(cx);
+                        true
+                    } else {
+                        cx.notify();
+                        false
+                    }
+                });
+                if !matches!(done, Ok(false)) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// "Reconnect now", a wake or network change, or the wait ran out.
+    fn reconnect_now(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.reconnect.as_mut() else { return };
+        if r.next_at.is_none() {
+            return; // an attempt is already running
+        }
+        r.attempt += 1;
+        r.next_at = None;
+        self.reconnect_task = None;
+        self.start(cx);
+    }
+
+    /// A reconnect attempt failed. Network trouble waits and tries again;
+    /// anything else (a refused sign-in) ends reconnecting and shows the
+    /// usual failure. Returns true when handled here.
+    fn reconnect_failed(&mut self, e: &ConnectError, cx: &mut Context<Self>) -> bool {
+        let retry = matches!(
+            e,
+            ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) | ConnectError::TimedOut(_)
+        ) || (matches!(e, ConnectError::HostKeyRejected)
+            && self.app.upgrade().is_some_and(|a| !a.read(cx).is_unlocked()));
+        if !retry {
+            self.reconnect = None;
+            self.reconnect_task = None;
+            return false;
+        }
+        let message: SharedString = match e {
+            ConnectError::HostKeyRejected => "Unlock the vault so Holonet can check the host key.".into(),
+            other => describe_error(other).into(),
+        };
+        if let Some(r) = self.reconnect.as_mut() {
+            r.last_error = Some(message);
+        }
+        self.state = State::Connecting;
+        self.schedule_reconnect(cx);
+        true
+    }
+
+    /// Whether the pane stopped without a working session (failed or ended).
+    pub fn is_stopped(&self) -> bool {
+        matches!(self.state, State::Failed { .. } | State::Ended(_))
+    }
+
+    /// The host was edited from this pane's failure ("Edit host", then "Save
+    /// and connect"): try again here with the new details.
+    pub fn retry_with(&mut self, host: Host, key: Option<StoredKey>, limits: Limits, cx: &mut Context<Self>) {
+        self.host = host;
+        self.key = key;
+        self.limits = limits;
+        self.ask_password = false;
+        self.ask_passphrase = false;
+        self.start(cx);
+        cx.notify();
     }
 
     /// Start (or restart) the connection.
@@ -220,16 +520,32 @@ impl SessionTab {
         self.attempt += 1;
         let attempt = self.attempt;
         self.pending_save = None;
+        self.typed_secret = None;
         self.state = State::Connecting;
         self.session = None;
-        self.note(format!("Connecting to {} …", self.target()), false);
+        // Each attempt starts a fresh log (ConnectStates.dc.html).
+        self.log.clear();
+        let address = self.host.address.trim().to_string();
+        if address.parse::<std::net::IpAddr>().is_err() {
+            self.note(format!("Resolving {address} …"), false);
+        }
+        self.note(format!("Opening TCP connection to {}", self.target()), false);
+        self.used_saved_password = matches!(&self.host.auth, Auth::Password { saved: Some(_) }) && !self.ask_password;
 
         let credential = match (&self.host.auth, &self.key) {
-            (Auth::Password { saved }, _) => Credential::Password(if self.ask_password { None } else { saved.clone() }),
+            (Auth::Password { saved }, _) => Credential::Password(if self.ask_password {
+                None
+            } else {
+                saved.clone().or_else(|| self.session_secret(true))
+            }),
             (Auth::Key { passphrase, .. }, Some(key)) => Credential::Key {
                 name: key.name.clone(),
                 private_key: key.private_key.clone(),
-                passphrase: if self.ask_passphrase { None } else { passphrase.clone() },
+                passphrase: if self.ask_passphrase {
+                    None
+                } else {
+                    passphrase.clone().or_else(|| self.session_secret(false))
+                },
             },
             (Auth::Key { .. }, None) => {
                 self.fail(
@@ -241,15 +557,15 @@ impl SessionTab {
             }
         };
         // Not read from the app: `start` runs while the app creates this tab.
-        let timeout = self.connect_timeout;
+        let limits = (self.limits.connect_timeout, self.limits.keep_alive);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let opts = ConnectOptions {
             host: self.host.address.trim().to_string(),
             port: self.host.port,
             user: self.host.username.clone(),
             credential,
-            connect_timeout: timeout,
-            keep_alive: self.host.keep_alive,
+            connect_timeout: limits.0,
+            keep_alive: limits.1,
             prompts: Arc::new(UiPrompts(tx)),
         };
         let size = self.terminal.read(cx).grid_size();
@@ -307,6 +623,7 @@ impl SessionTab {
                 match check.status {
                     KeyStatus::Trusted => {
                         self.note("Host key verified against Known hosts", false);
+                        self.note_offer();
                         let _ = reply.send(HostKeyDecision::Continue);
                     }
                     KeyStatus::Unknown if check.policy == UnknownHostKeys::Refuse => {
@@ -362,6 +679,7 @@ impl SessionTab {
                     app.update(cx, |app, cx| app.trust_host_key(&key, cx));
                 }
                 self.note("Trusted: the key is saved in Known hosts", false);
+                self.note_offer();
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
@@ -369,6 +687,7 @@ impl SessionTab {
             }
             "once" => {
                 self.note("Connecting once: the key is not saved", false);
+                self.note_offer();
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
@@ -398,6 +717,10 @@ impl SessionTab {
             return;
         }
         let secret = Secret::new(value);
+        let is_password = matches!(request, SecretRequest::Password { .. });
+        if !matches!(request, SecretRequest::Challenge { .. }) {
+            self.typed_secret = Some((is_password, secret.clone()));
+        }
         if *save {
             // Saved only once the server accepts it (see `finish`), so a
             // mistyped password never ends up in the vault.
@@ -414,6 +737,20 @@ impl SessionTab {
     fn finish(&mut self, result: Result<(Session, Shell), ConnectError>, cx: &mut Context<Self>) {
         match result {
             Ok((session, shell)) => {
+                if let Some(typed) = self.typed_secret.take() {
+                    self.session_secret = Some(typed);
+                }
+                if self.reconnect.take().is_some() {
+                    self.reconnect_task = None;
+                    let time = jiff::Timestamp::now()
+                        .to_zoned_datetime(jiff::tz::TimeZone::system())
+                        .strftime("%H:%M")
+                        .to_string();
+                    let line = format!(
+                        "\r\n\x1b[2m-- Reconnected at {time}. The shell restarted; the output above is from the previous session. --\x1b[0m\r\n"
+                    );
+                    self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
+                }
                 self.info = session.info().clone();
                 self.note(format!("Signed in ({})", self.info.auth_method), false);
                 self.session = Some(Arc::new(session));
@@ -454,8 +791,15 @@ impl SessionTab {
                 }
             }
             Err(e) => {
-                // A host key decision already set its own state.
+                // A host key decision already set its own state; a changed
+                // key ends reconnecting too (decisions.md: always stop).
                 if matches!(self.state, State::KeyChanged { .. } | State::Failed { .. }) {
+                    self.reconnect = None;
+                    self.reconnect_task = None;
+                    cx.notify();
+                    return;
+                }
+                if self.reconnect.is_some() && self.reconnect_failed(&e, cx) {
                     cx.notify();
                     return;
                 }
@@ -464,30 +808,55 @@ impl SessionTab {
                     if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
                 match &e {
                     ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) => {
+                        self.note(describe_error(&e), true);
                         self.fail(Failure::Network, format!("Holonet could not reach {name}"), describe_error(&e))
                     }
                     ConnectError::TimedOut(s) => {
-                        self.fail(Failure::Network, format!("{name} did not answer"), format!("No response after {s} seconds."))
+                        self.note(format!("No response after {s} seconds"), true);
+                        let body = unanswered_reason(self.host.address.trim());
+                        self.fail(Failure::TimedOut, format!("{name} did not answer"), body)
                     }
-                    ConnectError::SignInRefused { method: "publickey", .. } => self.fail(
-                        Failure::Key,
-                        format!("The server refused the key {}", self.key.as_ref().map(|k| k.name.as_str()).unwrap_or("")),
-                        format!("The key may not be in the server's authorized_keys for {user}."),
-                    ),
-                    ConnectError::SignInRefused { .. } => self.fail(
-                        Failure::Password,
-                        "The server refused the password",
-                        format!("The password for {user} may have changed, or the server may no longer allow password sign-in."),
-                    ),
-                    ConnectError::WrongPassphrase => self.fail(
-                        Failure::Passphrase,
-                        "The key passphrase is wrong",
-                        "Enter the passphrase again. Holonet has not contacted the server with this key.",
-                    ),
+                    ConnectError::SignInRefused { method, remaining } => {
+                        let offered = if remaining.is_empty() { method.to_string() } else { remaining.join(",") };
+                        self.note(format!("Server: Permission denied ({offered})"), true);
+                        if *method == "publickey" {
+                            let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
+                            self.fail(
+                                Failure::KeyRefused,
+                                format!("The server refused the key {key}"),
+                                format!(
+                                    "The key may not be in the server's authorized_keys for {user}, or the server may not allow key sign-in for this user."
+                                ),
+                            )
+                        } else {
+                            let title = if self.used_saved_password {
+                                "The server refused the saved password"
+                            } else {
+                                "The server refused the password"
+                            };
+                            self.fail(
+                                Failure::Password,
+                                title,
+                                format!("The password for {user} may have changed, or the server may no longer allow password sign-in."),
+                            )
+                        }
+                    }
+                    ConnectError::WrongPassphrase => {
+                        let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
+                        self.note(format!("The passphrase did not unlock {key}"), true);
+                        self.fail(
+                            Failure::Passphrase,
+                            "The key passphrase is wrong",
+                            "Enter the passphrase again. Holonet has not contacted the server with this key.",
+                        )
+                    }
                     ConnectError::Cancelled | ConnectError::HostKeyRejected => {
                         cx.emit(SessionEvent::Close);
                     }
-                    other => self.fail(Failure::Other, "The connection failed", other.to_string()),
+                    other => {
+                        self.note(other.to_string(), true);
+                        self.fail(Failure::Other, "The connection failed", other.to_string())
+                    }
                 }
             }
         }
@@ -495,9 +864,7 @@ impl SessionTab {
     }
 
     fn fail(&mut self, kind: Failure, title: impl Into<SharedString>, body: impl Into<SharedString>) {
-        let body = body.into();
-        self.note(body.clone(), true);
-        self.state = State::Failed { kind, title: title.into(), body };
+        self.state = State::Failed { kind, title: title.into(), body: body.into() };
     }
 
     fn replace_key_and_connect(&mut self, cx: &mut Context<Self>) {
@@ -566,17 +933,14 @@ impl SessionTab {
 
     fn connecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let name = self.name();
+        let spinner = ring_spinner(px(28.), px(3.));
         self.center_card(
             div()
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap(theme::SPACE_3)
-                .child(icon("refresh", px(28.), theme::accent()).with_animation(
-                    "spin",
-                    Animation::new(Duration::from_millis(900)).repeat(),
-                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-                ))
+                .child(spinner)
                 .child(
                     div()
                         .text_heading()
@@ -587,7 +951,7 @@ impl SessionTab {
                     div()
                         .text_body()
                         .text_color(theme::ink_muted())
-                        .child(SharedString::from(format!("Opening a connection to {}.", self.target()))),
+                        .child(SharedString::from(format!("Trying {}.", self.host.address.trim()))),
                 )
                 .child(Button::secondary("connect-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
                     this.attempt += 1;
@@ -595,6 +959,83 @@ impl SessionTab {
                 }))),
         )
         .into_any_element()
+    }
+
+    /// ConnectStates.dc.html, "Reconnecting": a banner over the old output.
+    fn reconnecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = &self.reconnect else { return div().into_any_element() };
+        let total = RECONNECT_BACKOFF.len();
+        let progress = match r.next_at {
+            Some(at) => {
+                let secs = at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
+                let tried =
+                    if r.attempt == 0 { String::new() } else { format!("Attempt {} of {total} failed. ", r.attempt) };
+                format!(" {tried}Trying again in {secs} s.")
+            }
+            None => format!(" Reconnecting, attempt {} of {total}.", r.attempt),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::SPACE_3)
+                    .px(theme::SPACE_4)
+                    .py(theme::SPACE_3)
+                    .bg(theme::card())
+                    .border_b_1()
+                    .border_color(theme::line())
+                    .child(ring_spinner(px(16.), px(2.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(240.))
+                            .text_body()
+                            .text_color(theme::ink_soft())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::ink())
+                                            .child(r.cause.clone()),
+                                    )
+                                    .child(SharedString::from(progress)),
+                            )
+                            .children(
+                                r.last_error.clone().map(|e| div().text_meta().text_color(theme::ink_muted()).child(e)),
+                            ),
+                    )
+                    .child(
+                        Button::secondary("reconnect-now", "Reconnect now")
+                            .compact()
+                            .disabled(r.next_at.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))),
+                    )
+                    .child(
+                        Button::quiet("reconnect-close", self.close_label())
+                            .compact()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().opacity(0.75).child(self.terminal.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .px(theme::SPACE_4)
+                    .py(theme::SPACE_2)
+                    .text_meta()
+                    .text_color(theme::ink_muted())
+                    .child("Scrollback is kept. The shell session itself restarts after reconnecting."),
+            )
+            .into_any_element()
     }
 
     fn host_key_view(&self, key: &PresentedKey, cx: &mut Context<Self>) -> AnyElement {
@@ -889,7 +1330,7 @@ impl SessionTab {
                 }),
             )),
             Failure::RefusedUnknown => buttons,
-            _ => {
+            Failure::Network | Failure::TimedOut | Failure::KeyRefused | Failure::GaveUp | Failure::Other => {
                 buttons.child(Button::primary("retry", "Retry").on_click(cx.listener(|this, _, _, cx| this.start(cx))))
             }
         };
@@ -901,7 +1342,7 @@ impl SessionTab {
                 )
             })
             .child(
-                Button::quiet("close-tab", "Close tab")
+                Button::quiet("close-tab", self.close_label())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
             );
         self.center_card(
@@ -918,11 +1359,14 @@ impl SessionTab {
         .into_any_element()
     }
 
-    fn status_bar(&self) -> Div {
+    /// The status bar the tab shows for its active pane.
+    pub fn status_bar(&self) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
+            _ if self.reconnect.is_some() => ("Reconnecting", theme::ink_muted()),
             State::Connected => ("Connected", theme::group_mint()),
             State::Ended(_) => ("Ended", theme::warn()),
-            State::Failed { .. } | State::KeyChanged { .. } => ("Not connected", theme::warn()),
+            State::Failed { kind, .. } => (kind.state_word(), theme::warn()),
+            State::KeyChanged { .. } => ("Host key changed", theme::warn()),
             _ => ("Connecting", theme::ink_muted()),
         };
         let auth = match self.info.auth_method.as_str() {
@@ -958,7 +1402,7 @@ impl SessionTab {
     }
 }
 
-impl Render for SessionTab {
+impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.focus_pending) {
             self.focus(window, cx);
@@ -966,15 +1410,17 @@ impl Render for SessionTab {
         let color = theme::no_group();
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
+            _ if self.reconnect.is_some() => "Reconnecting".into(),
             State::Connected => format!("{} × {}", size.cols, size.rows).into(),
             State::Connecting | State::HostKey { .. } | State::Secret { .. } => "Connecting".into(),
             State::KeyChanged { .. } => "Host key changed".into(),
-            State::Failed { .. } => "Not connected".into(),
+            State::Failed { kind, .. } => kind.state_word().into(),
             State::Ended(_) => "Ended".into(),
         };
         let warn_word = matches!(self.state, State::KeyChanged { .. } | State::Failed { .. } | State::Ended(_));
 
         let content: AnyElement = match &self.state {
+            State::Connecting if self.reconnect.is_some() => self.reconnecting_view(cx),
             State::Connecting => self.connecting_view(cx),
             State::HostKey { key, .. } => {
                 let key = key.clone();
@@ -1023,7 +1469,7 @@ impl Render for SessionTab {
                                 .on_click(cx.listener(|this, _, _, cx| this.start(cx))),
                         )
                         .child(
-                            Button::quiet("close-ended", "Close tab")
+                            Button::quiet("close-ended", self.close_label())
                                 .compact()
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
                         ),
@@ -1031,84 +1477,79 @@ impl Render for SessionTab {
                 .into_any_element(),
         };
 
-        let target = if self.host.username.is_empty() {
-            self.target()
-        } else {
-            format!("{}@{}", self.host.username, self.target())
-        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::ground())
-            // Session header bar.
+            .bg(theme::terminal())
+            .border_1()
+            .border_color(if self.active { theme::ink_muted() } else { theme::line() })
+            .rounded(theme::RADIUS_MD)
+            .overflow_hidden()
+            // 2px group-color top edge (GPUI borders are one color).
+            .child(div().h(px(2.)).flex_none().bg(color))
             .child(
                 div()
-                    .px(px(18.))
-                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(theme::SPACE_3)
+                    .py(theme::SPACE_2)
+                    .bg(theme::panel())
                     .border_b_1()
                     .border_color(theme::line())
-                    .flex()
-                    .flex_col()
+                    .text_meta()
                     .child(
                         div()
-                            .font_family(theme::DISPLAY)
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme::ink())
-                            .child(self.name()),
+                            .flex()
+                            .items_center()
+                            .gap(theme::SPACE_2)
+                            .child(crate::ui::group_square(color))
+                            .child(div().text_color(theme::ink()).font_weight(FontWeight::MEDIUM).child(self.name()))
+                            .child(div().text_color(color).child("No group")),
                     )
-                    .child(div().text_mono_small().text_color(theme::ink_muted()).child(SharedString::from(target))),
+                    .child(
+                        div()
+                            .text_mono_small()
+                            .text_color(if warn_word { theme::warn() } else { theme::ink_muted() })
+                            .child(state_word),
+                    ),
             )
-            // Gutter and pane.
-            .child(
-                div().flex_1().min_h_0().p(theme::SPACE_2).bg(theme::sunken()).child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .bg(theme::terminal())
-                        .border_1()
-                        .border_color(theme::ink_muted())
-                        .rounded(theme::RADIUS_MD)
-                        .overflow_hidden()
-                        // 2px group-color top edge (GPUI borders are one color).
-                        .child(div().h(px(2.)).flex_none().bg(color))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .px(theme::SPACE_3)
-                                .py(theme::SPACE_2)
-                                .bg(theme::panel())
-                                .border_b_1()
-                                .border_color(theme::line())
-                                .text_meta()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(theme::SPACE_2)
-                                        .child(crate::ui::group_square(color))
-                                        .child(
-                                            div()
-                                                .text_color(theme::ink())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(self.name()),
-                                        )
-                                        .child(div().text_color(color).child("No group")),
-                                )
-                                .child(
-                                    div()
-                                        .text_mono_small()
-                                        .text_color(if warn_word { theme::warn() } else { theme::ink_muted() })
-                                        .child(state_word),
-                                ),
-                        )
-                        .child(div().flex_1().min_h_0().child(content)),
-                ),
-            )
-            .child(self.status_bar())
+            .child(div().flex_1().min_h_0().child(content))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unanswered_reason_spots_private_addresses() {
+        for private in ["192.168.1.51", "10.30.0.9", "172.20.1.1", "169.254.1.1", "fd00::1", "nas.local", "pi.lan"] {
+            assert!(unanswered_reason(private).contains("private address"), "{private}");
+        }
+        for public in ["198.51.100.7", "example.com", "2001:db8::1"] {
+            assert!(unanswered_reason(public).contains("may be down"), "{public}");
+        }
+    }
+
+    #[test]
+    fn every_failure_has_a_state_word() {
+        let words: Vec<&str> = [
+            Failure::Network,
+            Failure::TimedOut,
+            Failure::Password,
+            Failure::KeyRefused,
+            Failure::Passphrase,
+            Failure::RefusedUnknown,
+            Failure::GaveUp,
+            Failure::Other,
+        ]
+        .iter()
+        .map(Failure::state_word)
+        .collect();
+        assert_eq!(words[1], "Timed out");
+        assert_eq!(words[2], "Sign-in refused");
+        assert!(words.iter().all(|w| !w.is_empty()));
     }
 }

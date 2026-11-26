@@ -348,6 +348,10 @@ pub struct Settings {
     /// Enforced from milestone 4.
     #[serde(default = "default_lock_after")]
     pub lock_after_idle_mins: Option<u32>,
+    #[serde(default)]
+    pub terminal: TerminalSettings,
+    #[serde(default)]
+    pub connection: ConnectionSettings,
 }
 
 fn default_connect_timeout() -> u32 {
@@ -364,7 +368,211 @@ impl Default for Settings {
             unknown_host_keys: UnknownHostKeys::Ask,
             connect_timeout_secs: default_connect_timeout(),
             lock_after_idle_mins: default_lock_after(),
+            terminal: TerminalSettings::default(),
+            connection: ConnectionSettings::default(),
         }
+    }
+}
+
+/// A font build bundled with Holonet (JetBrainsMono Nerd Font v3.5.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundledFont {
+    /// Ligatures and double-width icon glyphs (the design's default).
+    #[default]
+    NerdFont,
+    /// Icons fit a single cell.
+    NerdFontMono,
+    /// Proportional icon widths.
+    NerdFontPropo,
+    /// Ligatures removed.
+    NerdFontNl,
+}
+
+impl BundledFont {
+    pub const ALL: [BundledFont; 4] = [Self::NerdFont, Self::NerdFontMono, Self::NerdFontPropo, Self::NerdFontNl];
+
+    /// Family name the font files declare.
+    pub fn family(self) -> &'static str {
+        match self {
+            Self::NerdFont => "JetBrainsMono Nerd Font",
+            Self::NerdFontMono => "JetBrainsMono Nerd Font Mono",
+            Self::NerdFontPropo => "JetBrainsMono Nerd Font Propo",
+            Self::NerdFontNl => "JetBrainsMonoNL Nerd Font",
+        }
+    }
+
+    pub fn has_ligatures(self) -> bool {
+        self != Self::NerdFontNl
+    }
+}
+
+/// The terminal font: a bundled build or an installed family.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "name")]
+pub enum TerminalFont {
+    Bundled(BundledFont),
+    Installed(String),
+}
+
+impl Default for TerminalFont {
+    fn default() -> Self {
+        Self::Bundled(BundledFont::default())
+    }
+}
+
+impl TerminalFont {
+    pub fn family(&self) -> &str {
+        match self {
+            Self::Bundled(b) => b.family(),
+            Self::Installed(name) => name,
+        }
+    }
+
+    /// Whether the ligature setting applies. Installed fonts are assumed to
+    /// have them; a font without ligatures simply shows none.
+    pub fn supports_ligatures(&self) -> bool {
+        match self {
+            Self::Bundled(b) => b.has_ligatures(),
+            Self::Installed(_) => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorScheme {
+    #[default]
+    HolonetDark,
+    HighContrast,
+    Light,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scrollback {
+    #[default]
+    Lines10k,
+    Lines50k,
+    Unlimited,
+}
+
+impl Scrollback {
+    /// Lines of history; `None` for unlimited.
+    pub fn lines(self) -> Option<usize> {
+        match self {
+            Self::Lines10k => Some(10_000),
+            Self::Lines50k => Some(50_000),
+            Self::Unlimited => None,
+        }
+    }
+}
+
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<u8> = 10..=20;
+/// Line height in tenths: 1.0 to 1.8.
+pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<u8> = 10..=18;
+
+/// Settings, Terminal (Settings.dc.html).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    pub font: TerminalFont,
+    /// Pixels, 10 to 20.
+    pub font_size: u8,
+    /// Line height in tenths of the font size, 10 to 18 (1.6 is 16).
+    pub line_height_tenths: u8,
+    pub ligatures: bool,
+    pub cursor: CursorShape,
+    pub cursor_blink: bool,
+    pub scheme: ColorScheme,
+    pub scrollback: Scrollback,
+    pub copy_on_select: bool,
+    pub right_click_pastes: bool,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            font: TerminalFont::default(),
+            font_size: 13,
+            line_height_tenths: 16,
+            ligatures: true,
+            cursor: CursorShape::Block,
+            cursor_blink: true,
+            scheme: ColorScheme::HolonetDark,
+            scrollback: Scrollback::Lines10k,
+            copy_on_select: false,
+            right_click_pastes: true,
+        }
+    }
+}
+
+impl TerminalSettings {
+    /// Font size, clamped to the allowed range.
+    pub fn font_size(&self) -> f32 {
+        self.font_size.clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end()) as f32
+    }
+
+    /// Line height as a multiple of the font size, clamped to 1.0..=1.8.
+    pub fn line_height(&self) -> f32 {
+        self.line_height_tenths.clamp(*LINE_HEIGHT_RANGE.start(), *LINE_HEIGHT_RANGE.end()) as f32 / 10.0
+    }
+
+    /// Whether ligatures are drawn: on, and the font has them.
+    pub fn ligatures_on(&self) -> bool {
+        self.ligatures && self.font.supports_ligatures()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAlive {
+    #[default]
+    Secs30,
+    Secs60,
+    Off,
+}
+
+impl KeepAlive {
+    pub fn interval(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Secs30 => Some(std::time::Duration::from_secs(30)),
+            Self::Secs60 => Some(std::time::Duration::from_secs(60)),
+            Self::Off => None,
+        }
+    }
+}
+
+/// Settings, Connection (Settings.dc.html).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnectionSettings {
+    pub keep_alive: KeepAlive,
+    /// Reconnect after sleep, a network change or a dropped connection
+    /// (`decisions.md`: on, 5 attempts).
+    pub reconnect: bool,
+}
+
+impl Default for ConnectionSettings {
+    fn default() -> Self {
+        Self { keep_alive: KeepAlive::Secs30, reconnect: true }
+    }
+}
+
+impl ConnectionSettings {
+    /// Keep-alive interval for a host: the global setting, unless the host
+    /// turned keep-alive off.
+    pub fn keep_alive_for(&self, host: &Host) -> Option<std::time::Duration> {
+        if host.keep_alive { self.keep_alive.interval() } else { None }
     }
 }
 
@@ -538,5 +746,59 @@ mod tests {
         assert_eq!(d.hosts[0].port, 22);
         assert!(d.hosts[0].keep_alive);
         assert_eq!(d.settings.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn milestone_2_settings_load_with_terminal_defaults() {
+        // Settings exactly as a milestone 2 vault wrote them.
+        let old = r#"{"schema":1,"settings":{"unknown_host_keys":"refuse","connect_timeout_secs":7,"lock_after_idle_mins":15}}"#;
+        let d: VaultData = serde_json::from_str(old).unwrap();
+        assert_eq!(d.settings.unknown_host_keys, UnknownHostKeys::Refuse);
+        assert_eq!(d.settings.connect_timeout_secs, 7);
+        assert_eq!(d.settings.terminal, TerminalSettings::default());
+        assert_eq!(d.settings.connection, ConnectionSettings::default());
+        // Defaults follow Settings.dc.html and decisions.md.
+        let t = &d.settings.terminal;
+        assert_eq!(t.font.family(), "JetBrainsMono Nerd Font");
+        assert_eq!((t.font_size(), t.line_height()), (13.0, 1.6));
+        assert!(t.ligatures && t.cursor_blink && t.right_click_pastes && !t.copy_on_select);
+        assert_eq!(t.scrollback.lines(), Some(10_000));
+        assert_eq!(d.settings.connection.keep_alive.interval(), Some(std::time::Duration::from_secs(30)));
+        assert!(d.settings.connection.reconnect);
+    }
+
+    #[test]
+    fn terminal_settings_round_trip_partial_and_clamp() {
+        let mut t = TerminalSettings {
+            font: TerminalFont::Installed("Cascadia Mono".into()),
+            scheme: ColorScheme::Light,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<TerminalSettings>(&json).unwrap(), t);
+        // Missing fields take their defaults; unknown enum spellings are rejected.
+        let partial: TerminalSettings = serde_json::from_str(r#"{"font_size":16}"#).unwrap();
+        assert_eq!(partial.font_size, 16);
+        assert_eq!(partial.font, TerminalFont::Bundled(BundledFont::NerdFont));
+        assert!(serde_json::from_str::<TerminalSettings>(r#"{"cursor":"beam"}"#).is_err());
+        // Out-of-range values are clamped when read.
+        t.font_size = 99;
+        t.line_height_tenths = 2;
+        assert_eq!((t.font_size(), t.line_height()), (20.0, 1.0));
+        // The NL build has no ligatures whatever the switch says.
+        t.font = TerminalFont::Bundled(BundledFont::NerdFontNl);
+        assert!(t.ligatures && !t.ligatures_on());
+    }
+
+    #[test]
+    fn keep_alive_respects_the_host_switch() {
+        let c = ConnectionSettings { keep_alive: KeepAlive::Secs60, reconnect: true };
+        let mut h = Host::new("x");
+        assert_eq!(c.keep_alive_for(&h), Some(std::time::Duration::from_secs(60)));
+        h.keep_alive = false;
+        assert_eq!(c.keep_alive_for(&h), None);
+        let off = ConnectionSettings { keep_alive: KeepAlive::Off, ..c };
+        h.keep_alive = true;
+        assert_eq!(off.keep_alive_for(&h), None);
     }
 }

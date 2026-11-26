@@ -384,3 +384,419 @@ Connect from the Hosts detail panel, by double-clicking a card or row, or with "
 Clippy, the unit tests and the WSL integration tests (7) pass.
 
 **Milestone 2 is done.**
+
+## Milestone 3, phase 0: spikes (25 Nov 2026)
+
+JetBrainsMono Nerd Font v3.5.1 (`JetBrainsMono.tar.xz`, sha256 checked against the release) was extracted to a scratch folder for these tests. Nothing was installed in Windows.
+
+### (a) Ligatures and icon widths in the cell grid: ligatures work, with one fix
+
+`holonet --font-spike` (with `HOLONET_SPIKE_FONTS` set to the extracted files) shapes test strings in each build and paints them the way the terminal does, one glyph forced into each cell.
+
+**Why milestone 1 saw no ligatures:**
+- GPUI 0.2.2's DirectWrite backend (`platform/windows/direct_write.rs`) always calls `SetTypography`. When a font has no features set, the typography it passes is empty.
+- An empty typography turns off DirectWrite's default `calt`, so no ligatures form anywhere in GPUI text.
+- Asking for `calt` explicitly fixes it: `font.features = FontFeatures(vec![("calt", 1)])`.
+
+**Results with `calt` explicit:**
+
+| Build | `->` `=>` `!=` `===` `<=` `>=` `<!--` `\|>` `::` | On the grid |
+| --- | --- | --- |
+| JetBrainsMono Nerd Font, Mono and Propo | Ligatures form (glyph ids differ from single characters) | Yes: one glyph per character, every glyph at a whole cell, with or without forced width |
+| JetBrainsMonoNL Nerd Font and NL Mono | No ligatures, as intended | Yes |
+
+JetBrains Mono's ligatures replace each character with a same-width piece, so forcing glyphs into cells keeps them intact. A ligature forms only within one styled run, which is what other terminals do.
+
+**Icon widths** are measured in cells, at 13 px with a cell of 7.80 px:
+
+| Build | Powerline, folder, git branch, Linux, Rust, Ubuntu (Font Logos) |
+| --- | --- |
+| Mono, NL Mono | All exactly 1 cell |
+| Nerd Font (non-Mono) | Advance 1 cell; the icon is drawn larger and spills into the next cell |
+| Propo | Advances from 0.96 to 1.56 cells; in the grid it is placed per cell and spills like the non-Mono build |
+
+**Decisions:**
+- The design's default, "JetBrainsMono Nerd Font" (non-Mono), stays the default.
+- The ligatures setting is shown. The renderer sets `calt` to 1 or 0 from it.
+- Wide icons overlap the next cell, as in Windows Terminal and WezTerm. The Mono build is the choice for strict alignment, as its card says.
+
+### (b) Sleep, resume and network changes: the APIs register without a window; real events not yet tested
+
+`cargo run -p holonet-app --example power_spike --release` registers three Win32 callbacks, none of which need a window. This is good news for GPUI, which does not expose window messages.
+
+| API | Result on Windows 11 ARM64 |
+| --- | --- |
+| `PowerRegisterSuspendResumeNotification` (`DEVICE_NOTIFY_CALLBACK`) | Returns 0 (registered) |
+| `NotifyIpInterfaceChange` (`AF_UNSPEC`) | Returns 0 |
+| `NotifyNetworkConnectivityHintChange` | Returns 0, and delivers the initial hint at once (level 3: internet) |
+
+The live test was skipped: Wi-Fi off and on, then sleep and wake. It moves to phase 7's exit check.
+
+The spike also logs whenever the wall clock and the monotonic clock jump apart, as a second sign of sleep. Phase 7 records which of these fire, in which order, and how soon after waking. The keep-alive timeout remains the fallback that catches every drop.
+
+### (c) Embedding the fonts: cheap at run time, larger download
+
+- **The 16 files to bundle:** Regular, Bold, Italic and Bold Italic of the Nerd Font, Mono, Propo and NL builds, offered as the four "Bundled" cards. They total 39.0 MB, or 21.6 MB zipped.
+- **Registration:** GPUI's `add_fonts` took **4 ms** for 20 files (51 MB). Reading them from disk took 10 to 66 ms; embedding skips that.
+- **Size:** today's `holonet.exe` is 18.5 MB, or 7.9 MB zipped. With the fonts embedded, the exe is about 58 MB and the release zip about 30 MB.
+
+**Decision:** embed them with `include_bytes!`, as Inter and Space Grotesk already are. The cost is download size only, and a single-file exe is simpler to run unsigned. If size ever matters, the fallback is a `fonts/` folder beside the exe, loaded at start.
+
+### Left in the tree for later phases
+- `holonet --font-spike` (`src/font_spike.rs`) stayed as a regression check until phase 2 embedded the fonts. Removed in phase 9.
+- `examples/power_spike.rs` and its `windows-sys` dev-dependency stayed for phase 7's live test. Removed in phase 9.
+
+## Milestone 3, phase 1: settings model and lost connections (25 Nov 2026)
+
+**`holonet-model`.**
+- `Settings` gains `terminal: TerminalSettings` and `connection: ConnectionSettings`. Both use `#[serde(default)]`, so milestone 2 vaults open unchanged: the throwaway vault from milestone 2 unlocked and connected as before.
+- `TerminalSettings` holds:
+  - `font` (`Bundled(NerdFont | NerdFontMono | NerdFontPropo | NerdFontNl)` or `Installed(name)`)
+  - `font_size` (10 to 20) and `line_height_tenths` (10 to 18), clamped when read
+  - `ligatures`, `cursor` (Block, Bar or Underline), `cursor_blink`
+  - `scheme` (Holonet Dark, High contrast or Light), `scrollback` (10,000, 50,000 or unlimited)
+  - `copy_on_select`, `right_click_pastes`
+- The defaults match `Settings.dc.html`. `ligatures_on()` is false for the NL build, whatever the switch says.
+- `ConnectionSettings` holds `keep_alive` (30 s, 60 s or off) and `reconnect` (on). `keep_alive_for(host)` honours the host form's own keep-alive switch.
+- 3 new tests: a settings block as milestone 2 wrote it, partial and clamped values, and the keep-alive combination.
+
+**`holonet-ssh`.**
+- `ConnectOptions::keep_alive` is now `Option<Duration>`, taken from Settings. Three unanswered keep-alives end the connection.
+- A shell ends in one of two ways:
+  - `Exit(code)` followed by `Closed`, or `Closed` alone: the shell ended, so the connection was not lost.
+  - `Lost(LostReason)`: the channel ended with no exit status, EOF or close.
+- The reason comes from russh's `Handler::disconnected` hook:
+  - `ServerDisconnected(message)`
+  - `NoResponse` (keep-alive or inactivity timeout)
+  - `Network(detail)` (reset, or closed without a goodbye)
+  - `Other`
+- Only `Lost` will reconnect, in phase 7. Until then the pane shows it as an ended session with the reason.
+- `Session::lost_reason()` exposes the same reason.
+
+**New WSL tests** (10 in all now):
+
+| Test | Result |
+| --- | --- |
+| `exit 3` in the shell | `Exit(3)`, then `Closed`; no lost reason |
+| `kill -9 $PPID` (kills this connection's sshd process, no SSH goodbye) | `Lost(Network("it closed without warning"))` at once |
+| Keep-alive every 1 s through a local proxy that stops forwarding but keeps the socket open | `Lost(NoResponse)` 2 to 8 s after the freeze |
+
+The app shows the killed connection as "Session ended. The network connection failed: it closed without warning". Phases 6 and 7 replace this with the designed wording.
+
+## Milestone 3, phase 2: renderer and fonts (25 Nov 2026)
+
+**Bundled fonts.**
+- JetBrainsMono Nerd Font v3.5.1 lives in `crates/holonet-app/assets/fonts/jetbrainsmono-nerd/`. It holds Regular, Bold, Italic and Bold Italic of the Nerd Font, Mono, Propo and NL builds (16 files, 39 MB), plus `OFL.txt` and `NOTICE.md` (copyrights and the icon-set licences).
+- The fonts are embedded and registered at start-up with Inter and Space Grotesk.
+- `holonet.exe` grew from 18.5 MB to 56.7 MB.
+
+**The terminal view follows `TerminalSettings`** (`TerminalView::apply_settings`):
+- **Font, size and line height.** The cell width is measured from the chosen font. An installed font that is missing falls back to the preference list.
+- **Ligatures.** `calt` is set to 1 or 0 explicitly; the phase 0 finding is that leaving it unset turns ligatures off. They are always off for the NL build.
+- **Cursor:**
+  - The default shape (block, bar or underline) and blink pass to alacritty's `default_cursor_style`, so programs can still change them with DECSCUSR (tested).
+  - Blinking runs at 530 ms only while the pane has focus. It stays solid for a moment after typing or output.
+  - It stops when Windows' "Animation effects" is off (`SPI_GETCLIENTAREAANIMATION`, `src/platform.rs`).
+  - Without focus, the cursor is drawn as an outline.
+- **Color schemes.** `Palette` holds Holonet Dark, High contrast and Light.
+  - The design gives only the background, foreground, dim, accent and green for each scheme, so the 16 ANSI colors are built from those hues.
+  - A test checks contrast against the background: 7:1 for the foreground, 4.5:1 for every ANSI color except black and bright black (3:1), and 4.5:1 for text on the selection and on the cursor.
+  - In Light, "white" is a dark gray so programs that print white stay readable.
+  - Dim text is mixed a third of the way toward the background, which works on light backgrounds too.
+- **Scrollback.** 10,000 lines, 50,000 lines, or unlimited (no cap; alacritty grows the history as output arrives).
+- **Copy on select** (on mouse up after a drag) and **right-click pastes**.
+- Session tabs take these settings from the vault. `holonet --showcase` accepts options for screenshots before the Settings page exists: `light`, `contrast`, `bar`, `underline`, `noblink`, `mono`, `propo`, `nl`, `nolig`, `size=N`, `lh=N` and `font=Name_With_Underscores`.
+
+**Box drawing (new, `src/boxdraw.rs`).**
+- At the design's 1.6 line height, font glyphs for `│ ─ ┌` stop short of the row above and below, so table and `tmux` borders broke between rows.
+- These are now drawn as rectangles that fill the cell, as Alacritty, WezTerm and Windows Terminal do. That covers U+2500 to U+257F (light, heavy, double; rounded corners drawn square) and the block elements U+2580 to U+259F (halves, eighths, quadrants, shades).
+- Dashed lines and diagonals stay with the font.
+- The segment table is generated from the Unicode names, and tests check its edges, weights and blocks.
+
+**Checks.**
+- Screenshots: each scheme, block, bar and underline cursors, the Nerd Font, Mono and NL builds, size 16 with line height 1.2, and a live WSL session printing box drawing, shades and ligatures.
+- `--stream-bench` (10 MB), three runs each:
+
+| | Throughput | Frames | Average paint |
+| --- | --- | --- | --- |
+| Before this phase | 72 to 85 MB/s | 64 to 71 fps | 1.9 to 2.1 ms |
+| After | 79 to 81 MB/s | 64 to 71 fps | 2.3 to 2.5 ms |
+
+- Paint costs about 0.4 ms more per frame (Nerd Font with `calt` shaping, plus the box check), still far inside a 16 ms frame. Throughput is unchanged.
+- 22 app tests pass, 4 of them new (palettes, configure, box drawing).
+
+**Notes.**
+- Programs that choose 24-bit colors themselves keep them in every scheme. A prompt themed for dark backgrounds can look pale in Light; that is the program's color, not the palette's.
+- The font licences are in the repository now. Showing them in Settings comes with phase 3, and shipping them beside the exe with release packaging in milestone 7.
+
+## Milestone 3, phase 3: Settings page (25 Nov 2026)
+
+The Settings page is rebuilt from `Settings.dc.html` in `workspace/settings.rs`. Section chips (Terminal, Vault and security, Connection, Keyboard, About) scroll to their section with GPUI's `ScrollHandle::scroll_to_top_of_item`.
+
+**Terminal.**
+- **Live preview.** A real `TerminalView` in a preview mode that never takes focus, fed the design's sample with palette colors plus a Nerd Font prompt line. It shows the actual font, ligatures, scheme and cursor. The header shows "font · size".
+- **Font cards**, two equal columns, each drawn in its own font:
+  - the four bundled builds, marked "Bundled"
+  - Cascadia Mono and Consolas when installed, marked "System"
+  - the installed font chosen, if it is another one
+- **"Use another installed font"** opens a searchable list of every installed family. GPUI cannot tell monospaced fonts apart, so the dialog says that.
+- **Installed fonts fall back to the bundled Mono build** for glyphs they lack, so Nerd Font prompt icons still draw in, say, Courier New.
+- **Controls:**
+  - Font size slider (10 to 20 px) and line height slider (1.0 to 1.8)
+  - Font ligatures, off and disabled for the NL build, with the design's note
+  - Cursor shape and Color scheme as segmented controls
+  - Blinking cursor
+  - Scrollback (10,000 lines, 50,000 lines or Unlimited)
+  - Copy on select and Right-click pastes, as rows where the whole row toggles
+- **New control: `ui::Slider`.** Click or drag on the track, or use the arrow keys, Home and End when focused. It shows the value in mono and has an accent focus ring, and it is in `--gallery`.
+
+**Vault and security:** unchanged rows.
+
+**Connection:** Keep-alive interval (applies to new connections). "Reconnect after sleep or network change" joins this section in phase 7, when reconnecting exists.
+
+**Keyboard:** the design's read-only list, showing only shortcuts that work today (Copy and Paste). Each joins the list in the phase that adds it.
+
+**About:** the version, and the bundled fonts with "View licences". That dialog shows `NOTICE.md` and the three OFL texts, compiled into the exe.
+
+**Changes apply at once.**
+- Each change saves to the vault and updates the preview.
+- `HolonetApp::apply_terminal_settings` passes the change to every open session tab (deferred, so the workspace and the app are never updated at the same time). Each `TerminalView` applies it at its next frame, where a window is available, and re-measures its grid, so the server hears about the new size.
+
+**Checked by hand against WSL, with a session open:**
+
+| Change | Result |
+| --- | --- |
+| Mono build, then 16 px | Preview and the open session switched; the session resized to 122×23 |
+| Light, then Bar cursor | Session redrawn light at once, with ANSI colors from the Light palette |
+| About chip | Scrolled to the end of the page |
+| View licences | Dialog with the notices and OFL texts; Close |
+| "cour" in the installed font list | Courier New; picked; its own card appears, selected |
+| Restart and unlock | Courier New, 16 px, Light and Bar still set |
+| Courier New with Nerd icons in the preview | Icons drawn from the bundled fallback (empty boxes before the fallback was added) |
+| Slider keys in the gallery | Right, End and Left step and clamp |
+
+Afterwards the throwaway vault was set back to the defaults.
+
+**Not on the page yet**, because those features don't exist: Appearance (milestone 7), SFTP (5), Updates (7), and the update notice.
+
+## Milestone 3, phase 4: tabs (25 Nov 2026)
+
+**Structure.**
+- `SessionTab` is now `Pane` (`session.rs`): one host's connection, prompts, states and terminal, drawn as the pane card (group edge, pane header, content).
+- The new `Tab` (`tab.rs`) holds the panes, one each until phase 5. It draws the session header and status bar for its active pane, and observes its panes so the header, status bar and title-bar dot follow them.
+- `HolonetApp` keeps a list of tabs and observes each. Closing a pane closes its tab when it was the last pane. The Locked screen counts panes.
+
+**Tab strip.**
+- The vault tab is pinned. Session tabs shrink to 130 px, then scroll sideways (Terminal.dc.html: `overflow-x: auto`). The active tab is scrolled into view whenever it changes.
+- Dots, as Tab.md specifies: solid when connected, a ring while connecting, `warn` when failed or ended.
+- "+" stays just after the strip.
+
+**New-tab host picker** (`host_picker.rs`, owner decision 3).
+- "+" or Ctrl Shift T opens a 380 px popup under "+", at the position recorded when "+" was painted. It holds a search field and the saved hosts, sorted by name, each with `user@address:port`.
+- Typing filters on the name, address, user and tags. Up and Down move the highlight, Enter connects in a new tab, and Esc clears the search and then closes.
+- An outside click closes it.
+- With no saved hosts it says so and offers "New host", which opens the host form.
+
+**Shortcuts.**
+- Ctrl Shift T (new tab), Ctrl Shift W (close the active pane, which is the tab for now), Ctrl Tab and Ctrl Shift Tab (next and previous, through the vault tab and the session tabs).
+- They are GPUI actions bound in the `HolonetApp` context. GPUI matches bindings before key-down handlers, so they win over the terminal while every other key still reaches the shell.
+- Settings, Keyboard now lists them.
+
+**Bugs found and fixed while testing:**
+1. **Ctrl Shift T did nothing right after unlocking.** Nothing had keyboard focus, so GPUI had no element to dispatch the binding from. The app root now has a focus handle and takes focus when nothing else holds it.
+2. **Ctrl Tab did nothing on the vault view.** Focus stayed on the hidden terminal of the tab just left. Selecting the vault view now focuses the app root.
+3. **The vault tab scrolled out of view** with many tabs. It now sits outside the scrolling part, as the design pins it.
+
+**Checked with real input against WSL** (two hosts: `wsl-test` by key, and `localhost`, trusted on first connect, with its passphrase saved):
+
+| Check | Result |
+| --- | --- |
+| Ten tabs from the keyboard (Ctrl Shift T, type, Enter), alternating hosts | All connected; strip scrolled to the newest; vault tab still visible |
+| Labelled each shell `TAB-n`, then Ctrl Tab through all of them | Correct order; wraps through the vault tab |
+| Ctrl Tab to tab 3, Ctrl Shift W | TAB-3 closed; TAB-4 active and focused |
+| ✕ on tab 1 | Closed; TAB-4 stayed active |
+| Ctrl Shift Tab | TAB-2 |
+| Lock now | "8 sessions are open"; after unlocking all 8 tabs are back |
+| Ctrl Shift W eight times, then Ctrl Shift T | All closed, the vault view shows, the picker opens |
+
+## Milestone 3, phase 5: split panes (25 Nov 2026)
+
+**Pane tree** (`tab.rs`).
+- A tab holds a tree. A leaf is one pane. A split puts two subtrees side by side (Split right) or one above the other (Split down), sized by a ratio.
+- A tab holds at most four panes (owner decision 1). At four, the Split buttons are disabled and the header says "A tab holds up to 4 panes."
+- Splitting replaces the active leaf with a split of it and the new pane. The new pane starts at half the size, takes focus and becomes active.
+- Removing a leaf puts its sibling in the parent's place.
+
+**Layout.**
+- Panes sit on the `sunken` gutter with an 8 px gap (Terminal.dc.html). Each split's halves use `flex-grow` set to the ratio with a zero basis; Taffy collapses percentage widths inside flex parents.
+- The active pane has the `ink-muted` border, and the others `line`. Panes without focus draw an outline cursor.
+
+**Resizing.**
+- The 8 px gap between two subtrees is the handle, with a resize cursor and a 2 px line: half-strength accent on hover, full accent while dragging (an undrawn state).
+- Each split records its bounds when painted, so a drag maps straight to a ratio.
+- Panes stay at least 190 px wide or 170 px tall: about 20 columns by 5 rows at the default font, plus the pane header and padding.
+- Every terminal re-measures after a drag and sends its new size to the server.
+
+**Controls.**
+- The session header has **Split right** and **Split down** (44 px, as drawn), each with a chevron menu: "Same host" (with its shortcut) and every saved host (owner decision 2).
+- The menu is drawn with `deferred` plus `anchored`, so it appears above the panes. It closes on an outside click.
+- Shortcuts:
+  - Ctrl Shift D: split right, same host
+  - Ctrl Shift E: split down, same host
+  - Ctrl Shift ] and Ctrl Shift [: next and previous pane
+  - Ctrl Shift W: close the active pane, and the tab with its last pane
+- With Shift held, Windows reports `]` and `[` as `}` and `{`, so both spellings are bound. Found during testing: the first build only bound `ctrl-shift-]`, and nothing happened.
+- Clicking anywhere in a pane makes it active (`capture_any_mouse_down`, so the terminal still gets the click).
+- A pane's "Close tab" button reads "Close pane" when the tab holds more than one pane.
+- The header and status bar follow the active pane. The tab's name and dot follow it too.
+- Settings, Keyboard lists the new shortcuts.
+
+**Checked with real input against WSL:**
+
+| Check | Result |
+| --- | --- |
+| wsl-test, then Ctrl Shift D, Ctrl Shift E, then the Split right menu choosing localhost | Four panes, two hosts; the header shows localhost; Split disabled with the message |
+| `stty size` in each pane, moving with Ctrl Shift ] | 28 72, 12 72, 12 33, 12 33, matching each header |
+| Dragged the main gap from x 1012 to 700 | Left pane 45×28, the right column 99×12 and 46×12 twice; `stty size` matched all four |
+| Ctrl Shift W on the active pane | It closed; its sibling took the space; Split enabled again |
+| `exit` in another pane | Ended bar with "Close pane"; clicking it closed the pane |
+| Ctrl Shift W twice more | The tab closed; the vault view came back |
+| Split down, then a click in the top pane, then typing | The text went to the top pane |
+
+## Milestone 3, phase 6: connection states (25 Nov 2026)
+
+The pane's states now follow `ConnectStates.dc.html`. Each has its log lines at the top, a centred message, buttons, and a matching word in the pane header and status bar.
+
+**Log lines.**
+- Each attempt starts a fresh log: "Resolving <name> …" (names only), then "Opening TCP connection to <address:port>".
+- Then the host key lines, then "Offering password for <user>" or "Offering key <name> for <user>" once the key is settled.
+- Failures add a warn line, such as "No response after 10 seconds", "Server: Permission denied (publickey,password,keyboard-interactive)", "The passphrase did not unlock <key>", or the network reason.
+
+**States** (header word in brackets):
+
+| State | Title | Body | Buttons |
+| --- | --- | --- | --- |
+| Connecting (Connecting) | Connecting to <name> | Trying <address>. (Tailscale wording waits for milestone 4) | Cancel |
+| Not reachable | Holonet could not reach <name> | The reason (refused, unresolved, network error) | Retry, Edit host |
+| Timed out | <name> did not answer | "<address> is a private address, so you may be away from its network.", or "The server may be down…" for public addresses | Retry, Edit host |
+| Sign-in refused (password) | The server refused the saved password (or "the password" when typed) | The password may have changed… | Enter password, Edit host |
+| Sign-in refused (key) | The server refused the key <name> | Not in authorized_keys for <user>, or key sign-in not allowed | Retry, Edit host |
+| Wrong passphrase | The key passphrase is wrong | Enter it again; the server was not contacted with this key | Enter passphrase, Edit host |
+
+- Every failure also has a quiet "Close tab", or "Close pane" in a split. The design draws none, but a pane needs a way out besides the tab's ✕.
+- The spinner is the design's: a 3 px `line` ring with an accent arc turning on it every 0.9 s. GPUI borders take one color, so the arc is an SVG over the ring.
+- New: after **Edit host** from a stopped pane, **Save and connect** retries in that pane instead of opening another tab. Testing showed failed tabs piling up without this.
+- Two unit tests: the private-address wording, and that every failure has a header word.
+
+**Reached on purpose against WSL:**
+
+| How | Result |
+| --- | --- |
+| A saved host on port 2223 (nothing listening) | Not reachable: "The host refused the connection. Check the port, and that SSH is running." |
+| Edit host on that pane, address 10.255.255.1 | Ring spinner and "Trying 10.255.255.1.", then after 10 s Timed out with the private-address text |
+| New host with a key, then a wrong passphrase at the prompt | Wrong passphrase |
+| Edit host to password sign-in, then a wrong password at the prompt | Sign-in refused: "The server refused the password", with the server's method list |
+| Edit host to the keyboard-interactive-only user, with the key | Sign-in refused: "The server refused the key holotest_ed25519_pass" |
+| Edit host back to `holotest`, Save and connect | Retried in the same pane and connected; still one tab |
+
+Not reached by hand: "the saved password" wording. That path depends only on whether the attempt used the vault's password, and the typed-password case above shows the shared code.
+
+## Milestone 3, phase 7: automatic reconnect (25 Nov 2026)
+
+**Behaviour** (decisions.md: on, 5 attempts, scrollback kept, the shell restarts so nothing is replayed).
+- The terminal now reports `TerminalEvent::Lost(reason)` separately from `Ended`. The pane keeps its `TerminalView`, so the scrollback stays.
+- The pane shows the "Reconnecting" banner from ConnectStates.dc.html above the old output, which is dimmed to 75%:
+  - the cause in bold, then "Reconnecting, attempt n of 5." or "Attempt n of 5 failed. Trying again in n s."
+  - the last attempt's error underneath
+  - **Reconnect now** (enabled while waiting) and **Close tab** / **Close pane**
+  - the design's footnote, "Scrollback is kept. The shell session itself restarts after reconnecting."
+- Attempts wait 1, 2, 4, 8 and 16 s. Only network failures retry: refused, unresolved, network error or timed out. A refused sign-in shows the usual failure.
+- **A changed host key during the outage stops reconnecting** with the changed-key view, as on any connection (decisions.md: always stop).
+- While the vault is locked, a key cannot be checked, so the attempt waits and says "Unlock the vault so Holonet can check the host key."
+- After five failures: "Holonet could not reconnect to <name>. It tried 5 times. <last reason>", with Retry, Edit host and Close.
+- On success the terminal gets a dim separator line, "-- Reconnected at HH:MM. The shell restarted; the output above is from the previous session. --", then the new shell.
+- **Typed secrets.** A password or passphrase typed at a prompt is kept in the pane's memory once it works, and used again when reconnecting. It is dropped with the pane, and saved to the vault only if "Save in the encrypted vault" was ticked.
+- **Cause.**
+  - `platform::watch_system` registers the three Win32 callbacks from phase 0 (`PowerRegisterSuspendResumeNotification`, `NotifyIpInterfaceChange`, `NotifyNetworkConnectivityHintChange`) and passes the events to every pane.
+  - A drop within five minutes of a sleep or wake reads "Connection lost when this PC went to sleep."; after a network change, "Connection lost after a network change."
+  - Otherwise the text comes from the lost reason: "The server stopped answering." or "The connection was lost."
+  - A wake or network change while waiting starts the next attempt at once.
+- **Settings, Connection:** "Reconnect after sleep or network change", on by default. Off, a drop ends the session as before.
+
+**Checked against WSL:**
+
+| Check | Result |
+| --- | --- |
+| `kill -9 $PPID` in a live shell (drops the TCP connection) | Banner, then reconnected after about 1 s; old output and the separator line in scrollback; `ps` shows a single new login shell |
+| `systemctl stop ssh.socket`, drop, `start` after about 5 s | Attempts 1 and 2 refused, with "The host refused the connection…" under the banner; attempt 3 reconnected |
+| Socket kept stopped | Five attempts (Windows takes about 2 s to report a refused localhost connection, so most of the time an attempt is in flight), then "could not reconnect… It tried 5 times." Retry after starting the socket reconnected |
+| Temporary sshd on 2223 with throwaway key A, trusted; restarted with key B; drop | Reconnect stopped at "The host key for blackhole has changed", showing key A as trusted and key B as presented; no credentials sent. The temporary sshd and both keys were removed afterwards |
+| Password typed at the prompt with Save unticked, then a drop | Reconnected without asking; the separator confirms it was a reconnect |
+| Reconnect switched off, then a drop | "Session ended" bar with Reconnect and Close, as before; switched back on afterwards |
+
+**Live sleep and Wi-Fi test** (the owner toggled Wi-Fi, then slept the PC for about 40 s, with the phase 0 logger and Holonet both running):
+- Wi-Fi off and on: interface parameter changes, and connectivity hints going from 3 to 2 and back to 3.
+- Sleep: `PBT_APMSUSPEND`, then on wake `PBT_APMRESUMEAUTOMATIC` and `PBT_APMRESUMESUSPEND` within 1 ms, followed by a burst of interface changes.
+- The monotonic clock (`Instant`, which uses QPC) counted through sleep: wall and monotonic both read 39.4 s. A clock-gap check could not detect sleep, so the power notification is the signal to use.
+- The open sessions are to WSL on this PC, so the connection survived sleep: typing after wake worked at once. **A drop after sleep from a remote server was not tested** (there is none in this setup). The code path is the same as the tests above, with the cause set by the power event.
+
+## Milestone 3, phase 8: find in the terminal (25 Nov 2026)
+
+**Behaviour** (Terminal.dc.html's find bar).
+- **Opening and closing:**
+  - Ctrl Shift F or the header's **Find** button opens a bar under the tab header. The button has an accent border while the bar is open.
+  - Ctrl Shift F with the bar open puts focus back in its field.
+  - Esc or the button closes the bar and clears the highlights. The view stays where it was scrolled.
+- **Searching:**
+  - The search covers the active pane's history and screen, one line at a time, so a match never spans a wrapped line.
+  - It is plain text and ignores case by default. **Match case** and **Regex** (the `regex` crate) change that.
+  - An invalid regex shows "Invalid regex" in amber and clears the highlights.
+- **Count:** "Type to search", "No matches", "1 line matches" or "N lines match", as drawn.
+- **Moving between matches:**
+  - Every match gets a faint accent background and the current match a stronger one. Both pass 4.5:1 with the foreground in all three schemes, and a test checks this.
+  - The first current match is the newest. Enter and the up button go to the previous (older) match; Shift Enter and the down button go to the next. Both wrap around.
+  - When the current match is off screen, the view scrolls so it sits a few lines from the top (at most 3, and a third of the pane in short panes).
+- **Live updates:** new output re-runs the search, at most every 150 ms, and the current match keeps its distance from the bottom.
+- **Panes:** the bar follows the active pane. Clicking another pane clears the old pane's highlights and searches the new one.
+
+**`--find-bench`** (10,000-line history at 150×40, from `sample::bulk`; release build, ARM64):
+
+| Query | Matches | Find | Snapshot with highlights |
+| --- | --- | --- | --- |
+| plain, every line | 10,039 | 6.95 ms | 0.43 ms |
+| plain, few lines | 11 | 7.92 ms | 0.22 ms |
+| plain, no match | 0 | 6.57 ms | 0.22 ms |
+| regex `took=\d{3}ms` | 6,039 | 8.98 ms | 0.40 ms |
+| case-sensitive | 10,039 | 7.44 ms | 0.36 ms |
+
+Every keystroke's search plus a frame stays under 16 ms. The time is spent reading cells into a string, so it barely depends on the query.
+
+**Checked against WSL** (`seq 1 3000 | sed 's/^/Row /'`):
+
+| Check | Result |
+| --- | --- |
+| "row 15" | "111 lines match" (Row 15, 150–159, 1500–1599); Row 1599 current |
+| Enter twice, then Shift Enter | Current moved to 1597, then back to 1598 |
+| Match case on | "No matches" |
+| Regex on, `Row (2\d` | "Invalid regex" in amber |
+| `Row (2\d00)$` | "10 lines match"; the view jumped from the bottom to Row 2900 |
+| Esc | Bar closed, highlights gone |
+| Split right, "Row 2999" in the new pane | "No matches"; clicking the first pane gave "1 line matches" with Row 2999 highlighted |
+
+## Milestone 3, phase 9: wrap-up (25 Nov 2026)
+
+**Removed.** The phase 0 spikes are gone: `holonet --font-spike` (`src/font_spike.rs`), `examples/power_spike.rs`, and the `windows-sys` dev-dependency. The live code from them is `assets.rs` (embedded fonts) and `platform::watch_system`.
+
+**Done check from a clean profile**: release build, a new vault file in an empty folder (the vault holds every setting, so this is a clean profile), the WSL test server.
+
+| Done means | Result |
+| --- | --- |
+| Several tabs from the new-tab host picker | Created the vault, added hosts `wsl-a` and `wsl-b`. "+" opened the picker with both; `wsl-a` showed the first-connection key prompt, Trust and connect. Ctrl Shift T, "wsl-b", Enter opened a second tab with no prompt (same server key) |
+| Nested panes with a second host, resized by dragging | In the `wsl-b` tab, the Split right menu picked `wsl-a`, then Split down nested a third pane. Dragging the divider changed the panes from 72 to 96 and 49 columns |
+| Find in a pane's scrollback | `seq 1 500`, Ctrl Shift F, "42": "15 lines match" (42, 142, 242, 342, 420–429, 442); Enter moved to the older match |
+| Font, size and scheme apply to every open terminal at once | Settings: Cascadia Mono, 17 px, Light. All four terminals in both tabs changed at once |
+| A dropped connection reconnects, keeps its scrollback and says what happened | `kill -9 $PPID`: "The connection was lost. Reconnecting, attempt 1 of 5." over the dimmed output, then connected. Find for "before-drop" found it above "-- Reconnected at 19:18. The shell restarted; …" |
+
+fmt, clippy `-D warnings`, the unit tests and the WSL integration tests pass.
+
+**Milestone 3 is done.** Carried forward, not tested here: a drop after sleep from a remote server (phase 7).

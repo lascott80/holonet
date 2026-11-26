@@ -2954,8 +2954,10 @@ dependencies = [
  "holonet-ssh",
  "holonet-vault",
  "jiff",
+ "regex",
  "tokio",
  "unicode-segmentation",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -2,20 +2,27 @@
 //!
 //!   holonet                 the app: create or unlock the vault, then the workspace.
 //!                           HOLONET_VAULT=<file> uses another vault file (testing).
-//!   holonet --showcase      spike 3: terminal grid from canned output
+//!   holonet --showcase [options]  terminal grid from canned output; options set
+//!                           terminal settings for screenshots: light, contrast, bar,
+//!                           underline, noblink, mono, propo, nl, nolig, size=N, lh=N
 //!   holonet --gallery       milestone 2 phase 3: every shared control
 //!   holonet --fonts         spike 1: font and glyph width check
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
+//!   holonet --find-bench    time find over a full 10,000-line history, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
 
 mod app;
 mod assets;
+mod boxdraw;
 mod font_check;
 mod gallery;
 mod host_form;
+mod host_picker;
 mod input;
+mod platform;
 mod sample;
 mod session;
+mod tab;
 // Design-system modules: parts are used by later phases of milestone 2.
 #[allow(dead_code)]
 mod shell;
@@ -70,8 +77,72 @@ fn parse_bench() {
     );
 }
 
+/// Terminal settings from `--showcase` options, for screenshots before the
+/// Settings page exists.
+fn showcase_settings(args: impl Iterator<Item = String>) -> holonet_model::TerminalSettings {
+    use holonet_model::{BundledFont, ColorScheme, CursorShape, TerminalFont};
+    let mut s = holonet_model::TerminalSettings::default();
+    for arg in args {
+        match arg.as_str() {
+            "light" => s.scheme = ColorScheme::Light,
+            "contrast" => s.scheme = ColorScheme::HighContrast,
+            "bar" => s.cursor = CursorShape::Bar,
+            "underline" => s.cursor = CursorShape::Underline,
+            "noblink" => s.cursor_blink = false,
+            "mono" => s.font = TerminalFont::Bundled(BundledFont::NerdFontMono),
+            "propo" => s.font = TerminalFont::Bundled(BundledFont::NerdFontPropo),
+            "nl" => s.font = TerminalFont::Bundled(BundledFont::NerdFontNl),
+            "nolig" => s.ligatures = false,
+            other => {
+                if let Some(n) = other.strip_prefix("size=").and_then(|n| n.parse().ok()) {
+                    s.font_size = n;
+                } else if let Some(n) = other.strip_prefix("lh=").and_then(|n| n.parse().ok()) {
+                    s.line_height_tenths = n;
+                } else if let Some(name) = other.strip_prefix("font=") {
+                    s.font = TerminalFont::Installed(name.replace('_', " "));
+                } else {
+                    eprintln!("holonet: unknown showcase option {other}");
+                }
+            }
+        }
+    }
+    s
+}
+
+/// Find over a full history, as the find bar runs it on each keystroke.
+fn find_bench() {
+    let mut model = TerminalModel::new(GridSize { cols: 150, rows: 40 }, 10_000);
+    for chunk in sample::bulk(10_000_000).chunks(32 * 1024) {
+        model.advance(chunk);
+    }
+    for (label, pattern) in [
+        ("plain, every line", "(?i)status=200"),
+        ("plain, few lines", "(?i)items/996 "),
+        ("plain, no match", "(?i)nothing-here"),
+        ("regex, every line", r"took=\d{3}ms"),
+        ("case-sensitive", "INFO"),
+    ] {
+        let re = regex::Regex::new(pattern).unwrap();
+        let t = Instant::now();
+        let mut hits = Vec::new();
+        for _ in 0..10 {
+            hits = model.find(&re);
+        }
+        let per = t.elapsed().as_secs_f64() * 1e3 / 10.0;
+        let t = Instant::now();
+        model.set_hits(hits.clone(), hits.len().checked_sub(1));
+        let _ = model.snapshot();
+        let snap = t.elapsed().as_micros();
+        println!("{label:<20} {:>6} matches  find {per:.2} ms  snapshot with highlights {snap} us", hits.len());
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1);
+    if arg.as_deref() == Some("--find-bench") {
+        find_bench();
+        return;
+    }
     if arg.as_deref() == Some("--parse-bench") {
         parse_bench();
         return;
@@ -95,6 +166,10 @@ fn main() {
         theme::init_fonts(cx);
         ui::text_field::bind_keys(cx);
         ui::select::bind_keys(cx);
+        ui::slider::bind_keys(cx);
+        app::bind_keys(cx);
+        host_picker::bind_keys(cx);
+        tab::bind_keys(cx);
         if gallery {
             let bounds: Bounds<Pixels> = Bounds::centered(None, size(px(1280.), px(860.)), cx);
             let options = WindowOptions {
@@ -145,7 +220,10 @@ fn main() {
             cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
                     let mut view = terminal_view::TerminalView::new(window, cx);
-                    let _ = showcase;
+                    if showcase {
+                        let settings = showcase_settings(std::env::args().skip(2));
+                        view.apply_settings(&settings, window, cx);
+                    }
                     view.feed(&sample::showcase());
                     if stream {
                         view.stream(sample::bulk(10_000_000), true);

@@ -18,18 +18,18 @@ use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
     StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use holonet_ssh::{PtySize, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input;
-use crate::terminal::{GridSize, Snapshot, TerminalModel, palette};
+use crate::terminal::{GridSize, Match, Snapshot, TerminalModel};
+use holonet_model::TerminalSettings;
 
-const FONT_SIZE: f32 = 13.0;
-/// Line height from the design: 13px at 1.6.
-const LINE_HEIGHT: f32 = FONT_SIZE * 1.6;
+/// How long the cursor stays on, and off, while blinking.
+const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 const PADDING: f32 = 12.0;
 const STATUS_HEIGHT: f32 = 28.0;
 const SCROLLBACK: usize = 10_000;
@@ -52,8 +52,16 @@ enum Connection {
 pub struct TerminalView {
     model: TerminalModel,
     font: Font,
+    font_size: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
+    copy_on_select: bool,
+    right_click_pastes: bool,
+    /// Blink phase: the cursor is drawn while this is true.
+    blink_visible: bool,
+    /// Last keystroke or output; the cursor stays solid for a moment after it.
+    blink_reset: Instant,
+    blink_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
     /// Top-left of the grid in window coordinates, set at paint time.
     grid_origin: Rc<Cell<Point<Pixels>>>,
@@ -72,14 +80,75 @@ pub struct TerminalView {
     dragged: bool,
     /// Inside a session pane: no status bar, pane padding (Terminal.dc.html).
     embedded: bool,
+    /// The Settings preview: never takes focus, draws its cursor as if focused.
+    preview: bool,
+    /// Settings to apply at the next render (where a window is available).
+    pending: Option<TerminalSettings>,
+    /// Find in this terminal's scrollback, while the find bar targets it.
+    search: Option<Search>,
     /// Grid size measured from the canvas at paint time; applied next render.
     measured: Rc<Cell<Option<GridSize>>>,
 }
 
-/// Emitted when the remote shell ends or the connection closes.
+/// What the find bar asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub match_case: bool,
+    pub regex: bool,
+}
+
+/// The find bar's count line (Terminal.dc.html).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchStatus {
+    /// Nothing typed yet.
+    Empty,
+    /// The text is not a valid regular expression.
+    Invalid,
+    /// `lines` lines match, `matches` matches in all; `current` is 1-based.
+    Found {
+        lines: usize,
+        matches: usize,
+        current: usize,
+    },
+    NoMatches,
+}
+
+impl SearchStatus {
+    pub fn text(&self) -> String {
+        match self {
+            SearchStatus::Empty => "Type to search".into(),
+            SearchStatus::Invalid => "Invalid regex".into(),
+            SearchStatus::NoMatches => "No matches".into(),
+            SearchStatus::Found { lines: 1, .. } => "1 line matches".into(),
+            SearchStatus::Found { lines, .. } => format!("{lines} lines match"),
+        }
+    }
+}
+
+struct Search {
+    regex: regex::Regex,
+    hits: Vec<Match>,
+    lines: usize,
+    current: Option<usize>,
+    /// Model generation the hits were found at, and when.
+    generation: u64,
+    searched_at: Instant,
+    /// Re-runs the search once output has settled.
+    refresh: Option<gpui::Task<()>>,
+}
+
+/// How often a live search is re-run while output keeps arriving.
+const SEARCH_REFRESH: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Emitted when the remote shell ends or the connection under it is lost.
 #[derive(Clone, Debug)]
 pub enum TerminalEvent {
+    /// The shell exited or its channel closed: nothing to reconnect.
     Ended(String),
+    /// The connection was lost under a running shell (milestone 3 phase 7
+    /// reconnects). The terminal and its scrollback stay.
+    Lost(holonet_ssh::LostReason),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -104,18 +173,38 @@ const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 impl TerminalView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let text = window.text_system();
-        let family = crate::pick_font(&text.all_font_names());
-        let font = font(family);
-        let font_id = text.resolve_font(&font);
-        let cell_width = text.advance(font_id, px(FONT_SIZE), 'M').map(|s| s.width).unwrap_or(px(FONT_SIZE * 0.6));
+        let view = Self::unfocused(window, cx);
+        window.focus(&view.focus);
+        view
+    }
+
+    /// A non-interactive terminal for the Settings preview.
+    pub fn preview(rows: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::unfocused(window, cx);
+        view.preview = true;
+        view.set_embedded(GridSize { cols: 80, rows });
+        view
+    }
+
+    /// Settings changed while this terminal is open: applied at the next frame.
+    pub fn set_settings(&mut self, settings: TerminalSettings, cx: &mut Context<Self>) {
+        self.pending = Some(settings);
+        cx.notify();
+    }
+
+    fn unfocused(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus);
         let mut view = Self {
             model: TerminalModel::new(GridSize { cols: 80, rows: 24 }, SCROLLBACK),
-            font,
-            cell_width,
-            line_height: px(LINE_HEIGHT),
+            font: font("Consolas"),
+            font_size: px(13.),
+            cell_width: px(7.8),
+            line_height: px(20.8),
+            copy_on_select: false,
+            right_click_pastes: true,
+            blink_visible: true,
+            blink_reset: Instant::now(),
+            blink_task: None,
             focus,
             grid_origin: Rc::new(Cell::new(point(px(0.), px(0.)))),
             scroll_remainder: 0.0,
@@ -130,8 +219,12 @@ impl TerminalView {
             selecting: false,
             dragged: false,
             embedded: false,
+            preview: false,
+            pending: None,
+            search: None,
             measured: Rc::new(Cell::new(None)),
         };
+        view.apply_settings(&TerminalSettings::default(), window, cx);
         // Size the grid to the window now, so the PTY opens at the right size.
         let grid = view.grid_for(window.viewport_size());
         view.model.resize(grid);
@@ -142,6 +235,144 @@ impl TerminalView {
     pub fn set_embedded(&mut self, size: GridSize) {
         self.embedded = true;
         self.model.resize(size);
+    }
+
+    /// Font, size, line height, ligatures, colors, cursor, history and mouse
+    /// behaviour from Settings. Takes effect at the next frame; the grid is
+    /// re-measured, so the server hears about any size change.
+    pub fn apply_settings(&mut self, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let text = window.text_system();
+        let wanted = settings.font.family();
+        let family: SharedString = if text.all_font_names().iter().any(|f| f == wanted) {
+            wanted.to_string().into()
+        } else {
+            crate::pick_font(&text.all_font_names()).into()
+        };
+        let mut f = font(family);
+        // GPUI hands DirectWrite an empty feature list unless one is set, which
+        // turns ligatures off; ask for `calt` either way (prototype notes,
+        // milestone 3 phase 0).
+        let calt = u32::from(settings.ligatures_on());
+        f.features = gpui::FontFeatures(std::sync::Arc::new(vec![("calt".into(), calt)]));
+        // Glyphs the font lacks (Nerd Font icons in an installed font) come
+        // from the bundled single-width build.
+        f.fallbacks =
+            Some(gpui::FontFallbacks::from_fonts(vec![holonet_model::BundledFont::NerdFontMono.family().to_string()]));
+        let font_size = px(settings.font_size());
+        let font_id = text.resolve_font(&f);
+        self.cell_width = text.advance(font_id, font_size, 'M').map(|s| s.width).unwrap_or(font_size * 0.6);
+        self.line_height = font_size * settings.line_height();
+        self.font_size = font_size;
+        self.font = f;
+        self.copy_on_select = settings.copy_on_select;
+        self.right_click_pastes = settings.right_click_pastes;
+        self.model.configure(settings);
+        self.measured.set(None);
+        self.blink_visible = true;
+        cx.notify();
+    }
+
+    /// Start, change or (with `None`) clear a find. The current match starts
+    /// at the most recent one.
+    pub fn set_search(&mut self, query: Option<&SearchQuery>, cx: &mut Context<Self>) -> SearchStatus {
+        let Some(q) = query.filter(|q| !q.text.is_empty()) else {
+            self.search = None;
+            self.model.set_hits(Vec::new(), None);
+            cx.notify();
+            return SearchStatus::Empty;
+        };
+        let pattern = if q.regex { q.text.clone() } else { regex::escape(&q.text) };
+        let pattern = if q.match_case { pattern } else { format!("(?i){pattern}") };
+        let Ok(regex) = regex::Regex::new(&pattern) else {
+            self.search = None;
+            self.model.set_hits(Vec::new(), None);
+            cx.notify();
+            return SearchStatus::Invalid;
+        };
+        self.search = Some(Search {
+            regex,
+            hits: Vec::new(),
+            lines: 0,
+            current: None,
+            generation: u64::MAX,
+            searched_at: Instant::now(),
+            refresh: None,
+        });
+        self.run_search(true);
+        if let Some(line) = self.search.as_ref().and_then(|s| s.current.map(|i| s.hits[i].line)) {
+            self.model.reveal(line);
+        }
+        cx.notify();
+        self.search_status()
+    }
+
+    fn run_search(&mut self, fresh: bool) {
+        let Some(search) = self.search.as_mut() else { return };
+        let old_len = search.hits.len();
+        let from_bottom = search.current.map(|c| old_len.saturating_sub(c + 1));
+        search.hits = self.model.find(&search.regex);
+        search.lines = {
+            let mut lines: Vec<i32> = search.hits.iter().map(|m| m.line).collect();
+            lines.dedup();
+            lines.len()
+        };
+        // New output pushes matches up: keep the same distance from the bottom.
+        search.current = match (fresh, from_bottom) {
+            _ if search.hits.is_empty() => None,
+            (false, Some(d)) => Some(search.hits.len().saturating_sub(d + 1)),
+            _ => Some(search.hits.len() - 1),
+        };
+        search.generation = self.model.generation();
+        search.searched_at = Instant::now();
+        self.model.set_hits(search.hits.clone(), search.current);
+    }
+
+    /// Move to the previous (-1, older) or next (+1, newer) match.
+    pub fn search_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else { return };
+        if search.hits.is_empty() {
+            return;
+        }
+        let n = search.hits.len() as isize;
+        let next = (search.current.map_or(n - 1, |c| c as isize) + delta).rem_euclid(n) as usize;
+        search.current = Some(next);
+        let line = search.hits[next].line;
+        self.model.set_hits(search.hits.clone(), Some(next));
+        self.model.reveal(line);
+        cx.notify();
+    }
+
+    pub fn search_status(&self) -> SearchStatus {
+        match &self.search {
+            None => SearchStatus::Empty,
+            Some(s) if s.hits.is_empty() => SearchStatus::NoMatches,
+            Some(s) => {
+                SearchStatus::Found { lines: s.lines, matches: s.hits.len(), current: s.current.map_or(0, |c| c + 1) }
+            }
+        }
+    }
+
+    /// Re-run a live search after output changed the grid, at most every
+    /// [`SEARCH_REFRESH`] so a flood of output stays fast.
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let generation = self.model.generation();
+        let Some(search) = self.search.as_mut() else { return };
+        if search.generation == generation {
+            return;
+        }
+        if search.searched_at.elapsed() >= SEARCH_REFRESH {
+            self.run_search(false);
+        } else if search.refresh.is_none() {
+            search.refresh = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_REFRESH).await;
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(s) = view.search.as_mut() {
+                        s.refresh = None;
+                    }
+                    cx.notify();
+                });
+            }));
+        }
     }
 
     pub fn grid_size(&self) -> GridSize {
@@ -162,9 +393,8 @@ impl TerminalView {
         let holonet_ssh::Shell { input, mut events } = shell;
         self.input = Some(input);
         self.sent_size = None;
-        if matches!(self.connection, Connection::Offline) {
-            self.connection = Connection::Connected(String::new());
-        }
+        // A new shell after a reconnect is connected again.
+        self.connection = Connection::Connected(String::new());
         cx.spawn(async move |this, cx| {
             while let Some(first) = events.recv().await {
                 // Take whatever else is already waiting, up to a budget.
@@ -198,9 +428,16 @@ impl TerminalView {
                         self.last_echo_ms = Some(sent.elapsed().as_secs_f64() * 1e3);
                     }
                     self.model.advance(&bytes);
+                    self.blink_reset = Instant::now();
+                    self.blink_visible = true;
                 }
                 ShellEvent::Exit(code) => {
                     self.connection = Connection::Ended(format!("The shell exited with code {code}."))
+                }
+                ShellEvent::Lost(reason) => {
+                    self.connection = Connection::Ended(reason.to_string());
+                    self.input = None;
+                    cx.emit(TerminalEvent::Lost(reason));
                 }
                 ShellEvent::Closed => {
                     if !matches!(self.connection, Connection::Ended(_)) {
@@ -219,6 +456,8 @@ impl TerminalView {
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let Some(input) = &self.input else { return };
         if input.send(ShellInput::Data(bytes)).is_ok() {
+            self.blink_reset = Instant::now();
+            self.blink_visible = true;
             self.echo_pending.get_or_insert_with(Instant::now);
             self.model.scroll_to_bottom();
             self.model.clear_selection();
@@ -316,12 +555,47 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
-        self.selecting = false;
+        let was_selecting = std::mem::replace(&mut self.selecting, false);
         if !self.dragged {
             // A plain click clears the selection.
             self.model.clear_selection();
+        } else if was_selecting && self.copy_on_select {
+            self.copy(cx);
         }
         cx.notify();
+    }
+
+    fn on_right_click(&mut self, cx: &mut Context<Self>) {
+        if self.right_click_pastes {
+            self.paste(cx);
+        }
+    }
+
+    /// Run or stop the blink timer to match the current state.
+    fn update_blink(&mut self, blinking: bool, focused: bool, cx: &mut Context<Self>) {
+        let wanted = blinking && focused && !crate::platform::reduced_motion();
+        if !wanted {
+            self.blink_task = None;
+            self.blink_visible = true;
+            return;
+        }
+        if self.blink_task.is_some() {
+            return;
+        }
+        self.blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                let alive = this.update(cx, |view, cx| {
+                    // Stay solid while typing or output is arriving.
+                    view.blink_visible =
+                        if view.blink_reset.elapsed() < BLINK_INTERVAL { true } else { !view.blink_visible };
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -428,6 +702,9 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(settings) = self.pending.take() {
+            self.apply_settings(&settings, window, cx);
+        }
         // Size: measured from the canvas at the last paint, or (before the
         // first paint of a full-window view) estimated from the window.
         let grid = match self.measured.get() {
@@ -444,6 +721,7 @@ impl Render for TerminalView {
         }
         self.step_stream(window, cx);
 
+        self.refresh_search(cx);
         let started = Instant::now();
         let snapshot = self.model.snapshot();
         self.snapshot_us = started.elapsed().as_micros();
@@ -451,8 +729,13 @@ impl Render for TerminalView {
             bench.snapshot_us_total += self.snapshot_us;
         }
         let (status, warn) = self.status_text(&snapshot);
+        let focused = self.preview || self.focus.is_focused(window);
+        self.update_blink(snapshot.cursor_blinking, focused, cx);
+        let cursor_on = self.blink_visible;
+        let background = snapshot.palette.background;
 
         let font = self.font.clone();
+        let font_size = self.font_size;
         let cell_width = self.cell_width;
         let line_height = self.line_height;
         let paint_us = self.paint_us.clone();
@@ -465,7 +748,7 @@ impl Render for TerminalView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(palette::BACKGROUND))
+            .bg(rgb(background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| this.on_scroll(event, cx)))
@@ -477,6 +760,10 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| this.on_right_click(cx)),
             )
             .child(
                 div()
@@ -501,7 +788,8 @@ impl Render for TerminalView {
                                     window.refresh();
                                 }
                                 let started = Instant::now();
-                                paint_grid(bounds, &snapshot, &font, cell_width, line_height, window, cx);
+                                let metrics = Metrics { font_size, cell_width, line_height };
+                                paint_grid(bounds, &snapshot, &font, metrics, (cursor_on, focused), window, cx);
                                 paint_us.set(started.elapsed().as_micros());
                             },
                         )
@@ -526,17 +814,24 @@ impl Render for TerminalView {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Metrics {
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+}
+
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,
     base: &Font,
-    cell_width: Pixels,
-    line_height: Pixels,
+    metrics: Metrics,
+    (cursor_on, focused): (bool, bool),
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
     let origin = bounds.origin;
-    let font_size = px(FONT_SIZE);
+    let Metrics { font_size, cell_width, line_height } = metrics;
     let cell_at =
         |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
 
@@ -552,8 +847,27 @@ fn paint_grid(
                 continue;
             }
             let color: Hsla = rgb(run.fg).into();
+            // Box-drawing and block characters fill the cell as rectangles;
+            // the font draws everything else (crate::boxdraw).
+            let one_per_cell = run.cells == run.text.chars().count();
+            let mut text = std::borrow::Cow::Borrowed(run.text.as_str());
+            if one_per_cell && run.text.chars().any(crate::boxdraw::handles) {
+                let light = (f32::from(font_size) / 13.0).round().max(1.0);
+                let (cw, lh) = (f32::from(cell_width), f32::from(line_height));
+                for (i, ch) in run.text.chars().enumerate().filter(|(_, ch)| crate::boxdraw::handles(*ch)) {
+                    let at = cell_at(row, run.col + i);
+                    for r in crate::boxdraw::rects(ch, cw, lh, light) {
+                        let area = Bounds::new(point(at.x + px(r.x), at.y + px(r.y)), size(px(r.w), px(r.h)));
+                        window.paint_quad(fill(area, color.opacity(r.alpha)));
+                    }
+                }
+                text = run.text.chars().map(|ch| if crate::boxdraw::handles(ch) { ' ' } else { ch }).collect();
+                if text.trim().is_empty() && !run.underline && !run.strikeout {
+                    continue;
+                }
+            }
             let text_run = TextRun {
-                len: run.text.len(),
+                len: text.len(),
                 font: Font {
                     weight: if run.bold { FontWeight::BOLD } else { FontWeight::NORMAL },
                     style: if run.italic { FontStyle::Italic } else { FontStyle::Normal },
@@ -570,15 +884,17 @@ fn paint_grid(
             };
             // Force one glyph per cell, except for runs holding a wide char
             // or combining marks, which are placed by their column alone.
-            let force = (run.cells == run.text.chars().count()).then_some(cell_width);
-            let shaped = window.text_system().shape_line(run.text.clone().into(), font_size, &[text_run], force);
+            let force = one_per_cell.then_some(cell_width);
+            let shaped = window.text_system().shape_line(text.into_owned().into(), font_size, &[text_run], force);
             let _ = shaped.paint(cell_at(row, run.col), line_height, window, cx);
         }
     }
 
-    if let Some((row, col, shape)) = snap.cursor {
+    if let Some((row, col, shape)) = snap.cursor.filter(|_| cursor_on || !focused) {
         let at = cell_at(row, col);
-        let cursor = rgb(palette::CURSOR);
+        let cursor = rgb(snap.palette.cursor);
+        // Without focus the cursor is an outline, so the focused pane stands out.
+        let shape = if focused { shape } else { CursorShape::HollowBlock };
         match shape {
             CursorShape::Beam => window.paint_quad(fill(Bounds::new(at, size(px(2.), line_height)), cursor)),
             CursorShape::Underline => window.paint_quad(fill(
@@ -597,7 +913,7 @@ fn paint_grid(
                     let run = TextRun {
                         len: text.len(),
                         font: base.clone(),
-                        color: rgb(palette::BACKGROUND).into(),
+                        color: rgb(snap.palette.cursor_text).into(),
                         background_color: None,
                         underline: None,
                         strikethrough: None,

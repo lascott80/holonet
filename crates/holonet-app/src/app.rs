@@ -1,25 +1,60 @@
 //! The Holonet window: the vault gate (create or unlock), the workspace, and
-//! session tabs.
+//! session tabs, each holding one or more panes.
 //!
-//! Sessions belong to the app, not the workspace, so locking the vault (which
+//! Tabs belong to the app, not the workspace, so locking the vault (which
 //! drops the workspace and its unlocked vault) leaves them connected. They
 //! reappear when the vault is unlocked (decisions.md).
+//!
+//! App shortcuts are actions bound in the "HolonetApp" context. GPUI matches
+//! bindings before key-down handlers, so they win over the terminal, and
+//! they all use Ctrl Shift (or Ctrl Tab) so shell keys still reach the shell.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::{App, Context, Entity, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{
+    App, Bounds, Context, Entity, IntoElement, KeyBinding, Pixels, Render, ScrollHandle, SharedString, Window, actions,
+    div, prelude::*, px,
+};
 use holonet_model::{HostId, KnownHostSource, Mismatch, Timestamp, VaultData};
 use holonet_ssh::{PresentedKey, classify};
 use holonet_vault::UnlockedVault;
 
-use crate::session::{KeyCheck, SessionEvent, SessionTab};
+use crate::host_picker::{HostPicker, HostPickerEvent};
+use crate::session::{KeyCheck, Limits, Pane, SessionEvent};
 use crate::shell::{TabInfo, TabKind, TitleBar};
+use crate::tab::{Axis, Tab, TabEvent};
 use crate::terminal::GridSize;
 use crate::theme;
 use crate::ui::icon;
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
+
+actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find]);
+
+const CONTEXT: &str = "HolonetApp";
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-t", NewTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-w", CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
+        // With Shift held, Windows layouts report ] and [ as } and {.
+        KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-}", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-}", NextPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-[", PreviousPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-{", PreviousPane, Some(CONTEXT)),
+        KeyBinding::new("ctrl-{", PreviousPane, Some(CONTEXT)),
+    ]);
+}
 
 enum Stage {
     Create(Entity<CreateVault>),
@@ -32,9 +67,21 @@ pub struct HolonetApp {
     stage: Stage,
     /// Tokio runtime where SSH work runs.
     runtime: tokio::runtime::Handle,
-    sessions: Vec<Entity<SessionTab>>,
+    tabs: Vec<Entity<Tab>>,
     /// The session tab shown, or `None` for the vault view.
     active: Option<usize>,
+    /// The new-tab host picker, while open.
+    picker: Option<Entity<HostPicker>>,
+    /// Where the "+" button was drawn, to place the picker under it.
+    plus_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Horizontal scroll of the tab strip, so the active tab stays in view.
+    tab_scroll: ScrollHandle,
+    /// A stopped pane whose "Edit host" opened the host form: "Save and
+    /// connect" retries there instead of opening another tab.
+    edit_origin: Option<gpui::WeakEntity<Pane>>,
+    /// Holds keyboard focus when nothing inside does, so app shortcuts
+    /// still dispatch (GPUI needs a focused element to start from).
+    focus: gpui::FocusHandle,
 }
 
 impl HolonetApp {
@@ -47,7 +94,29 @@ impl HolonetApp {
             let p = path.clone();
             Stage::Create(cx.new(|cx| CreateVault::new(app, p, window, cx)))
         };
-        Self { path, stage, runtime, sessions: Vec::new(), active: None }
+        // Sleep, wake and network changes, for reconnecting (phase 7).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::platform::watch_system(tx);
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.recv().await {
+                if this.update(cx, |app, cx| app.system_event(event, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Self {
+            path,
+            stage,
+            runtime,
+            tabs: Vec::new(),
+            active: None,
+            picker: None,
+            plus_bounds: Rc::new(Cell::new(Bounds::default())),
+            tab_scroll: ScrollHandle::new(),
+            edit_origin: None,
+            focus: cx.focus_handle(),
+        }
     }
 
     /// The vault was created or unlocked.
@@ -63,7 +132,11 @@ impl HolonetApp {
     pub fn lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let app = cx.entity().downgrade();
         let path = self.path.clone();
-        let open = self.sessions.len();
+        let open = self.tabs.iter().map(|t| t.read(cx).panes().len()).sum();
+        for tab in &self.tabs {
+            tab.update(cx, |t, cx| t.close_menu(cx));
+        }
+        self.picker = None;
         self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, LockReason::Manual, open, window, cx)));
         self.active = None;
         cx.notify();
@@ -129,30 +202,68 @@ impl HolonetApp {
         );
     }
 
-    /// Open a session tab for a saved host.
-    pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(data) = self.vault_data(cx) else { return };
-        let Some(host) = data.host(id).cloned() else { return };
+    /// Terminal settings changed in Settings: every open terminal follows.
+    pub fn apply_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
+        for pane in panes {
+            pane.update(cx, |p, cx| p.set_terminal_settings(settings, cx));
+        }
+    }
+
+    /// Settings, Connection, "Reconnect after sleep or network change".
+    /// While locked the vault cannot be read; reconnecting stays on.
+    pub fn reconnect_enabled(&self, cx: &App) -> bool {
+        self.vault_data(cx).is_none_or(|d| d.settings.connection.reconnect)
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        matches!(self.stage, Stage::Open(_))
+    }
+
+    fn system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
+        for pane in panes {
+            pane.update(cx, |p, cx| p.on_system_event(event, cx));
+        }
+    }
+
+    /// Saved hosts by name, for a tab's split menu.
+    pub fn host_names(&self, cx: &App) -> Vec<(HostId, SharedString)> {
+        let Some(data) = self.vault_data(cx) else { return Vec::new() };
+        let mut hosts: Vec<(HostId, SharedString)> =
+            data.hosts.iter().map(|h| (h.id, SharedString::from(h.display_name().to_string()))).collect();
+        hosts.sort_by_key(|(_, n)| n.to_lowercase());
+        hosts
+    }
+
+    /// A pane connecting to a saved host, `size` cells to start with (the
+    /// pane re-measures on its first paint and tells the server).
+    fn new_pane(
+        &mut self,
+        id: HostId,
+        size: GridSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Pane>> {
+        let data = self.vault_data(cx)?;
+        let host = data.host(id).cloned()?;
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } => None,
         };
-        // Estimate the terminal size from the window; the pane corrects it
-        // on first paint (and tells the server).
-        let viewport = window.viewport_size();
-        let size = GridSize {
-            cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
-            rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
-        };
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
-        let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
-        let tab = cx.new(|cx| SessionTab::new(app, host, key, runtime, timeout, size, window, cx));
-        cx.subscribe_in(&tab, window, |this, tab, event: &SessionEvent, window, cx| match event {
-            SessionEvent::Close => this.close_session(tab, window, cx),
+        let limits = Limits {
+            connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
+            keep_alive: data.settings.connection.keep_alive_for(&host),
+            terminal: data.settings.terminal.clone(),
+        };
+        let pane = cx.new(|cx| Pane::new(app, host, key, runtime, limits, size, window, cx));
+        cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
+            SessionEvent::Close => this.close_pane(pane, window, cx),
             SessionEvent::ReviewKnownHost => {
                 let (host, port) = {
-                    let t = tab.read(cx);
+                    let t = pane.read(cx);
                     (t.host.address.trim().to_string(), t.host.port)
                 };
                 this.show_vault(window, cx);
@@ -161,7 +272,8 @@ impl HolonetApp {
                 }
             }
             SessionEvent::EditHost => {
-                let id = tab.read(cx).host.id;
+                let id = pane.read(cx).host.id;
+                this.edit_origin = Some(pane.downgrade());
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.edit_host(id, window, cx));
@@ -169,20 +281,110 @@ impl HolonetApp {
             }
         })
         .detach();
-        self.sessions.push(tab);
-        self.select(Some(self.sessions.len() - 1), window, cx);
+        Some(pane)
     }
 
-    fn close_session(&mut self, tab: &Entity<SessionTab>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.sessions.iter().position(|t| t == tab) else { return };
-        let tab = self.sessions.remove(index);
-        tab.update(cx, |t, _| t.disconnect());
+    /// Open a new tab connected to a saved host, or retry in the stopped pane
+    /// the host was edited from.
+    pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.edit_origin.take().and_then(|p| p.upgrade())
+            && pane.read(cx).host.id == id
+            && pane.read(cx).is_stopped()
+            && let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(&pane))
+            && let Some(data) = self.vault_data(cx)
+            && let Some(host) = data.host(id).cloned()
+        {
+            let key = match &host.auth {
+                holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
+                holonet_model::Auth::Password { .. } => None,
+            };
+            let limits = Limits {
+                connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
+                keep_alive: data.settings.connection.keep_alive_for(&host),
+                terminal: data.settings.terminal.clone(),
+            };
+            pane.update(cx, |p, cx| p.retry_with(host, key, limits, cx));
+            self.select(Some(index), window, cx);
+            return;
+        }
+        // Estimate the terminal size from the window.
+        let viewport = window.viewport_size();
+        let size = GridSize {
+            cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
+            rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
+        };
+        let Some(pane) = self.new_pane(id, size, window, cx) else { return };
+        let app = cx.entity().downgrade();
+        let tab = cx.new(|cx| Tab::new(app, pane, cx));
+        // The title bar shows each tab's name and state dot.
+        cx.observe(&tab, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| {
+            let TabEvent::Split { axis, host } = event;
+            this.split(tab, *axis, *host, window, cx);
+        })
+        .detach();
+        self.tabs.push(tab);
+        self.select(Some(self.tabs.len() - 1), window, cx);
+    }
+
+    /// Split a tab's active pane, with the same host unless another is given.
+    fn split(
+        &mut self,
+        tab: &Entity<Tab>,
+        axis: Axis,
+        host: Option<HostId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !tab.read(cx).can_split() {
+            return;
+        }
+        let active = tab.read(cx).active_pane().clone();
+        let (same, size) = {
+            let p = active.read(cx);
+            (p.host.id, p.grid_size(cx))
+        };
+        // The new pane takes half of the one it splits.
+        let size = match axis {
+            Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
+            Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
+        };
+        let Some(pane) = self.new_pane(host.unwrap_or(same), size, window, cx) else { return };
+        tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
+        cx.notify();
+    }
+
+    fn active_tab(&self) -> Option<Entity<Tab>> {
+        self.active.and_then(|i| self.tabs.get(i)).cloned()
+    }
+
+    /// Close one pane; its tab closes with its last pane.
+    fn close_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(pane)) else { return };
+        pane.update(cx, |p, _| p.disconnect());
+        let tab = self.tabs[index].clone();
+        if tab.update(cx, |t, cx| t.remove(pane, window, cx)) {
+            self.close_tab_at(index, window, cx);
+        } else {
+            tab.update(cx, |t, cx| t.focus(window, cx));
+        }
+    }
+
+    /// Close a whole tab and every pane in it.
+    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(index);
+        for pane in tab.read(cx).panes() {
+            pane.update(cx, |p, _| p.disconnect());
+        }
         let next = match self.active {
             Some(a) if a == index => {
-                if self.sessions.is_empty() {
+                if self.tabs.is_empty() {
                     None
                 } else {
-                    Some(index.min(self.sessions.len() - 1))
+                    Some(index.min(self.tabs.len() - 1))
                 }
             }
             Some(a) if a > index => Some(a - 1),
@@ -193,9 +395,55 @@ impl HolonetApp {
 
     fn select(&mut self, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.active = tab;
-        if let Some(t) = tab.and_then(|i| self.sessions.get(i)).cloned() {
-            t.update(cx, |t, cx| t.focus(window, cx));
+        if let Some(i) = tab {
+            self.tab_scroll.scroll_to_item(i);
         }
+        match tab.and_then(|i| self.tabs.get(i)).cloned() {
+            Some(t) => t.update(cx, |t, cx| t.focus(window, cx)),
+            // The vault view: take focus back from the hidden terminal, so
+            // app shortcuts keep working.
+            None => window.focus(&self.focus),
+        }
+        cx.notify();
+    }
+
+    /// Ctrl Tab and Ctrl Shift Tab: cycle through the vault tab and the session tabs.
+    fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.stage, Stage::Open(_)) {
+            return;
+        }
+        let slots = self.tabs.len() as isize + 1; // slot 0 is the vault
+        let current = self.active.map_or(0, |i| i as isize + 1);
+        let next = (current + delta).rem_euclid(slots);
+        self.select(if next == 0 { None } else { Some(next as usize - 1) }, window, cx);
+    }
+
+    /// "+" or Ctrl Shift T: the host picker under the "+" button.
+    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(data) = self.vault_data(cx) else { return };
+        let data = data.clone();
+        let picker = cx.new(|cx| HostPicker::new(&data, window, cx));
+        cx.subscribe_in(&picker, window, |this, _, event: &HostPickerEvent, window, cx| {
+            this.picker = None;
+            match event {
+                HostPickerEvent::Connect(id) => {
+                    let id = *id;
+                    // Deferred: connecting reads the workspace, which may be mid-update.
+                    let app = cx.entity();
+                    window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.connect(id, window, cx)));
+                }
+                HostPickerEvent::NewHost => {
+                    this.show_vault(window, cx);
+                    if let Some(w) = this.workspace().cloned() {
+                        w.update(cx, |w, cx| w.open_form(None, window, cx));
+                    }
+                }
+                HostPickerEvent::Dismiss => this.select(this.active, window, cx),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.picker = Some(picker);
         cx.notify();
     }
 
@@ -247,9 +495,12 @@ impl HolonetApp {
 }
 
 impl Render for HolonetApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus);
+        }
         let unlocked = matches!(self.stage, Stage::Open(_));
-        let session = self.active.filter(|_| unlocked).and_then(|i| self.sessions.get(i)).cloned();
+        let session = self.active.filter(|_| unlocked).and_then(|i| self.tabs.get(i)).cloned();
         let body = match (&self.stage, &session) {
             (Stage::Open(_), Some(tab)) => div()
                 .size_full()
@@ -263,16 +514,16 @@ impl Render for HolonetApp {
         };
         // Session tabs show only while unlocked (Locked.dc.html: vault tab only).
         let tabs: Vec<TabInfo> = if unlocked {
-            self.sessions
+            self.tabs
                 .iter()
                 .enumerate()
                 .map(|(i, t)| {
                     let t = t.read(cx);
                     TabInfo {
                         id: SharedString::from(format!("session-{i}")).into(),
-                        name: t.name(),
+                        name: t.name(cx),
                         kind: TabKind::Terminal,
-                        state: t.tab_state(),
+                        state: t.state(cx),
                         color: theme::no_group(),
                         active: self.active == Some(i),
                     }
@@ -281,7 +532,9 @@ impl Render for HolonetApp {
         } else {
             Vec::new()
         };
-        let mut title_bar = TitleBar::new(self.active.is_none() || !unlocked, tabs);
+        let mut title_bar = TitleBar::new(self.active.is_none() || !unlocked, tabs)
+            .scroll(self.tab_scroll.clone())
+            .plus_bounds(self.plus_bounds.clone());
         if unlocked {
             title_bar = title_bar
                 .on_vault(cx.listener(|this, _, window, cx| this.show_vault(window, cx)))
@@ -291,30 +544,86 @@ impl Render for HolonetApp {
                 })
                 .on_close_tab({
                     let entity = cx.entity();
-                    move |i, window, cx| {
-                        entity.update(cx, |this, cx| {
-                            if let Some(tab) = this.sessions.get(i).cloned() {
-                                this.close_session(&tab, window, cx);
-                            }
-                        })
-                    }
+                    move |i, window, cx| entity.update(cx, |this, cx| this.close_tab_at(i, window, cx))
                 })
                 // "+": pick a host to connect to.
-                .on_new_tab(cx.listener(|this, _, window, cx| {
-                    this.show_vault(window, cx);
-                    if let Some(w) = this.workspace().cloned() {
-                        w.update(cx, |w, cx| w.set_page(Page::Hosts, cx));
-                    }
-                }));
+                .on_new_tab(cx.listener(|this, _, window, cx| this.open_picker(window, cx)));
         }
+        let picker = self.picker.clone().map(|picker| {
+            let plus = self.plus_bounds.get();
+            // A transparent layer over the window closes the picker on an
+            // outside click; the picker sits under the "+" button.
+            div()
+                .id("picker-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.picker = None;
+                        this.select(this.active, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(plus.origin.x.max(px(8.)))
+                        .top(plus.origin.y + plus.size.height + px(6.))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(picker),
+                )
+        });
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_picker(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if let Some(pane) = this.active.and_then(|i| this.tabs.get(i)).map(|t| t.read(cx).active_pane().clone())
+                {
+                    this.close_pane(&pane, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle(1, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    this.split(&tab, Axis::Right, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    this.split(&tab, Axis::Down, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Find, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| {
+                        if !t.focus_find(window, cx) {
+                            t.toggle_find(window, cx);
+                        }
+                    });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextPane, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| t.cycle_pane(1, window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousPane, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| t.cycle_pane(-1, window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle(-1, window, cx)))
             .bg(theme::ground())
             .text_color(theme::ink())
             .font_family(theme::SANS)
             .child(title_bar)
             .child(div().flex_1().min_h_0().relative().child(body))
+            .children(picker)
     }
 }

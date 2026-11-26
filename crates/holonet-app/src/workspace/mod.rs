@@ -3,6 +3,7 @@
 
 mod hosts;
 mod known_hosts;
+mod settings;
 
 pub use hosts::format_date;
 
@@ -10,17 +11,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px};
-use holonet_model::{Host, HostId, UnknownHostKeys};
+use holonet_model::{Host, HostId};
 use holonet_vault::{LockedVault, MIN_PASSWORD_LEN, UnlockedVault, VaultError};
 
 use crate::app::HolonetApp;
 use crate::host_form::{HostForm, HostFormEvent};
 use crate::shell::{NavEntry, SideNav};
-use crate::theme::{self, TypeStyles};
-use crate::ui::{
-    Button, CalloutKind, Select, SelectEvent, TextField, TextFieldEvent, callout, dialog, dialog_buttons, field, modal,
-    setting_card, setting_row, setting_row_with,
-};
+use crate::theme;
+use crate::ui::{Button, CalloutKind, TextField, TextFieldEvent, callout, dialog, dialog_buttons, field, modal};
 
 /// Shorten a long Windows path in the middle, keeping the drive and as many
 /// trailing parts as fit: `C:\…\Holonet\vault.holonet`. GPUI cannot wrap
@@ -88,7 +86,7 @@ pub struct Workspace {
     restored_from_backup: bool,
     save_error: Option<SharedString>,
     notice: Option<SharedString>,
-    unknown_keys: Entity<Select>,
+    settings_ui: settings::SettingsUi,
     change_password: Option<ChangePassword>,
     _subscriptions: Vec<Subscription>,
 }
@@ -101,17 +99,11 @@ impl Workspace {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let refuse = vault.data().settings.unknown_host_keys == UnknownHostKeys::Refuse;
-        let unknown_keys = cx
-            .new(|cx| Select::new(cx, vec!["Ask every time".into(), "Refuse to connect".into()], usize::from(refuse)));
+        let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
+        let settings_subs = settings_ui.subscribe(cx);
         let search = cx.new(|cx| TextField::new(cx, "Find a host"));
         let kh_search = cx.new(|cx| TextField::new(cx, "Filter by host, address or fingerprint"));
         let subscriptions = vec![
-            cx.subscribe(&unknown_keys, |this: &mut Self, _, event: &SelectEvent, cx| {
-                let SelectEvent::Changed(i) = event;
-                let policy = if *i == 1 { UnknownHostKeys::Refuse } else { UnknownHostKeys::Ask };
-                this.save(|d| d.settings.unknown_host_keys = policy, cx);
-            }),
             cx.subscribe(&search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
                 _ => cx.notify(),
@@ -138,9 +130,9 @@ impl Workspace {
             restored_from_backup,
             save_error: None,
             notice: None,
-            unknown_keys,
+            settings_ui,
             change_password: None,
-            _subscriptions: subscriptions,
+            _subscriptions: subscriptions.into_iter().chain(settings_subs).collect(),
         }
     }
 
@@ -297,59 +289,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn settings_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let path = self.path.clone();
-        div()
-            .px(theme::SPACE_6)
-            .py(px(28.))
-            .max_w(px(820.))
-            .flex()
-            .flex_col()
-            .gap(theme::SPACE_5)
-            .child(div().text_title().text_color(theme::ink()).child("Settings"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme::SPACE_3)
-                    .child(div().text_heading().text_color(theme::ink()).child("Vault and security"))
-                    .child(setting_card(vec![
-                        setting_row(
-                            "Unknown host keys",
-                            Some("Refuse to connect stops any server whose key is not already in Known hosts.".into()),
-                            div().w(px(240.)).child(self.unknown_keys.clone()),
-                        )
-                        .into_any_element(),
-                        setting_row(
-                            "Vault password",
-                            Some("Unlocks the vault. It cannot be recovered if forgotten.".into()),
-                            Button::secondary("change-password", "Change password")
-                                .on_click(cx.listener(|this, _, window, cx| this.open_change_password(window, cx))),
-                        )
-                        .into_any_element(),
-                        setting_row_with(
-                            "Vault file",
-                            Some(
-                                div()
-                                    .text_mono_small()
-                                    .text_color(theme::ink_muted())
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(SharedString::from(short_path(&path.display().to_string(), 64)))
-                                    .into_any_element(),
-                            ),
-                            Button::secondary("show-vault", "Show in folder").on_click(move |_, _, _| {
-                                let _ = std::process::Command::new("explorer")
-                                    .arg(format!("/select,{}", path.display()))
-                                    .spawn();
-                            }),
-                        )
-                        .into_any_element(),
-                    ])),
-            )
-    }
-
     fn change_password_dialog(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let form = self.change_password.as_ref()?;
         let busy = form.busy;
@@ -435,18 +374,13 @@ impl Render for Workspace {
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
-            Page::Settings => div()
-                .id("settings-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .child(self.settings_page(cx))
-                .into_any_element(),
+            Page::Settings => self.settings_page(window, cx).into_any_element(),
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
         };
         let app = self.app.clone();
-        let dialog = self.change_password_dialog(cx);
+        let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
 
         div()
             .size_full()

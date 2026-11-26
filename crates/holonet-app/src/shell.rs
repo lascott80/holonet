@@ -53,11 +53,34 @@ pub struct TitleBar {
     on_tab: Option<IndexHandler>,
     on_close_tab: Option<IndexHandler>,
     on_new_tab: Option<Handler>,
+    /// Scroll position of the tab strip (tabs scroll sideways when full).
+    scroll: Option<gpui::ScrollHandle>,
+    /// Filled with the "+" button's bounds at paint time.
+    plus_bounds: Option<std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl TitleBar {
     pub fn new(vault_active: bool, tabs: Vec<TabInfo>) -> Self {
-        Self { vault_active, tabs, on_vault: None, on_tab: None, on_close_tab: None, on_new_tab: None }
+        Self {
+            vault_active,
+            tabs,
+            on_vault: None,
+            on_tab: None,
+            on_close_tab: None,
+            on_new_tab: None,
+            scroll: None,
+            plus_bounds: None,
+        }
+    }
+
+    pub fn scroll(mut self, handle: gpui::ScrollHandle) -> Self {
+        self.scroll = Some(handle);
+        self
+    }
+
+    pub fn plus_bounds(mut self, cell: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>) -> Self {
+        self.plus_bounds = Some(cell);
+        self
     }
 
     pub fn on_vault(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
@@ -128,6 +151,7 @@ impl RenderOnce for TitleBar {
             div()
                 .id(tab.id.clone())
                 .flex_shrink()
+                .flex_basis(px(190.))
                 .w(px(190.))
                 .min_w(px(130.))
                 .h(px(38.))
@@ -218,13 +242,27 @@ impl RenderOnce for TitleBar {
                     .flex()
                     .items_end()
                     .gap(px(2.))
-                    .pt(px(6.))
-                    .overflow_hidden()
-                    .child(vault)
-                    .child(div().w(px(1.)).h(px(20.)).mx(px(6.)).mb(px(9.)).bg(theme::tab_divider()))
-                    .children(tabs)
+                    .child(div().flex_none().pt(px(6.)).h_full().flex().items_end().child(vault))
+                    .child(div().flex_none().w(px(1.)).h(px(20.)).mx(px(6.)).mb(px(9.)).bg(theme::tab_divider()))
+                    .child(
+                        // The vault tab is pinned; session tabs keep at least 130px and scroll sideways when
+                        // they no longer fit (Terminal.dc.html: overflow-x auto).
+                        div()
+                            .id("tab-strip")
+                            .flex_shrink()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_end()
+                            .gap(px(2.))
+                            .pt(px(6.))
+                            .overflow_x_scroll()
+                            .when_some(self.scroll.as_ref(), |d, h| d.track_scroll(h))
+                            .children(tabs),
+                    )
                     // "+" only where it does something (milestone 2: no idle controls).
                     .when_some(self.on_new_tab, |d, f| {
+                        let plus_bounds = self.plus_bounds.clone();
                         d.child(
                             div()
                                 .id("new-tab")
@@ -238,6 +276,13 @@ impl RenderOnce for TitleBar {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme::card()))
                                 .child(icon("plus", px(18.), theme::ink_muted()))
+                                .when_some(plus_bounds, |d, cell| {
+                                    d.child(
+                                        gpui::canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                                            .absolute()
+                                            .size_full(),
+                                    )
+                                })
                                 .on_click(move |e, w, cx| f(e, w, cx)),
                         )
                     }),
