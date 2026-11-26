@@ -399,23 +399,15 @@ impl Workspace {
         let ui = &self.groups_ui;
         let current = ui.color;
         let swatches = GroupColor::ALL.map(|c| {
-            let on = c == current;
-            div()
-                .id(SharedString::from(format!("swatch-{}", c.label())))
-                .size(theme::CONTROL)
-                .rounded(theme::RADIUS_LG)
-                .bg(theme::card())
-                .border_2()
-                .border_color(if on { theme::ink() } else { theme::line() })
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .child(div().size(px(22.)).rounded(px(6.)).bg(theme::group_color(c)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.groups_ui.color = c;
-                    cx.notify();
-                }))
+            crate::ui::power::swatch(
+                SharedString::from(format!("swatch-{}", c.label())),
+                theme::group_color(c),
+                c == current,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.groups_ui.color = c;
+                cx.notify();
+            }))
         });
         let hosts = ui.editing.map_or(0, |id| data.group_hosts(id).len());
         div()

@@ -284,44 +284,16 @@ impl Tab {
             .and_then(|app| app.read(cx).warn_text(&live, cx))
             .map(|w| format!(", including {w}"))
             .unwrap_or_default();
+        let reach = format!("Everything you type goes to {}{including}.", self.pane_count_text(cx));
         Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(theme::SPACE_3)
-                .px(px(18.))
-                .py(theme::SPACE_2)
-                .bg(theme::warn_surface())
-                .border_b_1()
-                .border_color(theme::warn())
-                .child(icon("warning", px(16.), theme::warn()))
-                .child(
-                    div().flex_1().min_w(px(240.)).text_body().text_color(theme::warn_ink()).child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_x(px(4.))
-                            .child(
-                                div()
-                                    .text_color(theme::warn())
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Broadcast is on."),
-                            )
-                            .child(SharedString::from(format!(
-                                "Everything you type goes to {}{including}.",
-                                self.pane_count_text(cx)
-                            ))),
-                    ),
-                )
-                .child(Button::new("broadcast-off", "Turn off", ButtonKind::DestructiveFill).compact().on_click(
-                    cx.listener(|this, _, window, cx| {
-                        this.set_broadcast(false, cx);
-                        this.focus(window, cx);
-                    }),
-                ))
-                .into_any_element(),
+            crate::ui::power::broadcast_strip(
+                reach,
+                cx.listener(|this, _, window, cx| {
+                    this.set_broadcast(false, cx);
+                    this.focus(window, cx);
+                }),
+            )
+            .into_any_element(),
         )
     }
 

@@ -421,30 +421,20 @@ impl Workspace {
             let id = h.id;
             let on = self.sn.targets.contains(&id);
             let color = crate::workspace::GroupTag::color_of(crate::workspace::GroupTag::of(data, h).as_ref());
-            div()
-                .id(SharedString::from(format!("run-on-{}", id.0)))
-                .h(theme::CONTROL)
-                .px(theme::SPACE_3)
-                .flex()
-                .items_center()
-                .gap(theme::SPACE_2)
-                .rounded(px(22.))
-                .border_1()
-                .border_color(if on { theme::accent() } else { theme::line() })
-                .bg(if on { theme::raised() } else { theme::card() })
-                .cursor_pointer()
-                .text_body()
-                .text_color(theme::ink())
-                .child(crate::ui::group_square(color))
-                .child(h.display_name().to_string())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let targets = &mut this.sn.targets;
-                    match targets.iter().position(|t| *t == id) {
-                        Some(i) => drop(targets.remove(i)),
-                        None => targets.push(id),
-                    }
-                    cx.notify()
-                }))
+            crate::ui::power::host_chip(
+                SharedString::from(format!("run-on-{}", id.0)),
+                h.display_name().to_string(),
+                color,
+                on,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let targets = &mut this.sn.targets;
+                match targets.iter().position(|t| *t == id) {
+                    Some(i) => drop(targets.remove(i)),
+                    None => targets.push(id),
+                }
+                cx.notify()
+            }))
         });
         div()
             .flex()

@@ -9,22 +9,13 @@ use holonet_ssh::SecretRequest;
 use super::{Page, Workspace};
 use crate::forwards::{Forwarder, RuleState, host_name};
 use crate::theme::{self, TypeStyles};
+use crate::ui::power::{RuleCard, kind_tag, rule_card};
 use crate::ui::{
-    Button, ButtonKind, Checkbox, Segmented, Select, Tag, TextField, TextFieldEvent, code_box, dialog, dialog_buttons,
-    field, field_help, modal, section_label, switch,
+    Button, ButtonKind, Checkbox, Segmented, Select, TextField, TextFieldEvent, code_box, dialog, dialog_buttons,
+    field, field_help, modal, section_label,
 };
 
 const FORM_W: f32 = 380.;
-
-/// A kind's color (PortForwarding.dc.html: Local cyan, Remote violet,
-/// Dynamic mint).
-fn kind_color(kind: ForwardKind) -> Rgba {
-    match kind {
-        ForwardKind::Local => theme::accent(),
-        ForwardKind::Remote => theme::group_violet(),
-        ForwardKind::Dynamic => theme::group_mint(),
-    }
-}
 
 /// "This PC 127.0.0.1:5432", the host, then where connections go.
 fn route(rule: &ForwardRule, host: &str) -> [String; 3] {
@@ -281,7 +272,7 @@ impl Workspace {
                 .bg(theme::card())
                 .border_1()
                 .border_color(theme::line())
-                .child(div().flex().child(Tag::Group(kind.label().into(), kind_color(kind))))
+                .child(div().flex().child(kind_tag(kind)))
                 .child(div().text_meta().text_color(theme::ink_muted()).child(kind.description()))
         }));
 
@@ -333,75 +324,35 @@ impl Workspace {
         };
         let note = if rule.start_with_host { format!("Starts with {host}") } else { "Manual start".to_string() };
         let [a, b, c] = route(rule, &host);
-        let arrow = || div().text_color(theme::ink_faint()).child("→");
-        div()
-            .id(SharedString::from(format!("rule-{}", rule.id.0)))
-            .flex()
-            .flex_col()
-            .gap(theme::SPACE_3)
-            .p(theme::SPACE_4)
-            .rounded(theme::RADIUS_XL)
-            .border_1()
-            .cursor_pointer()
-            .bg(if selected { theme::card_selected() } else { theme::card() })
-            .border_color(if selected {
-                theme::accent()
-            } else if on {
-                theme::line_strong()
-            } else {
-                theme::line()
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme::SPACE_3)
-                    .child(Tag::Group(rule.kind.label().into(), kind_color(rule.kind)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_body_strong()
-                                    .text_color(theme::ink())
-                                    .truncate()
-                                    .child(SharedString::from(rule.display_name())),
-                            )
-                            .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(note))),
-                    )
-                    .child(switch(SharedString::from(format!("rule-switch-{}", rule.id.0)), on, {
-                        let this = cx.weak_entity();
-                        move |v, _, cx| {
-                            let _ = this.update(cx, |this, cx| this.toggle_rule(id, v, cx));
-                        }
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(theme::SPACE_2)
-                    .text_mono_small()
-                    .text_color(theme::ink_soft())
-                    .child(SharedString::from(a))
-                    .child(arrow())
-                    .child(SharedString::from(b))
-                    .child(arrow())
-                    .child(SharedString::from(c)),
-            )
-            .child(div().text_meta().text_color(status_color).child(SharedString::from(status)))
-            .children(last_error.map(|e| div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(e))))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(data) = this.vault_data().cloned() {
-                    this.load_rule(&data, Some(id), cx);
-                    cx.notify();
+        let card = RuleCard {
+            kind: rule.kind,
+            name: rule.display_name().into(),
+            note: note.into(),
+            route: [a.into(), b.into(), c.into()],
+            status: status.into(),
+            status_color,
+            detail: last_error.map(SharedString::from),
+            on,
+            selected,
+        };
+        rule_card(
+            SharedString::from(format!("rule-{}", rule.id.0)),
+            SharedString::from(format!("rule-switch-{}", rule.id.0)),
+            card,
+            {
+                let this = cx.weak_entity();
+                move |v, _, cx| {
+                    let _ = this.update(cx, |this, cx| this.toggle_rule(id, v, cx));
                 }
-            }))
-            .into_any_element()
+            },
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if let Some(data) = this.vault_data().cloned() {
+                this.load_rule(&data, Some(id), cx);
+                cx.notify();
+            }
+        }))
+        .into_any_element()
     }
 
     fn rule_form(&self, data: &VaultData, cx: &mut Context<Self>) -> AnyElement {

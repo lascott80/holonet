@@ -2228,3 +2228,57 @@ It passes, as do the other 25 WSL tests.
 "Windows' OpenSSH agent is not running" was not checked live: that needs the service stopped, and Holonet's work never changes Windows services. Spike (b) showed that a missing pipe fails to open, and that is the case this message covers.
 
 fmt, clippy `-D warnings`, the workspace tests and every WSL test pass.
+
+## Milestone 6, phase 9: wrap-up (26 Nov 2026)
+
+**Removed:** the phase 0 spikes, `holonet-ssh`'s `m6_forward`, `m6_agent` and `m6_broadcast` examples. `holonet-ssh` keeps only its `shell` example.
+
+**Gallery:**
+
+- Milestone 6's page controls moved into `ui/power.rs`, which the pages use too:
+  - `swatch` (Groups)
+  - `kind_color`, `kind_tag`, and `rule_card` with `RuleCard` (Port forwarding)
+  - `host_chip` (the Snippets page's Run on)
+  - `broadcast_strip` (the tab)
+- The on/off switch was already `ui::switch`.
+- `--gallery` has a Power features section:
+  - the three rule type tags
+  - two rule cards (an active local rule and a dynamic rule) whose switches toggle between their states
+  - the six swatches, which pick
+  - four host chips, which toggle
+  - the amber broadcast strip, whose Turn off is logged
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Create, recolour and delete groups; put hosts in them; give a group defaults | Created Lab: violet, key "Ask each time", jump host done-a, warn on. Recoloured it to mint. Deleted it at the end; done-c was kept with "No group" |
+| A host uses its group's defaults unless it sets its own; the form labels them | done-c in Lab showed "from Lab" on Authentication and Jump host and `ssh -J done-a …`. It connected through done-a and asked for its password ("The Lab group asks for the password each time, so it is not saved."). done-a and done-b kept their own sign-in |
+| Group colours on host cards, tabs and pane edges | Violet, then mint after the recolour: done-c's card, the group card, the tab's top edge, the pane's top edge and its "Lab" tag |
+| Local, remote and SOCKS rules through a host, switched on and off | Three rules through done-a. The local and SOCKS rules reached the host's web server and the remote rule reached this PC's; switched off, the local port refused |
+| Background connection; start when the host connects | The rules connected with no terminal involved. With all off, a new done-a pane started the "Starts with done-a" rule, and the manual ones stayed off |
+| Survives a dropped connection | Killed every server session: all three rules worked again on their own, and the terminal reconnected |
+| The status bar lists the host's forwards | done-a's bar: "Forward D 1083 (SOCKS5)", "Forward L 18090 → localhost:18183", "Forward R 19006 → 127.0.0.1:18184" |
+| A snippet library with `${name}`, Ask before running and Press Enter | "Mark word" `echo ${word} >> ~/done6.txt`, with Ask before running. The prompt asked "Run Mark word on done-a?" with the field and the filled command |
+| Snippets run from the drawer, on several hosts, and at startup | Drawer: "cd" written. Run on done-a and done-c: the amber "This runs on 1 Lab host" question, then a tab of two panes; done-c asked for its password in its pane; "multi" written twice. Startup: done-a's startup snippet asked in its new pane, and "boot" was written |
+| Broadcast | In the two-pane tab: "Broadcast to 2 panes, including 1 Lab host?", then the strip and amber edges. One typed command was written by both shells (two process ids) |
+| SSH agent sign-in, forwarding and compression | done-b (SSH agent, forwarding and compression on) signed in with the `.dev` key added to the agent. The bar read "SSH agent · Compressed · Agent forwarding on", and the host's `ssh-add -l` listed the key. The key was removed afterwards |
+
+**A typing problem chased down to the harness.**
+
+- Several times, text typed into a prompt never arrived. Once it closed a tab, because an empty password prompt counts as cancelled.
+- It first looked like a bug in split tabs, so I added temporary logging to the text field's input and the terminal's key handler, then reproduced it.
+- The lost characters reached neither, so Windows had dropped them before they got to Holonet's window. The next characters, typed the same way, arrived.
+- The logging was removed.
+
+fmt, clippy `-D warnings`, the workspace unit tests, and the WSL integration tests pass: `holonet-ssh` has 13 connection, 5 forward, 1 agent and 7 others, and `holonet-files` has 5. The test files on both sides, the web servers, the throwaway vault and the agent's test key were removed. The test account's home has only its usual files.
+
+**Milestone 6 is done.**
+
+Carried forward, not tested or not built:
+
+- **The snippet editor's Command is a single-line field.** A multi-line field needs a text area that Holonet does not have yet. Stored line breaks are still sent as Enter.
+- **A startup snippet is typed as soon as the shell opens,** so the shell echoes it once before the prompt, as any typeahead would.
+- **"Windows' OpenSSH agent is not running"** was not shown live: that needs the service stopped, which Holonet's work never does.
+- **The dynamic rule's port placeholder** still reads 8080, where 1080 would suit SOCKS better.
+- **A snippet run from the editor before it is saved** remembers its values under a new id each time, so they are not offered on the next run.

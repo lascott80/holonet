@@ -1,6 +1,8 @@
 //! `holonet --gallery`: every shared control in every state, inside the app
 //! shell, for checking against docs/design (milestone 2, phase 3; the
-//! Keychain controls from milestone 4, the SFTP screen's from milestone 5).
+//! Keychain controls from milestone 4, the SFTP screen's from milestone 5,
+//! and milestone 6's switch, swatches, rule cards, host chips and broadcast
+//! strip).
 
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -9,6 +11,7 @@ use crate::theme::{self, TypeStyles};
 use crate::ui::files::{
     FileRow, breadcrumbs, check_box, file_header, file_row, nav_button, permissions_grid, progress_bar, selection_bar,
 };
+use crate::ui::power::{RuleCard, broadcast_strip, host_chip, kind_tag, rule_card, swatch};
 use crate::ui::{
     Button, ButtonKind, CalloutKind, Checkbox, Segmented, Select, SelectEvent, Tag, TextField, TextFieldEvent, callout,
     code_box, dialog, dialog_buttons, field, fieldset, group_square, key_values, modal, section_label,
@@ -45,6 +48,10 @@ pub struct Gallery {
     /// Files section: the selected rows and the permissions grid.
     file_picks: [bool; 5],
     mode_bits: [bool; 9],
+    /// Power section: the two rule switches, the chosen swatch, the chips.
+    rules_on: [bool; 2],
+    swatch: usize,
+    chips: [bool; 4],
     log: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -112,6 +119,9 @@ impl Gallery {
             picks: [true, false],
             file_picks: [false, true, true, false, false],
             mode_bits: [true, true, true, true, false, true, false, false, false],
+            rules_on: [true, false],
+            swatch: 1,
+            chips: [true, true, false, false],
             log: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -630,6 +640,114 @@ impl Render for Gallery {
             )
         };
 
+        // ------------------------------------------------------------ power --
+        let power = {
+            let toggle_rule = |i: usize| {
+                let entity = entity.clone();
+                move |v: bool, _: &mut Window, cx: &mut gpui::App| {
+                    entity.update(cx, |g, cx| {
+                        g.rules_on[i] = v;
+                        g.note(format!("rule {i} switch: {v}"), cx);
+                    })
+                }
+            };
+            let cards = div()
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_3)
+                .child(rule_card(
+                    "g-rule-0",
+                    "g-rule-switch-0",
+                    RuleCard {
+                        kind: holonet_model::ForwardKind::Local,
+                        name: "Production Postgres".into(),
+                        note: "Starts with db-primary".into(),
+                        route: ["This PC 127.0.0.1:5432".into(), "db-primary".into(), "localhost:5432".into()],
+                        status: if self.rules_on[0] { "Active · 2 connections open" } else { "Stopped" }.into(),
+                        status_color: if self.rules_on[0] { theme::accent() } else { theme::ink_muted() },
+                        detail: None,
+                        on: self.rules_on[0],
+                        selected: true,
+                    },
+                    toggle_rule(0),
+                ))
+                .child(rule_card(
+                    "g-rule-1",
+                    "g-rule-switch-1",
+                    RuleCard {
+                        kind: holonet_model::ForwardKind::Dynamic,
+                        name: "Browse via bastion".into(),
+                        note: "Manual start".into(),
+                        route: [
+                            "This PC 127.0.0.1:1080".into(),
+                            "bastion-east".into(),
+                            "Any destination (SOCKS5)".into(),
+                        ],
+                        status: if self.rules_on[1] {
+                            "Reconnecting (attempt 2 of 5)…"
+                        } else {
+                            "Stopped: Port 1080 is already in use on this PC."
+                        }
+                        .into(),
+                        status_color: theme::warn(),
+                        detail: None,
+                        on: self.rules_on[1],
+                        selected: false,
+                    },
+                    toggle_rule(1),
+                ));
+            let swatches = holonet_model::GroupColor::ALL.iter().enumerate().map(|(i, c)| {
+                swatch(("g-swatch", i), theme::group_color(*c), self.swatch == i).on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |g, cx| {
+                            g.swatch = i;
+                            cx.notify()
+                        })
+                    }
+                })
+            });
+            let chip_hosts = [
+                ("prod-web-01", theme::accent()),
+                ("prod-web-02", theme::accent()),
+                ("staging-api", theme::group_violet()),
+                ("nas-01", theme::group_mint()),
+            ];
+            let chips = chip_hosts.iter().enumerate().map(|(i, (name, color))| {
+                host_chip(("g-chip", i), *name, *color, self.chips[i]).on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |g, cx| {
+                            g.chips[i] = !g.chips[i];
+                            cx.notify()
+                        })
+                    }
+                })
+            });
+            let label = |t: &'static str| div().text_meta().text_color(theme::ink_muted()).child(t);
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_4)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_3)
+                        .child(kind_tag(holonet_model::ForwardKind::Local))
+                        .child(kind_tag(holonet_model::ForwardKind::Remote))
+                        .child(kind_tag(holonet_model::ForwardKind::Dynamic))
+                        .child(label("Rule types; the switches below toggle")),
+                )
+                .child(cards)
+                .child(div().flex().flex_wrap().gap(theme::SPACE_2).children(swatches))
+                .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
+                .child(broadcast_strip("Everything you type goes to both panes, including 1 Production host.", {
+                    let entity = entity.clone();
+                    move |_, _, cx| entity.update(cx, |g, cx| g.note("broadcast: Turn off".into(), cx))
+                }))
+        };
+
         let log = div()
             .text_mono_small()
             .text_color(theme::ink_dim())
@@ -665,6 +783,7 @@ impl Render for Gallery {
                 .child(Self::section("Dialogs", dialogs))
                 .child(Self::section("Keychain", keychain))
                 .child(Self::section("Files", files))
+                .child(Self::section("Power features", power))
                 .child(Self::section("Events", log)),
         );
 
