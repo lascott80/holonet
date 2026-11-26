@@ -37,6 +37,7 @@ pub use hostkey::{KeyStatus, PresentedKey, classify, fingerprint};
 pub use keys::{
     GeneratedKey, KeyFileError, KeyInfo, KeyKind, algorithm_label, convert_ppk, generate_key, inspect_private_key,
 };
+pub use russh_sftp;
 
 /// Output chunks buffered before the reader applies back-pressure.
 const OUTPUT_BUFFER: usize = 256;
@@ -107,6 +108,13 @@ impl Session {
     }
 
     /// Run a command and collect its output (Install on host).
+    /// Open the `sftp` subsystem on a new channel of this session.
+    pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
+    }
+
     pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command).await?;

@@ -1355,3 +1355,50 @@ Carried forward, not tested:
 - A jump host reached over Tailscale.
 - Chains of more than one jump host, live.
 - An identity whose key was deleted opens its form with the first key selected. This is the same issue fixed above for hosts; recorded for milestone 5.
+
+## Milestone 5, phase 0: spikes (25 Nov 2026)
+
+The plan is `docs/milestone-5-plan.md`. **Owner decisions:** dropping files from Explorer, New folder and Refresh are in scope, and each SFTP tab has its own connection (reusing a terminal's typed secrets for "Open SFTP here").
+
+The spike programs stay until phase 8: `crates/holonet-ssh/examples/m5_sftp.rs`, `crates/holonet-app/examples/m5_drag.rs`, `m5_local.rs`. `holonet-ssh` now depends on `russh-sftp` 4.0.0 with its `raw-string` feature, and `Session::open_sftp()` opens the subsystem (`request_subsystem(true, "sftp")`, then `SftpSession::new(channel.into_stream())`).
+
+### (a) `russh-sftp` 4.0.0 against the WSL server
+- **Version:** 4.0.0 is current. It is independent of russh (any stream), tested against russh 0.65.1, uses `jiff` 1.0 like Holonet, and pipelines 16 reads and 16 writes by default (`Config`).
+- **Without `raw-string`,** paths and names are `String`s, so a non-UTF-8 name cannot round-trip. With it, `SftpString` holds the bytes.
+
+| Check | Result |
+| --- | --- |
+| Open the subsystem | 40–300 ms (the first open after connecting is the slow one) |
+| List the home folder | 1–3 ms; attributes carry size, mode (type and permission bits) and mtime. **No user or group names** (SFTP v3 attributes only have numeric ids, and `russh-sftp`'s attributes left them empty here) |
+| 500 MB upload (`File`, 256 KB writes) | 1.8 s, **284 MB/s** (100 MB: 377 MB/s) |
+| 500 MB download | 3.0 s, **167 MB/s** (100 MB: 114 MB/s); contents matched |
+| Windows' OpenSSH `sftp` (`sftp.exe -b`), same 500 MB, same link | put 221 MB/s, get 63 MB/s (each including sign-in) |
+| Resumed upload: a third, closed, reopened with `WRITE` only, seek to the remote size, the rest | Matched |
+| Resumed download: half to a local file, then seek the remote file and append | Matched |
+| `set_metadata` permissions 0o640 | 664 → 640 |
+| Symbolic links | `symlink_metadata` says link; `metadata` follows (file or folder); `read_link` gives the target; `read_dir` reports links as links (not their targets' type), so the pane must `stat` a link to know whether it opens as a folder |
+| **`symlink` argument order** | OpenSSH's server takes `SSH_FXP_SYMLINK`'s paths **reversed** (a long-known OpenSSH quirk). Spec order created `~/small.txt` and `~/sub` as links on the test server; they were removed. Passing the target first worked |
+| `read_dir` of 5,000 files | 87 ms |
+| Non-UTF-8 name (`caf\xe9.txt`, made by the shell) | Listed with its raw bytes, shown lossily as "caf�.txt", and `stat` by the raw bytes works |
+
+Everything the spike made was removed from the server and this PC.
+
+### (b) GPUI drag and drop on Windows
+`m5_drag` shows two lists. Rows use `on_drag(value, preview)`, and the lists use `drag_over::<T>` for the outline and `on_drop::<T>`.
+
+| Check | Result |
+| --- | --- |
+| Row dragged from one list to the other (real mouse input) | Dropped, both directions; the preview follows the pointer and the target list outlines while the row is over it |
+| Row dropped back on its own list | Delivered, and ignored by the handler (the handler has to check the source) |
+| **Files and a folder dragged from Explorer onto "Host" (the owner)** | `on_drop::<ExternalPaths>` received three full paths (the folder as one path), and the list outlined during the drag. Short 8.3 names arrive as long paths |
+| Dragging out of the app to Explorer | Not tried: GPUI 0.2.2 has no drag source on Windows (no `DoDragDrop`) |
+
+### (c) Recycle Bin
+`SHFileOperationW` with `FO_DELETE | FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI` moved a file and a folder with a file inside to the Recycle Bin in 75 ms. Both left the folder, and both appeared in the Recycle Bin (`Shell.Application` namespace 10). The two test items were then removed from the Recycle Bin, and nothing else was touched. `windows-sys` gains `Win32_Storage_FileSystem` and `Win32_UI_Shell`.
+
+### (d) Drives and hidden files
+- `GetLogicalDrives` with `GetDriveTypeW` and `GetVolumeInformationW` listed `C:\` as fixed, "Local Disk", in 0.1 ms.
+- The profile folder holds 28 shown entries and 19 with the hidden or system attribute (`AppData` and its old junctions among them).
+- 16 entries start with a dot but have no hidden attribute (`.cargo`, `.ssh` and the like). **The local pane treats only the attribute as hidden** (Windows' own meaning), and the host's pane treats dot-names as hidden.
+
+fmt, clippy and the unit tests pass.
