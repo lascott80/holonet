@@ -2977,6 +2977,7 @@ name = "holonet-ssh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "holonet-model",
  "rand 0.10.4",
  "russh",

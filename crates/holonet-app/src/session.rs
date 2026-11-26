@@ -567,6 +567,8 @@ impl Pane {
             connect_timeout: limits.0,
             keep_alive: limits.1,
             prompts: Arc::new(UiPrompts(tx)),
+            // Jump hosts join panes in milestone 4 phase 7.
+            jump: None,
         };
         let size = self.terminal.read(cx).grid_size();
         let (done_tx, done_rx) = oneshot::channel::<Result<(Session, Shell), ConnectError>>();

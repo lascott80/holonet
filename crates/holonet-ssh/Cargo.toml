@@ -8,13 +8,14 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.105"
+base64 = "0.23.1"
 holonet-model = { version = "0.1.0", path = "../holonet-model" }
+# rand 0.10 is the generator ssh-key 0.7 (inside russh) takes for key generation.
+rand = "0.10"
 russh = "0.65.4"
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-# Milestone 4 phase 0 spike (examples/m4_keygen.rs).
-rand = "0.10"
 holonet-model = { path = "../holonet-model" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

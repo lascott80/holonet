@@ -11,3 +11,28 @@ publish = false
 
 [workspace.dependencies]
 gpui = "0.2.2"
+
+# Key generation and passphrase decoding are slow unoptimised (milestone 4
+# phase 0: RSA 4096 took up to 15 s in a debug build). Optimise those crates
+# even in dev builds.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.crypto-primes]
+opt-level = 3
+
+[profile.dev.package.bcrypt-pbkdf]
+opt-level = 3
+
+[profile.dev.package.blowfish]
+opt-level = 3
+
+# PuTTY .ppk v3 files use Argon2 for their passphrase.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

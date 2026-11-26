@@ -906,3 +906,53 @@ A TCP connection to this PC's own Tailscale IPv4 address on port 2222 was refuse
   - a schema 1 vault's JSON migrating, with the passphrase written only once
 - Live, on a copy of milestone 3's test vault: unlocked, connected `wsl-test` with its passphrase-protected key and no prompt, closed, reopened and connected again with no prompt.
 - fmt, clippy, the unit tests (28, 13, 5, 10 and 16) and the WSL tests (10) pass.
+
+## Milestone 4, phase 2: SSH (25 Nov 2026)
+
+**Key generation** (`holonet_ssh::generate_key`, `KeyKind`):
+- Ed25519, RSA 4096 and ECDSA P-256, with the comment set. With a passphrase, the key is encrypted the OpenSSH way (bcrypt-pbkdf, AES-256-CTR).
+- `KeyKind` carries the Generate panel's labels and notes as drawn.
+- The workspace optimises `rsa`, `crypto-bigint`, `crypto-primes`, `bcrypt-pbkdf`, `blowfish`, `argon2` and `blake2` even in dev builds. In the WSL test (debug build), generation took 0.3 ms for Ed25519, 5 ms for ECDSA and 0.3 s for RSA 4096. In phase 0's unoptimised debug build, RSA 4096 took 3–15 s.
+
+**PuTTY keys** (`.ppk` v2 and v3):
+- `inspect_private_key` reads a `.ppk` file's header and public lines without the passphrase: type, comment, public key and whether it is encrypted.
+- `convert_ppk` decodes the key, with its passphrase when it has one, and returns it in OpenSSH format, encrypted again with the same passphrase. Holonet stores that.
+- **Checked against PuTTY 0.83's own `puttygen`** (`putty-tools`, installed in the WSL test distribution with the owner's approval). Windows PuTTYgen has no command-line conversion. puttygen made 40 keys, each with its own OpenSSH export as the reference: Ed25519 ×12, ECDSA P-256 ×4 and RSA 3072 ×4, each in PPK v2 and v3, encrypted and not.
+  - All 39 checkable keys converted to exactly the same private key, with the same passphrase.
+  - The 40th was skipped because ssh-key can't read puttygen's OpenSSH export of it, although OpenSSH's `ssh-keygen` reads it. Its `.ppk` still converted.
+- Four of these throwaway keys are fixtures in `crates/holonet-ssh/tests/fixtures/`, for the unit test. They were never installed anywhere.
+- `examples/m4_ppk.rs` repeats the check over a folder of puttygen files.
+- My first unit test wrote its own `.ppk` and failed for about half of Ed25519 keys. The writer was wrong (it encoded the private value with an extra sign byte), not the reader. The real files replaced it.
+- **Known limit, upstream:** ssh-key 0.7.0-rc.12 refused one valid ECDSA key in OpenSSH format, puttygen's export above, that `ssh-keygen` accepts. ECDSA private keys imported from OpenSSH files may occasionally fail with "not a private key Holonet can read". Recorded for the Keychain's import error text in phase 4.
+
+**Jump hosts** (`ConnectOptions::jump`):
+- A jump host is a full `ConnectOptions` of its own, with its own sign-in, prompts, keep-alive and its own jump host. `connect` signs in to it first, opens `direct-tcpip` to the target (within the connect timeout), then runs the handshake and sign-in over that channel.
+- The target's host key is checked against the address the jump host sees.
+- `Session` keeps its jump host session open (`jump_host()`). `close` closes the target, then the jump hosts.
+- **Errors:**
+  - A failure at a jump host is `ConnectError::JumpHost { host, error }`. `innermost()` gives the real error and the hops it passed through.
+  - A jump host that cannot reach the target is `JumpCouldNotReach { jump, target, reason }`, for example "the connection was refused, or nothing answered".
+- **Lost connections:** a shell notices a dropped jump host as `LostReason::JumpHost { host, reason }` ("The connection to the jump host 127.0.0.1 was lost. …"). The jump host's reason is preferred, because it is the cause; the shell waits up to 0.2 s for it after the target's own reason.
+
+**Install on host** (`Session::install_public_key`):
+- One remote command creates `~/.ssh` (700) and `authorized_keys` (600) if needed, then appends the line unless the same type and key is already there, whatever the comment. It adds a newline first if the file lacks one.
+- Existing lines are never changed.
+- It returns `Added` or `AlreadyPresent`, or the server's error text.
+- `Session::exec` runs a command and collects its output and exit status.
+
+**Connecting to a chosen address:** `ConnectOptions.host` is already whatever address the caller chooses, and the host key check uses it. That means a host reached over Tailscale checks its key under the Tailscale address, which is a separate Known hosts entry. Phase 6 decides how a host's two addresses share a trusted key.
+
+**WSL tests** (13, all pass):
+
+| Test | Result |
+| --- | --- |
+| Generate, install, sign in | Ed25519, Ed25519 with a passphrase, ECDSA P-256 and RSA 4096: each installed (`Added`), installed again (`AlreadyPresent`), then signed in by public key. `~/.ssh` stays 700 and `authorized_keys` 600. The test's keys are removed afterwards; none are left |
+| Jump host to itself | Separate `$SSH_CONNECTION` on each hop. The target signed in with a key and the jump host with a password. Closing the target closed the jump host |
+| Jump host, closed target port | `JumpCouldNotReach`: "the connection was refused, or nothing answered" |
+| Jump host's key unknown | Stopped at the first hop: `JumpHost { error: HostKeyRejected }`, with no credentials sent |
+| Target's key unknown under its name | `HostKeyRejected` |
+| Jump host's connection killed under a running target shell | `ShellEvent::Lost(LostReason::JumpHost { .. })` |
+
+**sshd's per-source penalties.** OpenSSH 10 drops new connections from an address for a while after failed sign-ins (the log shows "srclimit_penalise … penalty: failed authentication"). My first version of the key test also tried each key before installing it. Those deliberate failures, together with the wrong-password tests running in parallel, got 127.0.0.1 penalised for 18 s, and the next connection was dropped ("Disconnected"). A freshly generated key cannot already be authorized, so that check was removed. Signing in with it proves the install.
+
+fmt, clippy, and the unit tests (28, 13, 7, 13 and 16) pass. The WSL tests (13) pass.
