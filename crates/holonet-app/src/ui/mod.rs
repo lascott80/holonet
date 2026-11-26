@@ -231,16 +231,24 @@ pub struct Segmented {
     options: Vec<SharedString>,
     selected: usize,
     compact: bool,
+    /// Lay the options out in a grid of this many columns (Keychain.dc.html's
+    /// key types) instead of one row.
+    columns: Option<u16>,
     on_change: Option<IndexHandler>,
 }
 
 impl Segmented {
     pub fn new(id: impl Into<ElementId>, options: Vec<SharedString>, selected: usize) -> Self {
-        Self { id: id.into(), options, selected, compact: false, on_change: None }
+        Self { id: id.into(), options, selected, compact: false, columns: None, on_change: None }
     }
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn columns(mut self, columns: u16) -> Self {
+        self.columns = Some(columns);
         self
     }
 
@@ -254,12 +262,17 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let height = if self.compact { theme::CONTROL_COMPACT } else { theme::CONTROL };
         let id = self.id.clone();
-        div().id(self.id).flex().gap(theme::SPACE_2).children(self.options.into_iter().enumerate().map(|(i, label)| {
+        let columns = self.columns;
+        let container = match columns {
+            Some(n) => div().id(self.id).grid().grid_cols(n).gap(theme::SPACE_2),
+            None => div().id(self.id).flex().gap(theme::SPACE_2),
+        };
+        container.children(self.options.into_iter().enumerate().map(|(i, label)| {
             let on = i == self.selected;
             let handler = self.on_change.clone();
             div()
                 .id(ElementId::NamedInteger(SharedString::from(format!("{id:?}")), i as u64))
-                .flex_1()
+                .when(columns.is_none(), |d| d.flex_1())
                 .h(height)
                 .px(theme::SPACE_3)
                 .flex()

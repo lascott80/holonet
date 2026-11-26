@@ -19,6 +19,7 @@ mod gallery;
 mod host_form;
 mod host_picker;
 mod input;
+mod key_import;
 mod platform;
 mod sample;
 mod session;

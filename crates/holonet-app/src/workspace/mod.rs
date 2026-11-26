@@ -2,6 +2,7 @@
 //! Settings). Phases 6 and 7 add the session tab and Known hosts.
 
 mod hosts;
+mod keychain;
 mod known_hosts;
 mod settings;
 
@@ -43,11 +44,12 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 3] = [NavEntry::Hosts, NavEntry::KnownHosts, NavEntry::Settings];
+const PAGES: [NavEntry; 4] = [NavEntry::Hosts, NavEntry::Keychain, NavEntry::KnownHosts, NavEntry::Settings];
 
 pub(crate) enum Page {
     Hosts,
     Form(Entity<HostForm>),
+    Keychain,
     KnownHosts,
     Settings,
 }
@@ -87,6 +89,7 @@ pub struct Workspace {
     save_error: Option<SharedString>,
     notice: Option<SharedString>,
     settings_ui: settings::SettingsUi,
+    kc: keychain::KeychainUi,
     change_password: Option<ChangePassword>,
     _subscriptions: Vec<Subscription>,
 }
@@ -114,6 +117,7 @@ impl Workspace {
             }),
         ];
         let path = vault.path().to_path_buf();
+        let kc = keychain::KeychainUi::new(cx);
         Self {
             app,
             vault: Some(vault),
@@ -131,6 +135,7 @@ impl Workspace {
             save_error: None,
             notice: None,
             settings_ui,
+            kc,
             change_password: None,
             _subscriptions: subscriptions.into_iter().chain(settings_subs).collect(),
         }
@@ -376,6 +381,7 @@ impl Render for Workspace {
         let active = match self.page {
             Page::Settings => NavEntry::Settings,
             Page::KnownHosts => NavEntry::KnownHosts,
+            Page::Keychain => NavEntry::Keychain,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -383,6 +389,7 @@ impl Render for Workspace {
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
+            Page::Keychain => self.keychain_page(cx),
         };
         let app = self.app.clone();
         let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
@@ -399,6 +406,7 @@ impl Render for Workspace {
                                 this.page = match entry {
                                     NavEntry::Settings => Page::Settings,
                                     NavEntry::KnownHosts => Page::KnownHosts,
+                                    NavEntry::Keychain => Page::Keychain,
                                     _ => Page::Hosts,
                                 };
                                 cx.notify();

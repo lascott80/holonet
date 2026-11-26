@@ -10,8 +10,8 @@ use gpui::{
     Context, Entity, EventEmitter, IntoElement, PathPromptOptions, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use holonet_model::{Auth, Host, HostId, KeyId, KnownHost, Secret, StoredKey, Timestamp};
-use holonet_ssh::{ConnectError, KeyStatus, PresentedKey, algorithm_label, classify, inspect_private_key};
+use holonet_model::{Auth, Host, HostId, KeyId, KnownHost, Secret, StoredKey};
+use holonet_ssh::{ConnectError, KeyStatus, PresentedKey, algorithm_label, classify};
 
 use crate::theme::{self, TypeStyles};
 use crate::ui::{
@@ -58,6 +58,10 @@ pub struct HostForm {
     new_keys: Vec<StoredKey>,
     save_password: bool,
     save_passphrase: bool,
+    /// "Forget saved passphrase" was chosen for the selected key. The
+    /// passphrase belongs to the key, which other hosts may share, so it is
+    /// only cleared when asked.
+    forget_passphrase: bool,
     keep_alive: bool,
     /// Show problems once Save has been tried.
     show_problems: bool,
@@ -148,6 +152,7 @@ impl HostForm {
         Self {
             save_password: host.is_none() || saved_password.is_some(),
             save_passphrase: host.is_none() || saved_passphrase.is_some(),
+            forget_passphrase: false,
             keep_alive: h.keep_alive,
             original: host,
             label,
@@ -208,7 +213,14 @@ impl HostForm {
     fn key_passphrase(&self, cx: &Context<Self>) -> Option<(KeyId, Option<Secret>)> {
         let key = self.selected_key(cx).filter(|k| self.auth == 0 && k.encrypted)?;
         let passphrase = self.passphrase.read(cx).text().to_string();
-        Some((key.id, (self.save_passphrase && !passphrase.is_empty()).then(|| Secret::new(passphrase))))
+        if self.save_passphrase && !passphrase.is_empty() {
+            Some((key.id, Some(Secret::new(passphrase))))
+        } else if self.forget_passphrase && key.saved_passphrase.is_some() {
+            Some((key.id, None))
+        } else {
+            // Nothing typed and nothing unticked: leave the key as it is.
+            None
+        }
     }
 
     /// Problems that stop saving, as interface text.
@@ -263,57 +275,55 @@ impl HostForm {
     }
 
     fn add_key_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
+        // The same reading as the Keychain: PuTTY keys are converted.
+        let found = crate::key_import::read_file(&path, "");
+        let info = match &found.result {
             Err(e) => {
-                self.import_message = Some((format!("Holonet could not read {}: {e}", path.display()).into(), true));
+                self.import_message = Some((e.clone().into(), true));
                 return;
             }
+            Ok(info) if info.ppk && info.encrypted => {
+                self.import_message = Some((
+                    "This PuTTY key has a passphrase. Import it in the Keychain, which asks for it, then choose it here."
+                        .into(),
+                    true,
+                ));
+                return;
+            }
+            Ok(info) => info.clone(),
         };
-        match inspect_private_key(&text) {
-            Err(e) => self.import_message = Some((e.to_string().into(), true)),
-            Ok(info) => {
-                let existing = self.keys.iter().position(|k| k.public_key == info.public_key);
-                let index = match existing {
-                    Some(i) => {
-                        self.import_message =
-                            Some(("This key is already in the vault; it is now selected.".into(), false));
-                        i
-                    }
-                    None => {
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let key = StoredKey {
-                            id: KeyId::new(),
-                            name,
-                            algorithm: info.algorithm,
-                            private_key: Secret::new(text),
-                            encrypted: info.encrypted,
-                            comment: info.public_key.splitn(3, ' ').nth(2).unwrap_or_default().trim().to_string(),
-                            public_key: info.public_key,
-                            saved_passphrase: None,
-                            source: Some(path.display().to_string()),
-                            imported_at: Timestamp::now(),
-                        };
-                        self.import_message = Some((
-                            format!(
-                                "Imported {} ({}). It is copied into the vault when you save; the file is left as it is.",
-                                key.name,
-                                algorithm_label(&key.algorithm)
-                            )
-                            .into(),
-                            false,
-                        ));
-                        self.new_keys.push(key.clone());
-                        self.keys.push(key);
-                        self.keys.len() - 1
+        let existing = self.keys.iter().position(|k| k.public_key == info.public_key);
+        let index = match existing {
+            Some(i) => {
+                self.import_message = Some(("This key is already in the vault; it is now selected.".into(), false));
+                i
+            }
+            None => {
+                let key = match crate::key_import::stored_key(&found, None) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        self.import_message = Some((e.to_string().into(), true));
+                        return;
                     }
                 };
-                let options = self.keys.iter().map(key_option).collect();
-                self.key_select.update(cx, |s, cx| s.set_options(options, index, cx));
-                self.auth = 0;
-                self.test = TestState::Idle;
+                self.import_message = Some((
+                    format!(
+                        "Imported {} ({}). It is copied into the vault when you save; the file is left as it is.",
+                        key.name,
+                        algorithm_label(&key.algorithm)
+                    )
+                    .into(),
+                    false,
+                ));
+                self.new_keys.push(key.clone());
+                self.keys.push(key);
+                self.keys.len() - 1
             }
-        }
+        };
+        let options = self.keys.iter().map(key_option).collect();
+        self.key_select.update(cx, |s, cx| s.set_options(options, index, cx));
+        self.auth = 0;
+        self.test = TestState::Idle;
     }
 
     fn run_test(&mut self, cx: &mut Context<Self>) {
@@ -486,7 +496,32 @@ impl Render for HostForm {
                     callout(if *problem { CalloutKind::Warning } else { CalloutKind::Info }).child(message.clone()),
                 );
             }
-            if encrypted {
+            let saved_on_key = self.selected_key(cx).is_some_and(|k| k.saved_passphrase.is_some());
+            if encrypted && saved_on_key && !self.forget_passphrase {
+                credentials =
+                    credentials.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(theme::SPACE_3)
+                            .child(
+                                div().flex_1().text_body().text_color(theme::ink_muted()).child(
+                                    "This key's passphrase is saved in the vault, so it unlocks without asking.",
+                                ),
+                            )
+                            .child(Button::quiet("forget-passphrase", "Forget saved passphrase").compact().on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |f, cx| {
+                                        f.forget_passphrase = true;
+                                        f.save_passphrase = false;
+                                        cx.notify()
+                                    })
+                                }
+                            })),
+                    );
+            } else if encrypted {
                 credentials = credentials.child(field("Key passphrase", self.passphrase.clone(), None)).child(
                     Checkbox::new("save-passphrase", "Save passphrase in the encrypted vault", self.save_passphrase)
                         .on_toggle({

@@ -1010,3 +1010,74 @@ The last attempt has no `give_up_after`; it uses the connect timeout (10 s).
 - Tailscale installs a /32 route per device, not one for the whole 100.64.0.0/10. So a 100.x address with no device behind it has only the default route even while Tailscale runs. The plan still tries it under the Tailscale route, and `peer()` can say no such device is known.
 
 fmt, clippy, and the unit tests (28, 13, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 4: Keychain (25 Nov 2026)
+
+**The page** (`workspace/keychain.rs`, Keychain.dc.html), a new side-navigation entry between Hosts and Known hosts:
+- **Header:** "Keychain" with Import key file, Import from ~/.ssh and Import from WSL.
+- **Keys table:**
+  - Name with its fingerprint underneath.
+  - Type: "Ed25519", "ECDSA P-256", "RSA 4096" or "RSA 3072", with RSA's size read from the public key.
+  - Protected by: "No passphrase" in `warn`; "Passphrase"; "Passphrase, saved in vault"; or "Passphrase + Windows Hello" once Hello unlock is on, which is phase 8.
+  - Hosts: the count from `key_users`, including hosts that use the key through an identity.
+  - When there are no keys: "No keys yet".
+- **Public key of the selected key:**
+  - The full line with its comment, with Copy (which reads "Copied" for 2 s) and Install on host.
+  - Where the key came from, and which hosts sign in with it.
+  - Rename, and Delete key in `warn` outline.
+- **Generate key panel** (320 px, always shown as drawn): Name, Type and Passphrase.
+  - Type is drawn as a 2-column grid, so `Segmented` gained `.columns(n)`.
+  - "Unlock with Windows Hello" saves the passphrase in the vault.
+  - Generation runs off the UI thread and shows "Generating…". The comment is `holonet@<computer name>`, and the new key is selected.
+
+**Imports** (`key_import.rs`, shared with the host form's "Import key file…"):
+- **File:** the native picker. A PuTTY key with a passphrase opens "Enter the passphrase for …"; a wrong one says "The passphrase did not unlock this key."
+- **~/.ssh:** `%USERPROFILE%\.ssh`.
+- **WSL:**
+  - `wsl.exe -l -q` lists the distributions (its output is UTF-16), leaving out Docker's. Each one's `$HOME` is asked for, and `\wsl.localhost\<distro><home>\.ssh` is read.
+  - The source is recorded as "Ubuntu-26.04: ~/.ssh/<name>".
+- **The list dialog:**
+  - `.pub`, `known_hosts`, `authorized_keys` and `config` files are skipped, and so are files that are not keys.
+  - Keys already in the vault are shown, unticked.
+  - PuTTY keys with a passphrase are shown but point to Import key file, which can ask for it.
+  - Importable keys start ticked.
+- **Rules:** keys already in the vault (same public key) are never added twice. PuTTY keys are stored converted to OpenSSH, keeping their passphrase. Files are only read.
+- **Fixed:** the host form's import used to store a `.ppk` file as it was; it now converts it. A PuTTY key with a passphrase is sent to the Keychain.
+
+**Install on host:**
+- A dialog picks a host and signs in the way that host is set up (its password or key, or its identity's).
+- When the host's password or key passphrase isn't saved, a field asks for it.
+- Only a host key already trusted in Known hosts is accepted. A new or changed key stops before signing in, with "Connect to it once from Hosts" or "Check it in Known hosts".
+- The result shows in the dialog:
+  - "Installed m4-test-ed25519 on wsl-a. To sign in with it, edit wsl-a and choose this key."
+  - Or "… already accepts …", or the server's error.
+- For now it connects straight to the primary address. Routes and jump hosts join it in phases 6 and 7.
+
+**Host form fixes found while testing:**
+- **Passphrase cleared by accident.** Editing a host whose "Save passphrase" box started unticked would have cleared the key's saved passphrase on save, even when nothing was touched. That came from moving the passphrase to the key in phase 1. Now the form shows "This key's passphrase is saved in the vault, so it unlocks without asking." with **Forget saved passphrase**. It clears the passphrase only when you choose that.
+- **Fields stretching in a full-height column.** `field()` has `flex_1`, so in the Generate panel the fields grew to share the panel's height. The panel's fields are `flex_none`.
+
+**Checked against WSL** (a copy of the clean-profile test vault):
+
+| Check | Result |
+| --- | --- |
+| Generate Ed25519 "m4-test-ed25519" with a passphrase, Hello box ticked | Listed, selected, "Passphrase, saved in vault", Hosts 0 |
+| Install on host → wsl-a (saved password) | "Installed m4-test-ed25519 on wsl-a. To sign in with it, edit wsl-a and choose this key." |
+| Edit wsl-b → SSH key → m4-test-ed25519 → Save and connect | Connected; the status bar shows "Key m4-test-ed25519", with no prompt (the passphrase saved on the key) |
+| Keychain afterwards | Hosts 1, "Signs in to wsl-b." |
+| Import from ~/.ssh (a throwaway key, with the owner's approval) | Listed ticked; imported, with the full path as its source |
+| Import from WSL | Ubuntu-26.04 listed the throwaway ECDSA key and the owner's own `id_ed25519`, both ticked. The owner's key was unticked; only the throwaway one was imported ("No passphrase" in `warn`) |
+| Import key file: a PuTTY RSA key with a passphrase | Passphrase dialog. A wrong passphrase was refused; the right one imported "RSA 3072 · Passphrase" |
+| Rename | putty-rsa-v2-enc-1.ppk → putty-rsa-3072 |
+| Delete m4-test-ed25519 | "wsl-b signs in with it, and will need another key or a password. Servers that accept it are not changed." Deleted |
+| Copy | "Copied" for 2 s; the clipboard held the public key line |
+
+**Afterwards:**
+- Both throwaway keys were deleted, along with the Windows `.ssh` folder created for the test. The owner's WSL `~/.ssh` is back to its original five files.
+- The installed test key was removed from the test server's `authorized_keys`.
+
+**Not done:**
+- The gallery has not gained the new pieces: the grid `Segmented`, the keys table and the pick list. Recorded for the wrap-up.
+- Workspace notices stay until dismissed, so an old "Imported …" message can sit above later actions, as on other pages.
+
+fmt, clippy, and the unit tests (32 in the app) pass.
