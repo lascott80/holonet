@@ -345,7 +345,9 @@ pub struct Pane {
     /// Filled snippets from a multi-host run, typed once the shell opens.
     queued: Vec<String>,
     /// A snippet waiting for its run prompt, and the prompt while open.
-    ask: Option<holonet_model::Snippet>,
+    ask: Option<(holonet_model::Snippet, bool)>,
+    /// The tab is broadcasting (amber edges).
+    broadcasting: bool,
     prompt: Option<(Entity<RunPrompt>, Subscription)>,
     /// The last sleep, wake or network change, and when.
     disturbance: Option<(Disturbance, std::time::Instant)>,
@@ -415,6 +417,8 @@ impl Pane {
                     this.session = None;
                 }
                 TerminalEvent::Lost(reason) => this.on_lost(reason.clone(), cx),
+                // The tab listens for these itself (broadcast).
+                TerminalEvent::Typed(_) => return,
             }
             cx.notify();
         })];
@@ -460,6 +464,7 @@ impl Pane {
             startup_done: false,
             queued: Vec::new(),
             ask: None,
+            broadcasting: false,
             prompt: None,
             disturbance: None,
             _subscriptions: subscriptions,
@@ -1177,7 +1182,7 @@ impl Pane {
             return;
         }
         if let Some(snippet) = self.app.upgrade().and_then(|app| app.read(cx).startup_snippet(self.host.id, cx)) {
-            self.run_snippet(snippet, cx);
+            self.run_snippet(snippet, false, cx);
         }
         // Then what a multi-host run asked this pane to type.
         for text in std::mem::take(&mut self.queued) {
@@ -1192,17 +1197,37 @@ impl Pane {
 
     /// Run a snippet here: at once, or after the run prompt when it has
     /// variables or asks before running.
-    pub fn run_snippet(&mut self, snippet: holonet_model::Snippet, cx: &mut Context<Self>) {
+    /// `broadcast`: the person ran it in a broadcasting tab, so it goes
+    /// to the other panes too (startup snippets never do).
+    pub fn run_snippet(&mut self, snippet: holonet_model::Snippet, broadcast: bool, cx: &mut Context<Self>) {
         if RunPrompt::needed(&snippet, false) {
             // The prompt is built on the next render, which has the window
             // to focus its first field.
             self.prompt = None;
-            self.ask = Some(snippet);
+            self.ask = Some((snippet, broadcast));
             cx.notify();
             return;
         }
         let text = snippet.input(&Default::default());
-        self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+        self.type_snippet(&text, broadcast, cx);
+    }
+
+    fn type_snippet(&mut self, text: &str, broadcast: bool, cx: &mut Context<Self>) {
+        self.terminal.update(cx, |t, cx| {
+            if broadcast {
+                t.type_user_text(text, cx)
+            } else {
+                t.type_text(text, cx);
+            }
+        });
+    }
+
+    /// The tab is broadcasting: amber edges.
+    pub fn set_broadcast(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.broadcasting != on {
+            self.broadcasting = on;
+            cx.notify();
+        }
     }
 
     /// Type `text` (a filled snippet) now, or once the shell first opens.
@@ -1217,7 +1242,7 @@ impl Pane {
 
     /// Build the run prompt asked for by [`Self::run_snippet`].
     fn open_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snippet) = self.ask.take() else { return };
+        let Some((snippet, broadcast)) = self.ask.take() else { return };
         let last = self.app.upgrade().map(|app| app.read(cx).snippet_values(snippet.id)).unwrap_or_default();
         let target = self.name().to_string();
         let run = snippet.clone();
@@ -1229,7 +1254,7 @@ impl Pane {
                     app.update(cx, |app, _| app.remember_snippet_values(run.id, values));
                 }
                 let text = run.input(values);
-                this.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+                this.type_snippet(&text, broadcast, cx);
             }
             this.prompt = None;
             this.focus_pending = true;
@@ -2256,7 +2281,13 @@ impl Render for Pane {
             .flex_col()
             .bg(theme::terminal())
             .border_1()
-            .border_color(if self.active { theme::ink_muted() } else { theme::line() })
+            .border_color(if self.broadcasting {
+                theme::warn()
+            } else if self.active {
+                theme::ink_muted()
+            } else {
+                theme::line()
+            })
             .rounded(theme::RADIUS_MD)
             .overflow_hidden()
             // 2px group-color top edge (GPUI borders are one color).

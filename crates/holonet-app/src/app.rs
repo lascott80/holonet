@@ -36,7 +36,10 @@ use crate::ui::{Button, ButtonKind, dialog, dialog_buttons, icon, modal};
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
 
-actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find]);
+actions!(
+    holonet,
+    [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find, Broadcast]
+);
 
 const CONTEXT: &str = "HolonetApp";
 
@@ -48,6 +51,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-b", Broadcast, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
         // With Shift held, Windows layouts report ] and [ as } and {.
         KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
@@ -250,6 +254,11 @@ impl HolonetApp {
         values: std::collections::HashMap<String, String>,
     ) {
         self.snippet_values.insert(id, values);
+    }
+
+    /// "2 Production hosts" among `hosts`, for broadcast's question.
+    pub fn warn_text(&self, hosts: &[HostId], cx: &App) -> Option<String> {
+        crate::snippet_run::warn_text(self.vault_data(cx)?, hosts)
     }
 
     /// The library by name, for a tab's Snippets drawer.
@@ -949,6 +958,13 @@ impl Render for HolonetApp {
                             t.toggle_find(window, cx);
                         }
                     });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Broadcast, _, cx| {
+                // Deferred: turning it on reads the vault through this app,
+                // which is mid-update here.
+                if let Some(tab) = this.active_tab() {
+                    cx.defer(move |cx| tab.update(cx, |t, cx| t.toggle_broadcast(cx)));
                 }
             }))
             .on_action(cx.listener(|this, _: &NextPane, window, cx| {

@@ -2128,3 +2128,46 @@ fmt, clippy `-D warnings` and the workspace tests pass, plus a new test for the 
 One step went wrong in the harness. A value typed in a separate command right after a screenshot never reached the field, so the prompt ran with the remembered value. Typing in the same step as opening the prompt worked every time, in the drawer, the startup prompt of a split, and the page. This looks like Windows refusing the foreground switch for that one command, not the app.
 
 fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 7: broadcast (26 Nov 2026)
+
+**What was built:**
+
+- **Input as typed** (`terminal_view.rs`):
+  - The terminal now emits `TerminalEvent::Typed` for each key it sends (`Typed::Key` with the keystroke), each paste (`Typed::Paste`, the clipboard text), and each snippet the person runs (`Typed::Text`, through `type_user_text`).
+  - `replay` sends one of these to another terminal, encoded for that terminal's own modes: application cursor keys, and bracketed paste. This is what the plan's risk asked for.
+  - Startup snippets and multi-host runs still use `type_text`, which emits nothing, so they are never broadcast.
+- **The tab** (`tab.rs`):
+  - `watch` follows each pane: it redraws on change and listens to the pane terminal's `Typed` events.
+  - While broadcasting, `fan_out` replays each one into every other pane that `can_run`. Ended and reconnecting panes get nothing.
+  - Each pane's input channel keeps the order.
+- **Turning it on:** the Broadcast button (shown once the tab has two panes, amber while on) and Ctrl Shift B.
+  - With a host in a "warn" group in the tab, it first asks: "Broadcast to 4 panes, including 1 Production host?", with "Turn on broadcast".
+  - It turns off from the strip's "Turn off", from the button or the shortcut again, and by itself when the tab is down to one pane.
+- **While on:**
+  - **The strip** (`Terminal.dc.html`): "Broadcast is on. Everything you type goes to all 4 panes, including 1 Production host." It says "both panes" for two, and "the 2 connected panes" while some have ended.
+  - Amber edges on every pane (`Pane::set_broadcast`).
+  - The drawer says "Runs in all 3 panes", and snippets run from it reach every pane (`run_snippet(…, broadcast)`), after its prompt if it has one.
+
+**Crash found and fixed:** Ctrl Shift B crashed the app the second time, when it turned broadcast on.
+
+- The app's action handler called into the tab, and the tab read the app for the warn-group count while the app was still being updated. GPUI aborts on that.
+- The first press only turned broadcast off, which reads nothing, so it worked.
+- The handler now defers the toggle (`cx.defer`).
+- The lesson for these notes: a method that reads `HolonetApp` must not be called synchronously from the app's own listeners. The Snippets page already defers for the same reason.
+
+**Live check** (WSL server, a copy of the test vault, behind-a in a warn group "Production", four panes from a multi-host run):
+
+| Check | Result |
+| --- | --- |
+| Broadcast button | The question named 4 panes and 1 Production host; "Turn on broadcast" showed the strip and amber edges |
+| Type two commands and paste a third (Ctrl Shift V, then Enter) | Each of the four shells wrote a, b, then c-paste, in order (by its `$$`) |
+| End one shell, then "Close pane" | The others got the next command (3 lines); the strip said "all 3 panes" with no Production host |
+| Run a snippet from the drawer | "Runs in all 3 panes"; it ran in all three |
+| Ctrl Shift B | Off; then on again (no question once no warn host remained) |
+| End shells and close panes down to one | Broadcast turned off: no strip, no amber, no Broadcast button |
+| End one shell while on | The strip said "the 2 connected panes" |
+
+One Ctrl Shift B press was lost to the harness's focus timing and had to be sent again. stderr stayed empty after the fix.
+
+fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.

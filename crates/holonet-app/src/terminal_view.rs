@@ -149,6 +149,18 @@ pub enum TerminalEvent {
     /// The connection was lost under a running shell (milestone 3 phase 7
     /// reconnects). The terminal and its scrollback stay.
     Lost(holonet_ssh::LostReason),
+    /// Something the person typed here, for broadcast to the tab's other
+    /// panes (each encodes it in its own terminal mode).
+    Typed(Typed),
+}
+
+/// Input as the person gave it, before a terminal's mode encodes it.
+#[derive(Clone, Debug)]
+pub enum Typed {
+    Key(gpui::Keystroke),
+    Paste(String),
+    /// A snippet run by hand.
+    Text(String),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -467,6 +479,31 @@ impl TerminalView {
         true
     }
 
+    /// Type a snippet the person ran: like [`Self::type_text`], and
+    /// broadcast with the rest of their typing.
+    pub fn type_user_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.type_text(text, cx) {
+            cx.emit(TerminalEvent::Typed(Typed::Text(text.to_string())));
+        }
+    }
+
+    /// Input typed in another pane of a broadcasting tab, encoded for this
+    /// terminal's own modes (cursor keys, bracketed paste).
+    pub fn replay(&mut self, typed: &Typed, cx: &mut Context<Self>) {
+        let bytes = match typed {
+            Typed::Key(ks) => {
+                let app_cursor = self.model.mode().contains(TermMode::APP_CURSOR);
+                match input::encode(ks, app_cursor) {
+                    Some(bytes) => bytes,
+                    None => return,
+                }
+            }
+            Typed::Paste(text) => input::paste(text, self.model.mode().contains(TermMode::BRACKETED_PASTE)),
+            Typed::Text(text) => text.as_bytes().to_vec(),
+        };
+        self.send(bytes, cx);
+    }
+
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let Some(input) = &self.input else { return };
         if input.send(ShellInput::Data(bytes)).is_ok() {
@@ -489,6 +526,9 @@ impl TerminalView {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let bracketed = self.model.mode().contains(TermMode::BRACKETED_PASTE);
             self.send(input::paste(&text, bracketed), cx);
+            if self.input.is_some() {
+                cx.emit(TerminalEvent::Typed(Typed::Paste(text)));
+            }
         }
     }
 
@@ -516,6 +556,9 @@ impl TerminalView {
         if let Some(bytes) = input::encode(ks, app_cursor) {
             cx.stop_propagation();
             self.send(bytes, cx);
+            if self.input.is_some() {
+                cx.emit(TerminalEvent::Typed(Typed::Key(ks.clone())));
+            }
         }
     }
 
