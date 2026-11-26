@@ -1,6 +1,7 @@
 //! The unlocked workspace: side navigation and pages (Hosts and Groups, the
 //! host form, Keychain, Known hosts, Settings).
 
+mod forwarding;
 mod groups;
 mod hosts;
 mod keychain;
@@ -46,11 +47,13 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 4] = [NavEntry::Hosts, NavEntry::Keychain, NavEntry::KnownHosts, NavEntry::Settings];
+const PAGES: [NavEntry; 5] =
+    [NavEntry::Hosts, NavEntry::Keychain, NavEntry::PortForwarding, NavEntry::KnownHosts, NavEntry::Settings];
 
 pub(crate) enum Page {
     Hosts,
     Groups,
+    Forwarding,
     Form(Entity<HostForm>),
     Keychain,
     KnownHosts,
@@ -86,6 +89,8 @@ pub struct Workspace {
     /// Hosts page: the group card picked to filter the hosts.
     group_filter: Option<holonet_model::GroupId>,
     groups_ui: groups::GroupsUi,
+    forwarder: Entity<crate::forwards::Forwarder>,
+    fw: forwarding::ForwardingUi,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -106,6 +111,7 @@ impl Workspace {
         vault: UnlockedVault,
         restored_from_backup: bool,
         runtime: tokio::runtime::Handle,
+        forwarder: Entity<crate::forwards::Forwarder>,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
@@ -126,6 +132,8 @@ impl Workspace {
         let kc = keychain::KeychainUi::new(cx);
         let groups_ui = groups::GroupsUi::new(cx);
         let groups_subs = groups_ui.subscribe(cx);
+        let fw = forwarding::ForwardingUi::new(cx);
+        let fw_subs = fw.subscribe(&forwarder, cx);
         Self {
             app,
             vault: Some(vault),
@@ -137,6 +145,8 @@ impl Workspace {
             selected: None,
             group_filter: None,
             groups_ui,
+            forwarder,
+            fw,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -147,7 +157,7 @@ impl Workspace {
             settings_ui,
             kc,
             change_password: None,
-            _subscriptions: subscriptions.into_iter().chain(settings_subs).chain(groups_subs).collect(),
+            _subscriptions: subscriptions.into_iter().chain(settings_subs).chain(groups_subs).chain(fw_subs).collect(),
         }
     }
 
@@ -398,6 +408,7 @@ impl Render for Workspace {
             Page::Settings => NavEntry::Settings,
             Page::KnownHosts => NavEntry::KnownHosts,
             Page::Keychain => NavEntry::Keychain,
+            Page::Forwarding => NavEntry::PortForwarding,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -405,6 +416,7 @@ impl Render for Workspace {
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
             Page::Groups => self.groups_page(cx),
+            Page::Forwarding => self.forwarding_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
             Page::Keychain => self.keychain_page(cx),
         };
@@ -425,6 +437,7 @@ impl Render for Workspace {
                                     NavEntry::Settings => Page::Settings,
                                     NavEntry::KnownHosts => Page::KnownHosts,
                                     NavEntry::Keychain => Page::Keychain,
+                                    NavEntry::PortForwarding => Page::Forwarding,
                                     _ => Page::Hosts,
                                 };
                                 cx.notify();

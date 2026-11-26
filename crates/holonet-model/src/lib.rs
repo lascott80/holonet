@@ -1677,6 +1677,7 @@ mod tests {
         dynamic.name = "Browse via bastion".into();
         dynamic.port = 1080;
         assert_eq!(dynamic.ssh_command("bastion-east"), "ssh -N -D 1080 bastion-east");
+        assert_eq!(ForwardRule::new(ForwardKind::Local, host).ssh_flag(), "-L [port]:[host]:[port]");
         assert_eq!(dynamic.status_text(), "Forward D 1080 (SOCKS5)");
         assert_eq!(dynamic.display_name(), "Browse via bastion");
         assert!(dynamic.problems().is_empty());

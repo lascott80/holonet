@@ -16,6 +16,7 @@ mod assets;
 mod boxdraw;
 mod files_view;
 mod font_check;
+mod forwards;
 mod gallery;
 mod hello;
 mod hops;

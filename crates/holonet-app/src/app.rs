@@ -89,6 +89,10 @@ pub struct HolonetApp {
     focus: gpui::FocusHandle,
     /// The last key, click or mouse movement in the window, for idle locking.
     last_input: Rc<Cell<Instant>>,
+    /// Port forwarding rules that are switched on, with their background
+    /// connections. Here rather than in the vault view, so they stay up
+    /// while the vault is locked.
+    forwarder: Entity<crate::forwards::Forwarder>,
 }
 
 /// How often the idle time is checked.
@@ -126,7 +130,10 @@ impl HolonetApp {
             }
         })
         .detach();
+        let (me, forward_runtime) = (cx.entity().downgrade(), runtime.clone());
+        let forwarder = cx.new(|_| crate::forwards::Forwarder::new(me, forward_runtime));
         Self {
+            forwarder,
             path,
             stage,
             runtime,
@@ -146,7 +153,8 @@ impl HolonetApp {
     pub fn opened(&mut self, vault: UnlockedVault, restored_from_backup: bool, cx: &mut Context<Self>) {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
-        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, cx)));
+        let forwarder = self.forwarder.clone();
+        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx)));
         self.last_input.set(Instant::now());
         cx.notify();
     }
@@ -196,6 +204,23 @@ impl HolonetApp {
     /// A saved host's group, read from the vault each time so renaming or
     /// recoloring a group shows at once. `None` when it has no group, or
     /// while the vault is locked (session tabs are hidden then).
+    /// The status bar's text for a host's active forwards.
+    pub fn forwards_for(&self, host: holonet_model::HostId, cx: &App) -> Vec<String> {
+        self.forwarder.read(cx).active_for(host)
+    }
+
+    /// A pane connected to `host`: its rules set to start with the host
+    /// start, and its typed secrets serve their background connection.
+    pub fn host_connected(
+        &mut self,
+        host: holonet_model::HostId,
+        typed: Vec<(holonet_model::HostId, (bool, holonet_model::Secret))>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = self.vault_data(cx).cloned() else { return };
+        self.forwarder.update(cx, |f, cx| f.host_connected(host, typed, &data, cx));
+    }
+
     /// The group whose "Ask each time" a host's sign-in follows, by name:
     /// its password is asked on every connection and never saved.
     pub fn asks_each_time(&self, host: holonet_model::HostId, cx: &App) -> Option<SharedString> {

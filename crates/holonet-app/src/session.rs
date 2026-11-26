@@ -1228,8 +1228,14 @@ impl Pane {
                 }
                 let id = self.host.id;
                 self.host.last_connected_at = Some(Timestamp::now());
+                // Each hop's typed secret, for the host's background connection.
+                let typed: Vec<(holonet_model::HostId, (bool, Secret))> = (0..self.signs.len())
+                    .filter_map(|hop| self.signs[hop].remembered.clone().map(|r| (self.hop_host(hop).id, r)))
+                    .collect();
                 if let Some(app) = self.app.upgrade() {
                     app.update(cx, |app, cx| {
+                        // Rules set to start with this host start now.
+                        app.host_connected(id, typed, cx);
                         app.update_vault(
                             move |d| {
                                 if let Some(h) = d.host_mut(id) {
@@ -2018,7 +2024,7 @@ impl Pane {
     }
 
     /// The status bar the tab shows for its active pane.
-    pub fn status_bar(&self) -> Div {
+    pub fn status_bar(&self, cx: &gpui::App) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
             _ if self.reconnect.is_some() => ("Reconnecting", theme::ink_muted()),
             State::Connected if self.via == Some(Via::Tailscale) => ("Connected over Tailscale", theme::group_mint()),
@@ -2044,6 +2050,12 @@ impl Pane {
         if !self.jumps.is_empty() && matches!(self.state, State::Connected) {
             let names: Vec<&str> = self.jumps.iter().map(|j| j.name()).collect();
             items.push(format!("Through {}", names.join(", ")).into());
+        }
+        // The host's running port forwards (Terminal.dc.html: "Forward L 5432 → db-primary:5432").
+        if matches!(self.state, State::Connected)
+            && let Some(app) = self.app.upgrade()
+        {
+            items.extend(app.read(cx).forwards_for(self.host.id, cx).into_iter().map(SharedString::from));
         }
         div()
             .flex()

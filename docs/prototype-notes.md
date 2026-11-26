@@ -1987,3 +1987,53 @@ The gallery gets the swatches and group cards in phase 9 with the other mileston
 All five passed on four runs in a row (about 2.7 s each). The existing WSL tests (13) still pass with the new handler. The host's home has only its usual files afterwards.
 
 fmt and clippy `-D warnings` pass.
+
+## Milestone 6, phase 4: Port forwarding page and background connections (26 Nov 2026)
+
+**What was built:**
+
+- **`forwards.rs`: the `Forwarder` entity.** It owns one background connection per host that has running rules, separate from any tab (owner's decision 1).
+  - Each rule has a `RuleState`: `Starting`, `NeedsSecret`, `Active { port, open, total, last_error }`, `Reconnecting { attempt }` or `Failed(why)`.
+  - The connection is made with `hops::connect_by_route`, so routes and jump chains work as they do in a terminal.
+  - Host keys:
+    - A trusted key is accepted.
+    - A key accepted before is accepted while the vault is locked.
+    - An unknown key stops the rule with "Connect to X once in a terminal to verify its host key, then switch this on." Nothing in the background asks about host keys.
+    - A changed key always stops the rule and is recorded for review in Known hosts, as `decisions.md` asks.
+  - Passwords and passphrases:
+    - Secrets typed in a terminal are kept for the host's background connection. `Session::finish` hands them over with `App::host_connected`.
+    - A secret nobody has typed is asked for on the Port forwarding page in a modal. The card shows "Waiting for the password for X".
+    - A refused sign-in forgets what was typed for that connection's hops.
+  - Reconnect: a lost connection is tried again after 1, 2, 4, 8 and 16 seconds, with the rule shown as `Reconnecting`. After that it fails with the reason.
+  - The last rule switched off closes the connection.
+- **`workspace/forwarding.rs`: the Port forwarding page.**
+  - Rule cards show a type tag, the start note, the route (this PC → host → destination), the status text and a switch (`ui::switch`).
+  - The side form has:
+    - a Local, Remote or Dynamic choice
+    - label, host, bind address and port fields
+    - a warning for a bind address other than loopback
+    - the equivalent `ssh` command
+    - "Start when this host connects"
+  - Saving a running rule restarts it.
+  - Delete asks first.
+- **Start with host:** opening a terminal to a host starts its rules that are set to start with it. The pane's status bar lists the host's running forwards ("Forward L 18080 → localhost:18183").
+- **Polish found in the check:**
+  - The equivalent command shows `[port]` and `[host]` for fields not filled in yet, as the host form's `ssh [address]` does.
+  - A refused sign-in reads "ask-a refused the password. Switch the rule on to type it again." It no longer shows the raw error.
+
+**Live check** (WSL server; a web server on the host's 127.0.0.1 and one on this PC's 127.0.0.1, both removed afterwards):
+
+| Check | Result |
+| --- | --- |
+| Local rule, this PC 18080 → host localhost | curl on this PC got the host's page |
+| Remote rule, host 19004 → this PC | the host's curl got "hello from this PC" |
+| Dynamic rule (SOCKS5) | `curl --socks5-hostname` through it reached the host's page |
+| Kill the host's sshd sessions | all three rules came back within about 1 s and worked again |
+| Switch every rule off | the background connection closed (no sshd sessions left) |
+| Start with host | opening a terminal started the rule, and the status bar showed it; closing the tab left the forward working |
+| Dynamic rule on a port already in use | "Stopped: Port 18184 is already in use on this PC.", and the other rules kept running |
+| Rule through a host with no saved password | the page asked; the card waited. A wrong password stopped the rule with the new wording. The right one made it Active, and the host's curl worked |
+
+One false alarm during the check: a rule stayed "Starting…" and was then refused. The server's `auth.log` showed a wrong password for holotest. The test harness had typed it before the field had focus, and the app had behaved correctly.
+
+fmt, clippy `-D warnings`, the workspace tests and the five WSL forward tests pass.

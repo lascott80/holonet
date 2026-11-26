@@ -225,6 +225,36 @@ impl RenderOnce for Checkbox {
     }
 }
 
+/// An on/off switch (PortForwarding.dc.html's rule cards): a 44 × 24 track,
+/// `accent` when on, with an 18px knob. The handler gets the new state;
+/// the click does not reach the card under it.
+pub fn switch(
+    id: impl Into<ElementId>,
+    on: bool,
+    handler: impl Fn(bool, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(44.))
+        .h(px(24.))
+        .flex_none()
+        .relative()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(if on { theme::accent() } else { theme::ink_faint() })
+        .child(
+            div().absolute().top(px(3.)).left(px(if on { 23. } else { 3. })).size(px(18.)).rounded_full().bg(if on {
+                theme::on_accent()
+            } else {
+                theme::ink()
+            }),
+        )
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            handler(!on, window, cx)
+        })
+}
+
 // ------------------------------------------------------------- Segmented --
 
 /// Segmented control: equal options in a row; the chosen one is `raised`

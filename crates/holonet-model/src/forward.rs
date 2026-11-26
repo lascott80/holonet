@@ -145,10 +145,17 @@ impl ForwardRule {
     /// loopback is written in front.
     pub fn ssh_flag(&self) -> String {
         let bind = if self.is_loopback() { String::new() } else { format!("{}:", self.bind()) };
+        // Fields not filled in yet show as placeholders, as `ssh [address]` does.
+        let port = |p: u16| if p == 0 { "[port]".to_string() } else { p.to_string() };
+        let destination = || {
+            let host = self.destination_host.trim();
+            let host = if host.is_empty() { "[host]" } else { host };
+            format!("{host}:{}", port(self.destination_port))
+        };
         match self.kind {
-            ForwardKind::Local => format!("-L {bind}{}:{}", self.port, self.destination()),
-            ForwardKind::Remote => format!("-R {bind}{}:{}", self.port, self.destination()),
-            ForwardKind::Dynamic => format!("-D {bind}{}", self.port),
+            ForwardKind::Local => format!("-L {bind}{}:{}", port(self.port), destination()),
+            ForwardKind::Remote => format!("-R {bind}{}:{}", port(self.port), destination()),
+            ForwardKind::Dynamic => format!("-D {bind}{}", port(self.port)),
         }
     }
 

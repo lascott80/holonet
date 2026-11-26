@@ -681,7 +681,7 @@ impl Render for Tab {
         let find_bar = self.find_bar(window, cx);
         let (name, target, status) = {
             let p = self.active.read(cx);
-            (p.name(), p.target_line(), p.status_bar())
+            (p.name(), p.target_line(), p.status_bar(cx))
         };
         let can_split = self.can_split();
         let files = self.is_files(cx);
