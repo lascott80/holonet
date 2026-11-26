@@ -1630,3 +1630,41 @@ fmt, clippy and all workspace tests pass.
 | A file dragged from another app (a WinForms `DoDragDrop` with a file list, Explorer's format) onto the host's pane | Dashed outline while over it; the file arrived on the host |
 
 fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 6: queue panel and conflicts (25 Nov 2026)
+
+**The queue panel** (Sftp.dc.html, TransferRow.md) replaces phase 5's strip.
+- **Header:** "Transfers", the engine's summary ("1 active", "1 paused", "1 waiting to reconnect", "1 failed", "Idle"), the last note, and "Show finished (n)" / "Hide finished (n)" once anything has finished.
+- **Rows** are a `uniform_list`, so a folder of thousands of files stays smooth. Up to 4.5 rows show before the list scrolls. Each row has the name and route ("This PC → wsl-a"), a 4 px bar and its text, and a remove button.
+- **Each state:**
+  - Active: accent bar for uploads, violet for downloads; "64% · 4.2 MB/s · 4 s left"; Pause.
+  - Paused: "Paused at n%"; Resume.
+  - Queued: "Queued".
+  - Interrupted: "Waiting to reconnect at n%". It resumes by itself when the tab reconnects.
+  - Failed: amber bar and "Failed: …"; Retry.
+  - Finished: "Uploaded to wsl-a · 3.0 GB" or "Downloaded to This PC · 9 B".
+- The view keeps a snapshot of the engine's jobs, taken on each engine event, so drawing does not lock the queue.
+
+**Conflicts:**
+- A transfer is planned first. If any top-level names already exist and Settings says Ask, the plan waits in the conflict popup.
+- **The popup:** "mixed already exists" or "n items already exist", "Uploading to /… on wsl-a." or "Downloading to this PC.", the list of names, then Overwrite, Keep both, Skip and Cancel all, and the drawn help line. The backdrop cancels.
+- **Overwrite and Keep both in Settings** go straight to the queue, as phase 5 did.
+- The popup is placed inside the SFTP tab, so other tabs stay usable.
+- **Layout:** the card needs a definite width (460 px). With `w_full` inside the modal, Taffy sized the wrapped text and the `flex_1` buttons from their content: the note ran out of the card and the buttons overlapped. This is milestone 4's Settings lesson again. The design's wrapping row of four buttons became three in a row with Cancel all under them.
+
+**Check (WSL server, release build, Settings set to Ask; throwaway folders `%LOCALAPPDATA%\Temp\holonet-p6` and `~/holonet-p6`, removed afterwards):**
+- **The test folder:** `mixed/` had five small files, `sub/deep.txt` and a 3 GB `big.bin`.
+- **The host's copy:** an older `small1.txt` and a `remote-only.txt`.
+
+| Test | Result |
+| --- | --- |
+| Drag `mixed` to the host | Popup "mixed already exists", "Uploading to /home/holotest/holonet-p6 on wsl-a."; Overwrite merged: `small1.txt` replaced, `remote-only.txt` kept, `sub/` and the rest added. big.bin went at about 450 MB/s and finished before Pause could be clicked |
+| Drag the host's `mixed` back to this PC | Popup "Downloading to this PC."; Keep both made `mixed (1)` with all nine items |
+| Pause during that download | "Paused at 10%"; Resume continued (about 210–350 MB/s) |
+| Kill the connection's server processes mid-download | "1 waiting to reconnect", "Waiting to reconnect at 30%"; the tab reconnected and the copy carried on from there to the end. 3,221,225,472 bytes and no part file left |
+| Show finished | Fifteen finished rows with direction and size; Hide finished folds them |
+| Pause a download, append to the host's file, Resume | "Failed: The source changed since the transfer started." in amber; Retry started over and fetched 3,221,225,480 bytes |
+
+**Still to come:** closing an SFTP tab with transfers still running should ask "n transfers are still running. Close anyway?" (milestone 5 plan, "States to design"). It is added to phase 7.
+
+fmt, clippy and all workspace tests pass.

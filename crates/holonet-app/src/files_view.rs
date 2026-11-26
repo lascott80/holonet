@@ -11,9 +11,11 @@
 //! Rows drag to the other side (the selection, when the row is part of it),
 //! onto the pane (its current folder) or onto a folder row (that folder).
 //! The host's side also takes files dropped from Explorer. Transfers go to
-//! the tab's [`Engine`]; the queue panel and the conflict popup come in
-//! milestone 5 phase 6, and until then "Ask" skips names already there.
-//! Rename, delete, permissions and new folder come in phase 7.
+//! the tab's [`Engine`], shown in the queue panel under the panes with
+//! Pause, Resume, Retry and remove, and the finished ones on request. A
+//! transfer that meets names already there asks once, in the conflict
+//! popup, unless Settings chose Overwrite or Keep both.
+//! Rename, delete, permissions and new folder come in milestone 5 phase 7.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -25,17 +27,17 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EntityId, ExternalPaths, FontWeight, IntoElement,
     MouseButton, MouseDownEvent, Render, Rgba, ScrollStrategy, SharedString, Stateful, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, relative, uniform_list,
 };
-use holonet_files::engine::{Engine, EngineEvent, JobState};
-use holonet_files::plan::{self, Choice};
+use holonet_files::engine::{Engine, EngineEvent, Job, JobId, JobState};
+use holonet_files::plan::{self, Choice, Direction, Plan};
 use holonet_files::remote::Remote;
 use holonet_files::{Entry, FileError, Kind, RemotePath, format, local};
 use holonet_model::{Host, HostId, OnConflict, SftpSettings};
 
 use crate::app::HolonetApp;
 use crate::theme::{self, TypeStyles};
-use crate::ui::{Button, TextField, TextFieldEvent, icon};
+use crate::ui::{Button, TextField, TextFieldEvent, icon, modal};
 
 /// Column widths (Sftp.dc.html's grid).
 const CHECK_W: f32 = 28.;
@@ -50,6 +52,13 @@ const ROW_PAD: f32 = 14.;
 /// How long after a transfer finishes the panes refresh (several finishing
 /// together refresh once).
 const REFRESH_AFTER: Duration = Duration::from_millis(400);
+
+/// A queue row's height, and how many show before the panel scrolls.
+const QUEUE_ROW_H: f32 = 58.;
+const QUEUE_ROWS_SHOWN: f32 = 4.5;
+
+/// The conflict popup's width (Sftp.dc.html's dialogs).
+const CONFLICT_W: f32 = 460.;
 
 /// Breadcrumbs shown after the first when a path is long.
 const CRUMBS_KEPT: usize = 3;
@@ -228,6 +237,13 @@ impl Render for DragChip {
     }
 }
 
+/// A planned transfer waiting for the conflict popup's answer.
+struct Pending {
+    plan: Plan,
+    /// "Uploading to /srv/www on nas-01." or "Downloading to this PC."
+    note: String,
+}
+
 pub struct FilesView {
     app: WeakEntity<HolonetApp>,
     host_id: HostId,
@@ -242,9 +258,14 @@ pub struct FilesView {
     local: FilePane,
     remote_side: FilePane,
     engine: Engine,
+    /// The engine's jobs as last reported, for the queue panel.
+    jobs: Vec<Job>,
     summary: SharedString,
-    queued_any: bool,
     done_count: usize,
+    show_finished: bool,
+    queue_scroll: UniformListScrollHandle,
+    /// The conflict popup's transfer.
+    pending: Option<Pending>,
     refresh_pending: bool,
     /// The last thing to report (skipped items, a copied path, a failure).
     note: Option<SharedString>,
@@ -409,9 +430,12 @@ impl FilesView {
             local: local_side,
             remote_side,
             engine,
-            summary: SharedString::default(),
-            queued_any: false,
+            jobs: Vec::new(),
+            summary: "Idle".into(),
             done_count: 0,
+            show_finished: false,
+            queue_scroll: UniformListScrollHandle::new(),
+            pending: None,
             refresh_pending: false,
             note: None,
             dragging: None,
@@ -751,17 +775,15 @@ impl FilesView {
         self.transfer(items, dest, cx);
     }
 
-    /// Plan, create folders and queue. Names already at the destination
-    /// follow Settings' "When a file already exists"; Ask skips them until
-    /// the conflict popup (milestone 5 phase 6).
+    /// Plan a transfer. Names already at the destination follow Settings'
+    /// "When a file already exists": Ask opens the conflict popup, the others
+    /// go straight to the queue.
     fn transfer(&mut self, items: Items, dest: Place, cx: &mut Context<Self>) {
         let Some(remote) = self.remote.clone() else { return };
-        let choice = match self.settings.on_conflict {
-            OnConflict::Ask => Choice::Skip,
-            OnConflict::Overwrite => Choice::Overwrite,
-            OnConflict::KeepBoth => Choice::KeepBoth,
+        let note = match &dest {
+            Place::Remote(dir) => format!("Uploading to {dir} on {}.", self.host_name),
+            _ => "Downloading to this PC.".to_string(),
         };
-        let engine = self.engine.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
             let planned = match (items, &dest) {
@@ -769,8 +791,52 @@ impl FilesView {
                 (Items::Remote(paths), Place::Local(dir)) => plan::plan_download(&remote, &paths, dir).await,
                 _ => return,
             };
+            let _ = tx.send(planned);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(planned) = rx.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                match planned {
+                    Err(e) => this.note = Some(format!("The transfer could not start: {e}").into()),
+                    Ok(plan) => {
+                        let choice = match this.settings.on_conflict {
+                            _ if plan.conflicts().is_empty() => Some(Choice::Skip),
+                            OnConflict::Ask => None,
+                            OnConflict::Overwrite => Some(Choice::Overwrite),
+                            OnConflict::KeepBoth => Some(Choice::KeepBoth),
+                        };
+                        match choice {
+                            Some(choice) => this.start(plan, choice, cx),
+                            None => this.pending = Some(Pending { plan, note }),
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The conflict popup's answer: `None` is Cancel all.
+    fn resolve_pending(&mut self, choice: Option<Choice>, cx: &mut Context<Self>) {
+        if let (Some(pending), Some(choice)) = (self.pending.take(), choice) {
+            self.start(pending.plan, choice, cx);
+        }
+        self.pending = None;
+        cx.notify();
+    }
+
+    /// Apply the conflict choice, create the folders and queue the files.
+    fn start(&mut self, plan: Plan, choice: Choice, cx: &mut Context<Self>) {
+        let Some(remote) = self.remote.clone() else {
+            self.note = Some("The transfer could not start: the connection was lost.".into());
+            return;
+        };
+        let engine = self.engine.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
             let outcome = async {
-                let plan = planned?.resolve(choice);
+                let plan = plan.resolve(choice);
                 plan.create_folders(&remote).await?;
                 let files = plan.jobs();
                 let queued = files.len();
@@ -796,8 +862,9 @@ impl FilesView {
                     Err(e) => Some(format!("The transfer could not start: {e}")),
                 }
                 .map(SharedString::from);
-                this.queued_any = true;
-                this.summary = this.engine.summary().into();
+                // New folders show at once; files as they finish.
+                this.refresh(Side::Local, cx);
+                this.refresh(Side::Remote, cx);
                 cx.notify();
             });
         })
@@ -805,8 +872,9 @@ impl FilesView {
     }
 
     fn engine_event(&mut self, _event: EngineEvent, cx: &mut Context<Self>) {
+        self.jobs = self.engine.snapshot();
         self.summary = self.engine.summary().into();
-        let done = self.engine.snapshot().iter().filter(|j| matches!(j.state, JobState::Done)).count();
+        let done = self.jobs.iter().filter(|j| j.state == JobState::Done).count();
         if done > self.done_count && !self.refresh_pending {
             // New files on either side: show them.
             self.refresh_pending = true;
@@ -821,6 +889,18 @@ impl FilesView {
             .detach();
         }
         self.done_count = done;
+        cx.notify();
+    }
+
+    /// Pause, Resume or Retry, by the job's state.
+    fn toggle_job(&mut self, id: JobId, cx: &mut Context<Self>) {
+        let Some(state) = self.jobs.iter().find(|j| j.id == id).map(|j| j.state.clone()) else { return };
+        match state {
+            JobState::Active => self.engine.pause(id),
+            JobState::Paused => self.engine.resume(id),
+            JobState::Failed(_) => self.engine.retry(id),
+            _ => {}
+        }
         cx.notify();
     }
 
@@ -1242,20 +1322,44 @@ impl FilesView {
             .into_any_element()
     }
 
-    /// The bottom strip: "Transfers" and the queue summary. The list of
-    /// transfers with their controls comes in phase 6.
-    fn transfers(&self) -> impl IntoElement {
-        let summary: SharedString = if self.queued_any {
-            self.summary.clone()
+    /// The queue panel (Sftp.dc.html, TransferRow.md): the header with the
+    /// summary and "Show finished (n)", then a row per transfer.
+    fn transfers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rows: Vec<usize> =
+            self.jobs.iter().enumerate().filter(|(_, j)| j.state != JobState::Done).map(|(i, _)| i).collect();
+        let finished: Vec<usize> =
+            self.jobs.iter().enumerate().filter(|(_, j)| j.state == JobState::Done).map(|(i, _)| i).collect();
+        if self.show_finished {
+            rows.extend(finished.iter().copied());
+        }
+        let count = rows.len();
+        let list: AnyElement = if count == 0 {
+            div()
+                .p(px(18.))
+                .flex()
+                .justify_center()
+                .text_body()
+                .text_color(theme::ink_muted())
+                .child("Nothing in the queue. Drag files between the panes to start a transfer.")
+                .into_any_element()
         } else {
-            "Nothing in the queue. Drag files between the panes to start a transfer.".into()
+            uniform_list(
+                "transfer-rows",
+                count,
+                cx.processor(move |this, range: Range<usize>, _, cx| {
+                    range.filter_map(|i| rows.get(i).map(|j| this.transfer_row(*j, cx))).collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(self.queue_scroll.clone())
+            .h(px(QUEUE_ROW_H * (count as f32).min(QUEUE_ROWS_SHOWN)))
+            .into_any_element()
         };
+        let finished_n = finished.len();
         div()
             .flex_none()
             .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(14.))
+            .flex_col()
+            .gap(px(10.))
             .px(px(18.))
             .py(px(14.))
             .border_t_1()
@@ -1263,15 +1367,229 @@ impl FilesView {
             .bg(theme::panel())
             .child(
                 div()
-                    .font_family(theme::DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(14.))
-                    .text_color(theme::ink())
-                    .child("Transfers"),
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(
+                        div()
+                            .font_family(theme::DISPLAY)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(14.))
+                            .text_color(theme::ink())
+                            .child("Transfers"),
+                    )
+                    .child(div().text_meta().text_color(theme::ink_muted()).child(self.summary.clone()))
+                    .children(self.note.clone().map(|n| div().text_meta().text_color(theme::ink_soft()).child(n)))
+                    .child(div().flex_1())
+                    .when(finished_n > 0, |d| {
+                        let label = if self.show_finished {
+                            format!("Hide finished ({finished_n})")
+                        } else {
+                            format!("Show finished ({finished_n})")
+                        };
+                        d.child(Button::secondary("show-finished", label).compact().on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.show_finished = !this.show_finished;
+                                cx.notify();
+                            },
+                        )))
+                    }),
             )
-            .child(div().text_meta().text_color(theme::ink_muted()).child(summary))
-            .child(div().flex_1())
-            .children(self.note.clone().map(|n| div().text_meta().text_color(theme::ink_soft()).child(n)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(theme::line())
+                    .rounded(theme::RADIUS_LG)
+                    .bg(theme::card())
+                    .overflow_hidden()
+                    .child(list),
+            )
+    }
+
+    /// One transfer: name and route, the bar coloured by direction with its
+    /// text, and Pause, Resume or Retry with remove (TransferRow.md).
+    fn transfer_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let job = &self.jobs[index];
+        let id = job.id;
+        let up = job.direction == Direction::Upload;
+        let route =
+            if up { format!("This PC → {}", self.host_name) } else { format!("{} → This PC", self.host_name) };
+        let row = div()
+            .id(("transfer", id.0 as usize))
+            .w_full()
+            .h(px(QUEUE_ROW_H))
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .pl(px(14.))
+            .pr(theme::SPACE_2)
+            .border_b_1()
+            .border_color(theme::line());
+        let name = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(div().truncate().text_body().text_color(theme::ink()).child(SharedString::from(job.name.clone())))
+            .child(div().truncate().text_mono_small().text_color(theme::ink_muted()).child(SharedString::from(route)));
+        if job.state == JobState::Done {
+            let what = if up {
+                format!("Uploaded to {} · {}", self.host_name, format::size(job.size))
+            } else {
+                format!("Downloaded to This PC · {}", format::size(job.size))
+            };
+            return row
+                .child(name)
+                .child(div().flex_none().pr(px(6.)).text_meta().text_color(theme::ink_muted()).child(what))
+                .into_any_element();
+        }
+        let percent = job.percent();
+        let (meta, color, toggle) = match &job.state {
+            JobState::Active => {
+                (job.progress_text(), if up { theme::accent() } else { theme::group_violet() }, Some("Pause"))
+            }
+            JobState::Paused => (format!("Paused at {percent}%"), theme::ink_faint(), Some("Resume")),
+            JobState::Queued => ("Queued".to_string(), theme::ink_faint(), None),
+            JobState::Interrupted => (format!("Waiting to reconnect at {percent}%"), theme::ink_faint(), None),
+            JobState::Failed(why) => (format!("Failed: {why}"), theme::warn(), Some("Retry")),
+            JobState::Done => unreachable!("handled above"),
+        };
+        let failed = matches!(job.state, JobState::Failed(_));
+        row.child(name)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .h(px(4.))
+                            .w_full()
+                            .rounded(px(2.))
+                            .bg(theme::line())
+                            .child(div().h(px(4.)).w(relative(percent as f32 / 100.)).rounded(px(2.)).bg(color)),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_meta()
+                            .text_color(if failed { theme::warn() } else { theme::ink_muted() })
+                            .child(SharedString::from(meta)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .children(toggle.map(|label| {
+                        Button::secondary(("transfer-toggle", id.0 as usize), label)
+                            .compact()
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_job(id, cx)))
+                    }))
+                    .child(nav_button(
+                        format!("transfer-remove-{}", id.0).into(),
+                        "close",
+                        true,
+                        cx.listener(move |this, _, _, cx| {
+                            this.engine.remove(id);
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// The conflict popup (Sftp.dc.html): one choice for the whole transfer.
+    fn conflict_popup(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let pending = self.pending.as_ref()?;
+        let names = pending.plan.conflicts();
+        let title = match names.as_slice() {
+            [one] => format!("{one} already exists"),
+            many => format!("{} items already exist", many.len()),
+        };
+        let note = format!("{} Your choice applies to every conflict in this transfer.", pending.note);
+        let list: Vec<SharedString> = names.iter().map(|n| SharedString::from(n.to_string())).collect();
+        let choice = |id: &'static str, label: &'static str, primary: bool, pick: Option<Choice>| {
+            let button = if primary { Button::primary(id, label) } else { Button::secondary(id, label) };
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(button.full_width().on_click(cx.listener(move |this, _, _, cx| this.resolve_pending(pick, cx))))
+        };
+        // A definite width: percentages inside resolve against it (Taffy
+        // otherwise sizes the buttons and wrapped text from their content).
+        let card = div()
+            .w(px(CONFLICT_W))
+            .flex()
+            .flex_col()
+            .gap(theme::SPACE_4)
+            .p(theme::SPACE_5)
+            .rounded(theme::RADIUS_2XL)
+            .border_1()
+            .border_color(theme::line_strong())
+            .bg(theme::card())
+            .shadow(theme::shadow_dialog())
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().w_full().text_heading().text_color(theme::ink()).child(title))
+                    .child(div().w_full().text_body().text_color(theme::ink_muted()).child(note)),
+            )
+            .child(
+                div()
+                    .id("conflict-names")
+                    .w_full()
+                    .flex_none()
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .px(px(14.))
+                    .py(theme::SPACE_3)
+                    .rounded(theme::RADIUS_MD)
+                    .border_1()
+                    .border_color(theme::line())
+                    .bg(theme::ground())
+                    .text_mono()
+                    .text_color(theme::ink())
+                    .children(list.into_iter().map(|n| div().child(n))),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::SPACE_2)
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .gap(theme::SPACE_2)
+                            .child(choice("conflict-overwrite", "Overwrite", true, Some(Choice::Overwrite)))
+                            .child(choice("conflict-keep-both", "Keep both", false, Some(Choice::KeepBoth)))
+                            .child(choice("conflict-skip", "Skip", false, Some(Choice::Skip))),
+                    )
+                    .child(
+                        Button::quiet("conflict-cancel", "Cancel all")
+                            .full_width()
+                            .on_click(cx.listener(|this, _, _, cx| this.resolve_pending(None, cx))),
+                    ),
+            )
+            .child(div().w_full().text_meta().text_color(theme::ink_muted()).child(
+                "Keep both adds (1) to the name of the incoming file. Skip transfers only the files without a conflict.",
+            ));
+        let view = cx.entity().downgrade();
+        Some(modal("conflict-dialog", px(CONFLICT_W), card, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.resolve_pending(None, cx));
+        }))
     }
 }
 
@@ -1281,6 +1599,7 @@ impl Render for FilesView {
             self.dragging = None;
         }
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1295,6 +1614,7 @@ impl Render for FilesView {
                     .child(self.pane(Side::Local, cx))
                     .child(self.pane(Side::Remote, cx)),
             )
-            .child(self.transfers())
+            .child(self.transfers(cx))
+            .children(self.conflict_popup(cx))
     }
 }
