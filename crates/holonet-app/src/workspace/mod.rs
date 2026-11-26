@@ -3,7 +3,9 @@
 
 mod forwarding;
 mod groups;
+mod history;
 mod hosts;
+mod import;
 mod keychain;
 mod known_hosts;
 mod settings;
@@ -48,12 +50,13 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 6] = [
+const PAGES: [NavEntry; 7] = [
     NavEntry::Hosts,
     NavEntry::Keychain,
     NavEntry::PortForwarding,
     NavEntry::Snippets,
     NavEntry::KnownHosts,
+    NavEntry::History,
     NavEntry::Settings,
 ];
 
@@ -65,6 +68,7 @@ pub(crate) enum Page {
     Form(Entity<HostForm>),
     Keychain,
     KnownHosts,
+    History,
     Settings,
 }
 
@@ -92,6 +96,12 @@ pub struct Workspace {
     runtime: tokio::runtime::Handle,
     /// Hosts page: search field, cards or list, selected host.
     search: Entity<TextField>,
+    /// First run's Connect now field, and why the last quick connect could
+    /// not start.
+    quick: Entity<TextField>,
+    quick_problem: Option<SharedString>,
+    /// A quick connect waiting for the next render to open its tab.
+    pending_quick: Option<Host>,
     cards: bool,
     selected: Option<HostId>,
     /// Hosts page: the group card picked to filter the hosts.
@@ -100,6 +110,9 @@ pub struct Workspace {
     forwarder: Entity<crate::forwards::Forwarder>,
     fw: forwarding::ForwardingUi,
     sn: snippets::SnippetsUi,
+    hist: history::HistoryUi,
+    /// The OpenSSH import dialog, while open.
+    imp: Option<import::ImportDialog>,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -125,12 +138,52 @@ impl Workspace {
     ) -> Self {
         let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
         let settings_subs = settings_ui.subscribe(cx);
-        let search = cx.new(|cx| TextField::new(cx, "Find a host"));
+        // "Once a day": checked hourly whether a day has passed.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60 * 60)).await;
+                let Ok(()) = this.update(cx, |w: &mut Workspace, cx| {
+                    let due =
+                        w.vault_data().is_some_and(|d| d.settings.updates.due(holonet_model::Timestamp::now(), false));
+                    if due {
+                        w.check_updates(cx);
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
+        let search = cx.new(|cx| TextField::new(cx, "Find a host, or type ssh user@address"));
+        let quick = cx.new(|cx| TextField::new(cx, "user@address").mono());
         let kh_search = cx.new(|cx| TextField::new(cx, "Filter by host, address or fingerprint"));
         let subscriptions = vec![
-            cx.subscribe(&search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+            cx.subscribe(&search, |this: &mut Self, field, event: &TextFieldEvent, cx| {
+                match event {
+                    TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+                    // Enter on "ssh user@address" connects without saving.
+                    TextFieldEvent::Submitted => {
+                        let text = field.read(cx).text().to_string();
+                        if hosts::looks_like_quick_connect(&text) {
+                            this.quick_connect(&text, cx);
+                        }
+                    }
+                    TextFieldEvent::Changed => {
+                        this.quick_problem = None;
+                        cx.notify()
+                    }
+                }
+            }),
+            cx.subscribe(&quick, |this: &mut Self, field, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Submitted => {
+                    let text = field.read(cx).text().to_string();
+                    this.quick_connect(&text, cx);
+                }
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
-                _ => cx.notify(),
+                TextFieldEvent::Changed => {
+                    this.quick_problem = None;
+                    cx.notify()
+                }
             }),
             cx.subscribe(&kh_search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
@@ -145,6 +198,13 @@ impl Workspace {
         let fw_subs = fw.subscribe(&forwarder, cx);
         let sn = snippets::SnippetsUi::new(cx);
         let sn_subs = sn.subscribe(cx);
+        let hist = history::HistoryUi::new(cx);
+        let hist_sub = cx.subscribe(&hist.search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+            TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+            _ => cx.notify(),
+        });
+        let mut subscriptions = subscriptions;
+        subscriptions.push(hist_sub);
         Self {
             app,
             vault: Some(vault),
@@ -152,6 +212,9 @@ impl Workspace {
             page: Page::Hosts,
             runtime,
             search,
+            quick,
+            quick_problem: None,
+            pending_quick: None,
             cards: true,
             selected: None,
             group_filter: None,
@@ -159,6 +222,8 @@ impl Workspace {
             forwarder,
             fw,
             sn,
+            hist,
+            imp: None,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -193,10 +258,21 @@ impl Workspace {
 
     /// New host (`None`) or Edit host.
     pub(crate) fn open_form(&mut self, host: Option<Host>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form_with(host, None, window, cx);
+    }
+
+    /// The form, for a new host started from `draft` (Save as host).
+    pub(crate) fn open_form_with(
+        &mut self,
+        host: Option<Host>,
+        draft: Option<Host>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
         let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
         let runtime = self.runtime.clone();
-        let form = cx.new(|cx| HostForm::new(host, data, timeout, runtime, window, cx));
+        let form = cx.new(|cx| HostForm::new(host, draft, data, timeout, runtime, window, cx));
         self._subscriptions.push(cx.subscribe_in(
             &form,
             window,
@@ -205,6 +281,7 @@ impl Workspace {
                     HostFormEvent::Saved { host, new_keys, passphrase, connect } => {
                         let (host, new_keys, passphrase) = ((**host).clone(), new_keys.clone(), passphrase.clone());
                         let id = host.id;
+                        let label = host.label.clone();
                         this.save(
                             move |d| {
                                 d.keys.extend(new_keys);
@@ -221,6 +298,12 @@ impl Workspace {
                             cx,
                         );
                         this.selected = Some(id);
+                        // Open tabs show the saved name (Save as host, or a
+                        // rename while connected).
+                        let app = this.app.clone();
+                        window.defer(cx, move |_, cx| {
+                            let _ = app.update(cx, |app, cx| app.host_renamed(id, &label, cx));
+                        });
                         if *connect {
                             this.connect(id, window, cx);
                         }
@@ -264,6 +347,21 @@ impl Workspace {
         window.defer(cx, move |window, cx| {
             let _ = app.update(cx, |app, cx| app.connect(id, window, cx));
         });
+    }
+
+    /// Quick connect: a terminal to `user@address` (or an `ssh` command)
+    /// without saving a host. Deferred, as [`Self::connect`].
+    pub(crate) fn quick_connect(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(data) = self.vault_data() else { return };
+        match crate::import::quick_host(text, data) {
+            Ok(host) => {
+                self.quick_problem = None;
+                // Started by the next render, which has the window.
+                self.pending_quick = Some(host);
+            }
+            Err(why) => self.quick_problem = Some(why.into()),
+        }
+        cx.notify();
     }
 
     /// Ask the app to open an SFTP tab (deferred, as [`Self::connect`]).
@@ -383,6 +481,12 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(host) = self.pending_quick.take() {
+            let app = self.app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.quick_connect(host, window, cx));
+            });
+        }
         let mut notices = Vec::new();
         if self.restored_from_backup {
             notices.push((
@@ -408,7 +512,7 @@ impl Render for Workspace {
                         .items_center()
                         .justify_between()
                         .gap(theme::SPACE_3)
-                        .child(div().flex_1().child(text))
+                        .child(div().flex_1().min_w_0().child(text))
                         .child(Button::quiet(id, "Dismiss").compact().on_click(cx.listener(move |this, _, _, cx| {
                             match id {
                                 "restored" => this.restored_from_backup = false,
@@ -428,6 +532,7 @@ impl Render for Workspace {
             Page::Keychain => NavEntry::Keychain,
             Page::Forwarding => NavEntry::PortForwarding,
             Page::Snippets => NavEntry::Snippets,
+            Page::History => NavEntry::History,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -439,9 +544,13 @@ impl Render for Workspace {
             Page::Snippets => self.snippets_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
             Page::Keychain => self.keychain_page(cx),
+            Page::History => self.history_page(window, cx),
         };
         let app = self.app.clone();
-        let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
+        let dialog = self
+            .change_password_dialog(cx)
+            .or_else(|| self.settings_dialog(cx))
+            .or_else(|| self.import_dialog_layer(cx));
 
         div()
             .size_full()
@@ -449,12 +558,19 @@ impl Render for Workspace {
             .flex()
             .child(
                 SideNav::new(Some(active), PAGES.to_vec())
+                    .update_available(
+                        self.vault_data().and_then(|d| crate::updates::notice(&d.settings.updates)).is_some(),
+                    )
                     .hello(self.vault.as_ref().is_some_and(|v| v.has_hello()))
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {
                                 if entry == NavEntry::Snippets {
                                     this.open_snippets(None, cx);
+                                    return;
+                                }
+                                if entry == NavEntry::History {
+                                    this.open_history(cx);
                                     return;
                                 }
                                 this.page = match entry {
@@ -507,7 +623,7 @@ mod tests {
     fn short_paths_keep_drive_and_tail() {
         let normal = r"C:\Users\me\AppData\Roaming\Holonet\vault.holonet";
         assert_eq!(short_path(normal, 100), normal);
-        let long = r"C:\Users\LAWREN~1\AppData\Local\Temp\claude\scratchpad\vaulttest-2d2587\vault.holonet";
+        let long = r"C:\Users\someone\AppData\Local\Temp\holonet\scratchpad\vaulttest-2d2587\vault.holonet";
         let short = short_path(long, 40);
         assert!(short.starts_with(r"C:\…\") && short.ends_with(r"vaulttest-2d2587\vault.holonet"), "{short}");
         assert!(short.chars().count() <= 40, "{short}");

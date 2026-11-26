@@ -31,6 +31,9 @@
 //! written beside the old one and renamed over it, and the previous good file
 //! is kept as `<name>.bak`. Opening falls back to the backup if the main file
 //! is missing or unreadable.
+//!
+//! Session logs are separate files beside the vault, under a key derived from
+//! the data key: see [`logs`].
 
 use std::fs;
 use std::io::Write;
@@ -46,6 +49,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 pub use holonet_model;
+
+pub mod logs;
+pub use logs::{LogKey, LogStore, LogText, LogWriter, logs_dir};
 
 const MAGIC: &[u8; 8] = b"HOLONETV";
 /// Newest file format version this build reads and writes.
@@ -561,6 +567,36 @@ impl UnlockedVault {
         self.replace_slots(slots)
     }
 
+    /// The key for this vault's session logs.
+    pub fn log_key(&self) -> LogKey {
+        LogKey::from_data_key(&self.data_key)
+    }
+
+    /// This vault's session logs, in the folder beside it.
+    pub fn logs(&self) -> LogStore {
+        LogStore::new(logs_dir(&self.path), self.log_key())
+    }
+
+    /// "Vault backup: Export encrypted file". Writes the vault, encrypted as
+    /// it is saved, to `dest`; it opens with the same password (and the same
+    /// Windows Hello on this PC). Logs are not included.
+    pub fn export_backup(&self, dest: &Path) -> Result<()> {
+        let same = |a: &Path| {
+            fs::canonicalize(a).ok().zip(fs::canonicalize(dest).ok()).is_some_and(|(a, b)| a == b) || a == dest
+        };
+        if same(&self.path) || same(&backup_path(&self.path)) {
+            return Err(VaultError::AlreadyExists(dest.to_path_buf()));
+        }
+        let tmp = temp_path(dest);
+        {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(&self.encode()?)?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, dest)?;
+        Ok(())
+    }
+
     /// Lock: wipe the key and contents, keeping only the path.
     pub fn lock(self) -> PathBuf {
         self.path.clone()
@@ -836,5 +872,50 @@ mod tests {
         let path = vault.lock();
         let opened = LockedVault::open(&path).unwrap().unlock("correct horse").unwrap();
         assert_eq!(opened.data().schema, holonet_model::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn backup_export_opens_with_the_same_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        vault.update(|d| d.hosts.push(Host::new("10.0.0.4"))).unwrap();
+        let dest = dir.path().join("elsewhere").join("backup.holonet");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        vault.export_backup(&dest).unwrap();
+        // Overwriting an earlier export is fine; the vault itself is not.
+        vault.export_backup(&dest).unwrap();
+        assert!(matches!(vault.export_backup(vault.path()), Err(VaultError::AlreadyExists(_))));
+        let copy = LockedVault::open(&dest).unwrap().unlock("correct horse").unwrap();
+        assert_eq!(copy.data(), vault.data());
+        assert!(!dest.with_file_name("backup.holonet.tmp").exists());
+    }
+
+    #[test]
+    fn logs_keep_their_key_across_a_password_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        assert_eq!(vault.logs().dir(), dir.path().join("vault.holonet.logs"));
+        let id = holonet_model::RecordId::new();
+        let mut log = vault.logs().create(id).unwrap();
+        log.append(
+            "hello
+",
+        )
+        .unwrap();
+        log.finish().unwrap();
+        vault.change_password_with("battery staple", KdfParams::insecure_for_tests()).unwrap();
+        let path = vault.lock();
+        let reopened = LockedVault::open(&path).unwrap().unlock("battery staple").unwrap();
+        assert_eq!(
+            reopened.logs().read(id).unwrap().text,
+            "hello
+"
+        );
+        // A different vault in the same folder has its own logs and key.
+        let other =
+            UnlockedVault::create_with(&dir.path().join("b.holonet"), "correct horse", KdfParams::insecure_for_tests())
+                .unwrap();
+        assert_ne!(other.logs().dir(), reopened.logs().dir());
+        assert!(LogStore::new(reopened.logs().dir().to_path_buf(), other.log_key()).read(id).is_err());
     }
 }

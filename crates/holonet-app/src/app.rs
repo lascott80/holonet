@@ -38,7 +38,21 @@ use crate::workspace::{Page, Workspace};
 
 actions!(
     holonet,
-    [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find, Broadcast]
+    [
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        SplitRight,
+        SplitDown,
+        NextPane,
+        PreviousPane,
+        Find,
+        Broadcast,
+        OpenPalette,
+        AddHost,
+        LockNow
+    ]
 );
 
 const CONTEXT: &str = "HolonetApp";
@@ -52,6 +66,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-b", Broadcast, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", AddHost, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-l", LockNow, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
         // With Shift held, Windows layouts report ] and [ as } and {.
         KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
@@ -79,6 +96,10 @@ pub struct HolonetApp {
     active: Option<usize>,
     /// The new-tab host picker, while open.
     picker: Option<Entity<HostPicker>>,
+    /// The command palette, while open.
+    palette: Option<Entity<crate::palette::CommandPalette>>,
+    /// Tabs to reopen at the next render ("Restore open sessions on launch").
+    pending_restore: Vec<holonet_model::SavedTab>,
     /// An SFTP tab waiting for "Close anyway?" (transfers still running).
     closing: Option<Entity<Tab>>,
     /// Where the "+" button was drawn, to place the picker under it.
@@ -102,7 +123,18 @@ pub struct HolonetApp {
     snippet_values: std::collections::HashMap<holonet_model::SnippetId, std::collections::HashMap<String, String>>,
     /// The session tab last shown, for "Run in active session".
     last_session: Option<gpui::WeakEntity<Tab>>,
+    /// The vault's session logs. Kept while locked, so open sessions keep
+    /// logging (decisions.md: sessions stay connected while locked).
+    logs: Option<holonet_vault::LogStore>,
+    /// History changes made while the vault was locked, saved at unlock.
+    pending_history: Vec<VaultChange>,
+    /// Records a crash left open and records past their kept time are
+    /// cleaned up once, at the first unlock.
+    history_cleaned: bool,
 }
+
+/// A change to the vault waiting to be saved.
+type VaultChange = Box<dyn FnOnce(&mut VaultData)>;
 
 /// How often the idle time is checked.
 const IDLE_CHECK: Duration = Duration::from_secs(10);
@@ -110,6 +142,12 @@ const IDLE_CHECK: Duration = Duration::from_secs(10);
 impl HolonetApp {
     pub fn new(path: PathBuf, runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app = cx.entity().downgrade();
+        // Closing the window keeps the open tabs for the next start.
+        let closing = app.clone();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = closing.update(cx, |app, cx| app.save_layout(cx));
+            true
+        });
         let stage = if holonet_vault::exists(&path) {
             let p = path.clone();
             Stage::Locked(cx.new(|cx| Locked::new(app, p, LockReason::Startup, 0, window, cx)))
@@ -157,6 +195,11 @@ impl HolonetApp {
             last_input: Rc::new(Cell::new(Instant::now())),
             snippet_values: Default::default(),
             last_session: None,
+            logs: None,
+            palette: None,
+            pending_restore: Vec::new(),
+            pending_history: Vec::new(),
+            history_cleaned: false,
         }
     }
 
@@ -165,9 +208,207 @@ impl HolonetApp {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
         let forwarder = self.forwarder.clone();
-        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx)));
+        let logs = vault.logs();
+        self.logs = Some(logs.clone());
+        let workspace = cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx));
+        // History from before this unlock: changes made while locked, then
+        // (once per start) the clean-up.
+        let pending = std::mem::take(&mut self.pending_history);
+        let clean = !std::mem::replace(&mut self.history_cleaned, true);
+        workspace.update(cx, |w, cx| {
+            for change in pending {
+                w.save(change, cx);
+            }
+            if clean {
+                w.save(move |d| clean_history(d, &logs), cx);
+                // Once per start: the new-release check, when Settings asks
+                // for it then (or a day has passed).
+                if w.vault_data().is_some_and(|d| d.settings.updates.due(Timestamp::now(), true)) {
+                    w.check_updates(cx);
+                }
+            }
+            if let Some(d) = w.vault_data() {
+                crate::platform::apply_accent(d.settings.appearance.windows_accent, cx);
+            }
+        });
+        // The tabs open when Holonet last closed, once per start.
+        if clean
+            && let Some(d) = workspace.read(cx).vault_data()
+            && d.settings.connection.restore_sessions
+        {
+            let exists = |h: HostId| d.host(h).is_some();
+            self.pending_restore = d
+                .open_tabs
+                .iter()
+                .filter_map(|t| {
+                    t.layout.clone().keep(&exists).map(|layout| holonet_model::SavedTab { layout, ..t.clone() })
+                })
+                .collect();
+        }
+        self.stage = Stage::Open(workspace);
         self.last_input.set(Instant::now());
         cx.notify();
+    }
+
+    /// The open tabs as they are now, by saved host.
+    fn current_layout(&self, cx: &App) -> Vec<holonet_model::SavedTab> {
+        let Some(d) = self.vault_data(cx) else { return Vec::new() };
+        let saved = |h: HostId| d.host(h).is_some();
+        self.tabs
+            .iter()
+            .filter_map(|t| {
+                let tab = t.read(cx);
+                let layout = tab.layout(&saved, cx)?;
+                Some(holonet_model::SavedTab { files: tab.is_files(cx), layout })
+            })
+            .collect()
+    }
+
+    /// Keep the open tabs in the vault while "Restore open sessions on
+    /// launch" is on (only then: otherwise nothing about them is kept).
+    fn save_layout(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.vault_data(cx) else { return };
+        let tabs = if d.settings.connection.restore_sessions { self.current_layout(cx) } else { Vec::new() };
+        if tabs != d.open_tabs
+            && let Some(w) = self.workspace().cloned()
+        {
+            w.update(cx, |w, cx| w.save(move |d| d.open_tabs = tabs, cx));
+        }
+    }
+
+    /// Reopen saved tabs: each pane connects again, without its startup
+    /// snippet.
+    fn restore_tabs(&mut self, tabs: Vec<holonet_model::SavedTab>, window: &mut Window, cx: &mut Context<Self>) {
+        use holonet_model::{SavedLayout, SplitAxis};
+        let active = self.active;
+        for saved in tabs {
+            let hosts = saved.layout.hosts();
+            let Some(&first) = hosts.first() else { continue };
+            if saved.files {
+                self.open_files(first, Vec::new(), window, cx);
+                continue;
+            }
+            let size = Self::tab_grid(window);
+            let Some(pane) = self.new_pane(first, size, (PaneMode::Terminal, Vec::new()), window, cx) else { continue };
+            pane.update(cx, |p, _| p.skip_startup());
+            let tab = self.open_tab_with(pane.clone(), window, cx);
+            // Each split: a pane for the second part's first host beside
+            // or below the pane holding the first part's first host.
+            fn rebuild(
+                app: &mut HolonetApp,
+                tab: &Entity<Tab>,
+                node: &SavedLayout,
+                at: Entity<Pane>,
+                size: GridSize,
+                window: &mut Window,
+                cx: &mut Context<HolonetApp>,
+            ) {
+                let SavedLayout::Split { axis, permille, first, second } = node else { return };
+                let Some(&host) = second.hosts().first() else { return };
+                let Some(pane) = app.new_pane(host, size, (PaneMode::Terminal, Vec::new()), window, cx) else { return };
+                pane.update(cx, |p, _| p.skip_startup());
+                let axis = match axis {
+                    SplitAxis::Right => Axis::Right,
+                    SplitAxis::Down => Axis::Down,
+                };
+                let ratio = f32::from(*permille) / 1000.0;
+                tab.update(cx, |t, cx| t.restore_pane(&at, axis, pane.clone(), ratio, cx));
+                rebuild(app, tab, first, at, size, window, cx);
+                rebuild(app, tab, second, pane, size, window, cx);
+            }
+            rebuild(self, &tab, &saved.layout, pane, size, window, cx);
+        }
+        // The vault view stays in front; the restored tabs are in the bar.
+        self.select(active, window, cx);
+        self.save_layout(cx);
+    }
+
+    /// Change History: saved now, or at the next unlock while locked.
+    pub fn history_change(&mut self, change: impl FnOnce(&mut VaultData) + 'static, cx: &mut Context<Self>) {
+        match self.workspace().cloned() {
+            Some(w) => w.update(cx, |w, cx| w.save(change, cx)),
+            None => self.pending_history.push(Box::new(change)),
+        }
+    }
+
+    /// A session connected for the first time: its History record, and its
+    /// log when the host saves output. `host` is the pane's resolved copy.
+    pub fn start_record(
+        &mut self,
+        host: &holonet_model::Host,
+        kind: holonet_model::SessionKind,
+        route: String,
+        user: String,
+        cx: &mut Context<Self>,
+    ) -> (holonet_model::RecordId, Option<crate::history::SessionLog>) {
+        // While locked the Settings default cannot be read: only a host's
+        // own switch turns logging on.
+        let wanted = match self.vault_data(cx) {
+            Some(d) => d.host(host.id).map(|h| d.logs_output(h)).unwrap_or_else(|| d.logs_output(host)),
+            None => host.log_output.unwrap_or(false),
+        };
+        let saved = self.is_saved(host.id, cx);
+        let mut record = holonet_model::SessionRecord::new(saved.then_some(host.id), host.display_name(), kind, wanted);
+        record.route = route;
+        record.user = user;
+        let log = if record.logged {
+            match self.logs.as_ref().map(|l| l.create(record.id)) {
+                Some(Ok(writer)) => Some(crate::history::SessionLog::start(writer)),
+                _ => {
+                    record.logged = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let id = record.id;
+        self.history_change(move |d| d.history.push(record), cx);
+        (id, log)
+    }
+
+    /// A session ended: its record's end, then its log's final size once
+    /// the log thread has sealed the rest.
+    pub fn end_record(
+        &mut self,
+        id: holonet_model::RecordId,
+        end: holonet_model::SessionEnd,
+        log: Option<crate::history::SessionLog>,
+        cx: &mut Context<Self>,
+    ) {
+        let bytes = log.as_ref().map(|l| l.bytes());
+        self.history_change(
+            move |d| {
+                if let Some(r) = d.record_mut(id) {
+                    r.ended = Some(Timestamp::now());
+                    r.end = Some(end);
+                    if let Some(b) = bytes {
+                        r.log_bytes = b;
+                    }
+                }
+            },
+            cx,
+        );
+        let Some(log) = log else { return };
+        let handle = log.finish();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { handle.join() }).await;
+            let bytes = match result {
+                Ok(Ok(bytes)) => bytes,
+                _ => return,
+            };
+            let _ = this.update(cx, |app, cx| {
+                app.history_change(
+                    move |d| {
+                        if let Some(r) = d.record_mut(id) {
+                            r.log_bytes = bytes;
+                        }
+                    },
+                    cx,
+                )
+            });
+        })
+        .detach();
     }
 
     /// "Lock now".
@@ -413,6 +654,20 @@ impl HolonetApp {
         let data = self.vault_data(cx)?;
         // With its identity's username and sign-in, if it has one.
         let host = data.resolved(data.host(id)?);
+        self.new_pane_for(host, size, opening, window, cx)
+    }
+
+    /// A pane for a host as given: a saved host already resolved, or a
+    /// quick connect's host that is not in the vault.
+    fn new_pane_for(
+        &mut self,
+        host: holonet_model::Host,
+        size: GridSize,
+        opening: (PaneMode, Remembered),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Pane>> {
+        let data = self.vault_data(cx)?;
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
@@ -441,6 +696,12 @@ impl HolonetApp {
                 // The failed hop: a jump host's failure edits the jump host.
                 let id = pane.read(cx).host_to_edit();
                 this.edit_origin = Some(pane.downgrade());
+                // A quick connect has no saved host to edit: save it.
+                if !this.is_saved(id, cx) {
+                    let host = pane.read(cx).draft_host();
+                    this.save_as_host(host, window, cx);
+                    return;
+                }
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.edit_host(id, window, cx));
@@ -552,6 +813,50 @@ impl HolonetApp {
     ) -> Option<Entity<Tab>> {
         let size = Self::tab_grid(window);
         let pane = self.new_pane(id, size, opening, window, cx)?;
+        Some(self.open_tab_with(pane, window, cx))
+    }
+
+    /// Quick connect (FirstRun.dc.html's Connect now, the Hosts search): a
+    /// terminal to a host that is not saved. Its host key is still checked.
+    pub fn quick_connect(&mut self, host: holonet_model::Host, window: &mut Window, cx: &mut Context<Self>) {
+        let size = Self::tab_grid(window);
+        if let Some(pane) = self.new_pane_for(host, size, (PaneMode::Terminal, Vec::new()), window, cx) {
+            self.open_tab_with(pane, window, cx);
+        }
+    }
+
+    /// Whether a host is saved in the vault (true while locked: nothing is
+    /// offered then anyway).
+    pub fn is_saved(&self, id: HostId, cx: &App) -> bool {
+        self.vault_data(cx).is_none_or(|d| d.host(id).is_some())
+    }
+
+    /// A saved host's label changed: its open panes and tabs show it. Only
+    /// the name: the connection keeps the details it was opened with.
+    pub fn host_renamed(&mut self, id: HostId, label: &str, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            for pane in tab.read(cx).panes() {
+                pane.update(cx, |p, cx| {
+                    if p.host.id == id && p.host.label != label {
+                        p.host.label = label.to_string();
+                        cx.notify();
+                    }
+                });
+            }
+            tab.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// "Save as host": the host form, filled in from a quick connect.
+    fn save_as_host(&mut self, host: holonet_model::Host, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_vault(window, cx);
+        if let Some(w) = self.workspace().cloned() {
+            w.update(cx, |w, cx| w.open_form_with(None, Some(host), window, cx));
+        }
+    }
+
+    fn open_tab_with(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) -> Entity<Tab> {
         let app = cx.entity().downgrade();
         let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
@@ -561,6 +866,10 @@ impl HolonetApp {
             TabEvent::OpenFiles { host, remembered } => {
                 let (host, remembered) = (*host, remembered.clone());
                 this.open_files(host, remembered, window, cx);
+            }
+            TabEvent::SaveAsHost(host) => {
+                let host = (**host).clone();
+                this.save_as_host(host, window, cx);
             }
             TabEvent::ManageSnippets => {
                 this.show_vault(window, cx);
@@ -572,7 +881,8 @@ impl HolonetApp {
         .detach();
         self.tabs.push(tab.clone());
         self.select(Some(self.tabs.len() - 1), window, cx);
-        Some(tab)
+        self.save_layout(cx);
+        tab
     }
 
     /// Split a tab's active pane, with the same host unless another is given.
@@ -598,10 +908,18 @@ impl HolonetApp {
             Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
             Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
         };
-        let Some(pane) = self.new_pane(host.unwrap_or(same), size, (PaneMode::Terminal, Vec::new()), window, cx) else {
-            return;
+        let opening = (PaneMode::Terminal, Vec::new());
+        let pane = match host {
+            // A quick connect splits into another pane to the same host.
+            None if !self.is_saved(same, cx) => {
+                let host = active.read(cx).host.clone();
+                self.new_pane_for(host, size, opening, window, cx)
+            }
+            _ => self.new_pane(host.unwrap_or(same), size, opening, window, cx),
         };
+        let Some(pane) = pane else { return };
         tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
+        self.save_layout(cx);
         cx.notify();
     }
 
@@ -633,7 +951,7 @@ impl HolonetApp {
         }
         pane.update(cx, |p, cx| {
             p.stop_transfers(cx);
-            p.disconnect()
+            p.disconnect(cx)
         });
         let tab = self.tabs[index].clone();
         if tab.update(cx, |t, cx| t.remove(pane, window, cx)) {
@@ -641,6 +959,7 @@ impl HolonetApp {
         } else {
             tab.update(cx, |t, cx| t.focus(window, cx));
         }
+        self.save_layout(cx);
     }
 
     /// Close a whole tab and every pane in it, asking first while an SFTP
@@ -662,7 +981,7 @@ impl HolonetApp {
         for pane in tab.read(cx).panes() {
             pane.update(cx, |p, cx| {
                 p.stop_transfers(cx);
-                p.disconnect()
+                p.disconnect(cx)
             });
         }
         let next = match self.active {
@@ -677,6 +996,7 @@ impl HolonetApp {
             other => other,
         };
         self.select(next, window, cx);
+        self.save_layout(cx);
     }
 
     fn select(&mut self, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -710,6 +1030,205 @@ impl HolonetApp {
     }
 
     /// "+" or Ctrl Shift T: the host picker under the "+" button.
+    /// Ctrl Shift P: the command palette, over whatever is shown. Not while
+    /// the vault is locked: its entries come from the vault.
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::palette::{CommandPalette, PaletteEvent};
+        if self.vault_data(cx).is_none() {
+            return;
+        }
+        self.picker = None;
+        let entries = self.palette_entries(cx);
+        let palette = cx.new(|cx| CommandPalette::new(entries, window, cx));
+        cx.subscribe_in(&palette, window, |this, _, event: &PaletteEvent, window, cx| {
+            this.palette = None;
+            match event {
+                PaletteEvent::Run { command, split } => {
+                    let (command, split) = (command.clone(), *split);
+                    // Deferred: running reads the workspace, which may be mid-update.
+                    let app = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| app.run_command(command, split, window, cx))
+                    });
+                }
+                PaletteEvent::Dismiss => this.select(this.active, window, cx),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// The palette's entries: hosts (the open tab, or connect), snippets
+    /// when a terminal can run them, rules, screens and the actions that
+    /// work now.
+    fn palette_entries(&self, cx: &App) -> Vec<crate::palette::Entry> {
+        use crate::palette::{Command, Entry, Screen, Section};
+        let Some(data) = self.vault_data(cx) else { return Vec::new() };
+        let entry = |section, title: String, hint: &str, command| Entry {
+            section,
+            title,
+            hint: hint.into(),
+            keys: None,
+            color: None,
+            command,
+            splits: false,
+            recent: 0,
+            search_only: false,
+        };
+        let active = self.active_tab();
+        let terminal_tab = active.as_ref().filter(|t| !t.read(cx).is_files(cx));
+        let can_split = terminal_tab.is_some_and(|t| t.read(cx).can_split());
+        let mut out = Vec::new();
+        for host in &data.hosts {
+            let tab = self.tabs.iter().position(|t| {
+                !t.read(cx).is_files(cx) && t.read(cx).panes().iter().any(|p| p.read(cx).host.id == host.id)
+            });
+            let (hint, command) = match tab {
+                Some(i) => ("Go to session", Command::GoToTab(i)),
+                None => ("Connect", Command::Connect(host.id)),
+            };
+            let color = crate::workspace::GroupTag::of(data, host).map(|t| t.color);
+            let recent = host.last_connected_at.map_or(0, |t| t.0) + if tab.is_some() { 1 << 40 } else { 0 };
+            out.push(Entry {
+                color,
+                splits: can_split,
+                recent,
+                ..entry(Section::Hosts, host.display_name().to_string(), hint, command)
+            });
+            out.push(Entry {
+                color,
+                recent,
+                search_only: true,
+                ..entry(Section::Hosts, host.display_name().to_string(), "Open SFTP", Command::OpenFiles(host.id))
+            });
+        }
+        if self.active_session_name(cx).is_some() {
+            for s in &data.snippets {
+                out.push(entry(
+                    Section::Snippets,
+                    s.display_name().to_string(),
+                    "Run in active session",
+                    Command::RunSnippet(Box::new(s.clone())),
+                ));
+            }
+        }
+        for rule in &data.forward_rules {
+            let on = self.forwarder.read(cx).is_on(rule.id);
+            out.push(entry(
+                Section::Forwarding,
+                rule.display_name().to_string(),
+                if on { "Turn off" } else { "Turn on" },
+                Command::Rule(rule.id, !on),
+            ));
+        }
+        for screen in Screen::ALL {
+            out.push(entry(Section::GoTo, screen.label().into(), "Screen", Command::Screen(screen)));
+        }
+        let action = |title: &str, keys: &'static str, command| Entry {
+            keys: Some(keys),
+            ..entry(Section::Actions, title.into(), "Action", command)
+        };
+        out.push(action("New host", "Ctrl Shift N", Command::NewHost));
+        out.push(action("Lock vault", "Ctrl Shift L", Command::LockVault));
+        out.push(action("New tab", "Ctrl Shift T", Command::NewTab));
+        if can_split {
+            out.push(action("Split right", "Ctrl Shift D", Command::SplitRight));
+        }
+        if terminal_tab.is_some_and(|t| t.read(cx).panes().len() > 1) {
+            out.push(action("Broadcast", "Ctrl Shift B", Command::Broadcast));
+        }
+        if terminal_tab.is_some() {
+            out.push(action("Find in terminal", "Ctrl Shift F", Command::Find));
+        }
+        out
+    }
+
+    /// Run a palette entry. `split` opens a host in a split of the current
+    /// terminal tab.
+    fn run_command(
+        &mut self,
+        command: crate::palette::Command,
+        split: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::palette::{Command, Screen};
+        match command {
+            Command::GoToTab(i) => self.select(Some(i), window, cx),
+            Command::Connect(id) if split => match self.active_tab() {
+                Some(tab) => self.split(&tab, Axis::Right, Some(id), window, cx),
+                None => self.connect(id, window, cx),
+            },
+            Command::Connect(id) => self.connect(id, window, cx),
+            Command::OpenFiles(id) => self.open_files(id, Vec::new(), window, cx),
+            Command::RunSnippet(snippet) => {
+                let Some(tab) = self.last_session.as_ref().and_then(|t| t.upgrade()) else { return };
+                tab.update(cx, |t, cx| t.run_snippet_here(*snippet, window, cx));
+                // Back in its tab, with the keyboard in its pane.
+                if let Some(index) = self.tabs.iter().position(|t| *t == tab) {
+                    self.select(Some(index), window, cx);
+                }
+            }
+            Command::Rule(id, on) => {
+                let Some(data) = self.vault_data(cx).cloned() else { return };
+                self.forwarder.update(cx, |f, cx| if on { f.start(id, &data, cx) } else { f.stop(id, cx) });
+                // The keyboard goes back where it was.
+                self.select(self.active, window, cx);
+            }
+            Command::Screen(screen) => {
+                self.show_vault(window, cx);
+                if let Some(w) = self.workspace().cloned() {
+                    w.update(cx, |w, cx| match screen {
+                        Screen::Snippets => w.open_snippets(None, cx),
+                        Screen::History => w.open_history(cx),
+                        Screen::Hosts => w.set_page(Page::Hosts, cx),
+                        Screen::Groups => w.set_page(Page::Groups, cx),
+                        Screen::Keychain => w.set_page(Page::Keychain, cx),
+                        Screen::Forwarding => w.set_page(Page::Forwarding, cx),
+                        Screen::KnownHosts => w.set_page(Page::KnownHosts, cx),
+                        Screen::Settings => w.set_page(Page::Settings, cx),
+                    });
+                }
+            }
+            Command::NewHost => self.new_host(window, cx),
+            Command::LockVault => self.lock(window, cx),
+            Command::NewTab => self.open_picker(window, cx),
+            Command::SplitRight => {
+                if let Some(tab) = self.active_tab() {
+                    self.split(&tab, Axis::Right, None, window, cx);
+                }
+            }
+            Command::Broadcast => {
+                if let Some(tab) = self.active_tab() {
+                    tab.update(cx, |t, cx| t.toggle_broadcast(cx));
+                }
+                self.select(self.active, window, cx);
+            }
+            Command::Find => {
+                if let Some(tab) = self.active_tab() {
+                    tab.update(cx, |t, cx| {
+                        if !t.focus_find(window, cx) {
+                            t.toggle_find(window, cx);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Ctrl Shift N: the New host form.
+    fn new_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace().is_none() {
+            return;
+        }
+        self.show_vault(window, cx);
+        if let Some(w) = self.workspace().cloned() {
+            w.update(cx, |w, cx| w.open_form(None, window, cx));
+        }
+    }
+
     fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(data) = self.vault_data(cx) else { return };
         let data = data.clone();
@@ -873,6 +1392,40 @@ impl Render for HolonetApp {
                         .child(picker),
                 )
         });
+        // Palette.dc.html: the palette over a dimmed window, near the top.
+        if !self.pending_restore.is_empty() {
+            let tabs = std::mem::take(&mut self.pending_restore);
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.restore_tabs(tabs, window, cx)));
+        }
+        let palette = self.palette.clone().map(|palette| {
+            div()
+                .id("palette-layer")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(96.))
+                .px(px(20.))
+                .bg(gpui::hsla(0., 0., 0., 0.6))
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.palette = None;
+                        this.select(this.active, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(palette),
+                )
+        });
         // "n transfers are still running. Close anyway?"
         let closing = self.closing.clone().filter(|_| unlocked).map(|tab| {
             let n = Self::running_transfers(&tab, cx);
@@ -978,6 +1531,13 @@ impl Render for HolonetApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|_, _: &AddHost, window, cx| {
+                // Deferred: the form reads the workspace, which may be mid-update.
+                let app = cx.entity();
+                window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.new_host(window, cx)));
+            }))
+            .on_action(cx.listener(|this, _: &LockNow, window, cx| this.lock(window, cx)))
             .bg(theme::ground())
             .text_color(theme::ink())
             .font_family(theme::SANS)
@@ -985,5 +1545,23 @@ impl Render for HolonetApp {
             .child(div().flex_1().min_h_0().relative().child(body))
             .children(picker)
             .children(closing)
+            .children(palette)
     }
+}
+
+/// Once per start: close records a crash left open (at their log's last
+/// write), drop records past Settings' kept time with their logs, and
+/// delete log files that belong to no record.
+fn clean_history(d: &mut VaultData, logs: &holonet_vault::LogStore) {
+    // A log a crash left open never reported its size: count what it kept.
+    for r in d.history.iter_mut().filter(|r| r.ended.is_none() && r.logged) {
+        if let Ok(text) = logs.read(r.id) {
+            r.log_bytes = text.text.len() as u64;
+        }
+    }
+    d.close_open_records(|r| logs.last_write(r.id));
+    for old in d.expire_history(Timestamp::now()) {
+        let _ = logs.delete(old.id);
+    }
+    logs.remove_orphans(d.history.iter().filter(|r| r.logged).map(|r| r.id));
 }

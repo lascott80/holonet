@@ -3,7 +3,8 @@
 //! password, keep-alive. Milestone 4 adds identities, the Tailscale address
 //! and route, and the jump host. Milestone 5 adds the SFTP folder. Milestone
 //! 6 adds the group: route, jump host and sign-in can follow the group's
-//! defaults, shown "from group" until changed. Logging comes in milestone 7.
+//! defaults, shown "from group" until changed, and "Save terminal output to
+//! History", which follows Settings until changed.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -48,6 +49,13 @@ enum TestState {
 
 pub struct HostForm {
     original: Option<Host>,
+    /// A new host's starting values ("Save as host" after a quick
+    /// connect). It keeps the draft's id, so the open tab counts as saved.
+    draft: Option<Host>,
+    /// "Quick fill: paste an ssh command or a ~/.ssh/config entry" (new
+    /// hosts), and what it filled or could not use.
+    quick_fill: Entity<TextField>,
+    quick_note: Option<(SharedString, bool)>,
     label: Entity<TextField>,
     address: Entity<TextField>,
     port: Entity<TextField>,
@@ -83,6 +91,10 @@ pub struct HostForm {
     /// Connection: "Agent forwarding" and "Compression".
     agent_forwarding: bool,
     compression: bool,
+    /// "Save terminal output to History": the host's own choice, or `None`
+    /// to follow Settings (`log_default`).
+    log_output: Option<bool>,
+    log_default: bool,
     /// "Jump host": None, then these saved hosts (by name).
     jump_options: Vec<(HostId, String)>,
     jump_select: Entity<Select>,
@@ -161,6 +173,7 @@ impl HostForm {
     /// vault's keys, identities and known hosts.
     pub fn new(
         host: Option<Host>,
+        draft: Option<Host>,
         data: &holonet_model::VaultData,
         connect_timeout: Duration,
         runtime: tokio::runtime::Handle,
@@ -171,13 +184,14 @@ impl HostForm {
         let mut identities: Vec<Identity> = data.identities.clone();
         identities.sort_by_key(|i| i.name.to_lowercase());
         let known_hosts: Vec<KnownHost> = data.known_hosts.clone();
-        let h = host.clone().unwrap_or_else(|| Host::new(""));
+        let h = host.clone().or_else(|| draft.clone()).unwrap_or_else(|| Host::new(""));
         let text = |cx: &mut Context<Self>, placeholder: &str, value: String, mono: bool| {
             cx.new(|cx| {
                 let f = TextField::new(cx, placeholder.to_string()).with_text(value);
                 if mono { f.mono() } else { f }
             })
         };
+        let quick_fill = text(cx, "ssh -J bastion-east deploy@10.30.0.9 -p 22", String::new(), true);
         let label = text(cx, "Defaults to the address", h.label.clone(), false);
         let address = text(cx, "Hostname or IP address", h.address.clone(), true);
         let port = text(cx, "22", h.port.to_string(), true);
@@ -195,7 +209,7 @@ impl HostForm {
             }
         };
         // A new host defaults to a key when the vault has one.
-        let auth = if host.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
+        let auth = if host.is_none() && draft.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
         let identity_index = h.identity.and_then(|id| identities.iter().position(|i| i.id == id));
         let auth = if identity_index.is_some() { 2 } else { auth };
         let identity_select = cx.new(|cx| {
@@ -287,6 +301,15 @@ impl HostForm {
                 }
             }));
         }
+        subscriptions.push(cx.subscribe_in(
+            &quick_fill,
+            window,
+            |this: &mut Self, _, e: &TextFieldEvent, _, cx| match e {
+                TextFieldEvent::Submitted => this.quick_fill(cx),
+                TextFieldEvent::Cancelled => cx.emit(HostFormEvent::Cancelled),
+                TextFieldEvent::Changed => cx.notify(),
+            },
+        ));
         subscriptions.push(cx.observe(&identity_select, |_: &mut Self, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&jump_select, |this: &mut Self, _, cx| {
             // Showing the group's jump host is following it; anything else
@@ -335,11 +358,16 @@ impl HostForm {
             keep_alive: h.keep_alive,
             agent_forwarding: h.agent_forwarding,
             compression: h.compression,
+            log_output: h.log_output,
+            log_default: data.settings.connection.log_default,
             jump_options,
             jump_select,
             all_hosts: data.hosts.clone(),
             test_via: None,
             original: host,
+            quick_fill,
+            quick_note: None,
+            draft,
             label,
             address,
             port,
@@ -466,6 +494,96 @@ impl HostForm {
         field.read(cx).text().trim().to_string()
     }
 
+    /// Fill the form from an `ssh` command or a `Host` entry, and say what
+    /// was filled and what was not used.
+    fn quick_fill(&mut self, cx: &mut Context<Self>) {
+        let text = self.quick_fill.read(cx).text().to_string();
+        let q = match holonet_import::command::parse(&text) {
+            Ok(q) => q,
+            Err(e) => {
+                self.quick_note = Some((e.message().into(), true));
+                cx.notify();
+                return;
+            }
+        };
+        let mut filled: Vec<&str> = Vec::new();
+        let mut unused: Vec<String> = q.unused.clone();
+        if let Some(label) = &q.label {
+            self.label.update(cx, |f, cx| f.set_text(label.clone(), cx));
+            filled.push("label");
+        }
+        self.address.update(cx, |f, cx| f.set_text(q.address.clone(), cx));
+        filled.push("address");
+        if let Some(user) = &q.user {
+            self.username.update(cx, |f, cx| f.set_text(user.clone(), cx));
+            filled.push("user");
+        }
+        if let Some(port) = q.port {
+            self.port.update(cx, |f, cx| f.set_text(port.to_string(), cx));
+            filled.push("port");
+        }
+        // The hop in front of this host, by its name or address among the
+        // saved hosts. Earlier hops are that host's own jump hosts.
+        if let Some(last) = q.jump.last() {
+            let found = self
+                .jump_options
+                .iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(&last.host))
+                .map(|(id, _)| *id)
+                .or_else(|| {
+                    self.all_hosts
+                        .iter()
+                        .find(|h| h.address.trim().eq_ignore_ascii_case(&last.host))
+                        .map(|h| h.id)
+                        .filter(|id| self.jump_options.iter().any(|(j, _)| j == id))
+                });
+            match found {
+                Some(id) => {
+                    self.own_jump = Some(id);
+                    self.from_group.jump_host = false;
+                    self.show_jump(cx);
+                    filled.push("jump host");
+                    if q.jump.len() > 1 {
+                        unused.push(format!(
+                            "the earlier jump hosts ({}), which belong on {}'s own form",
+                            q.jump[..q.jump.len() - 1].iter().map(|j| j.host.as_str()).collect::<Vec<_>>().join(", "),
+                            last.host
+                        ));
+                    }
+                }
+                None => unused.push(format!("jump host {}, which is not saved yet", last.host)),
+            }
+        }
+        if let Some(v) = q.forward_agent {
+            self.agent_forwarding = v;
+            filled.push("agent forwarding");
+        }
+        if let Some(v) = q.compression {
+            self.compression = v;
+            filled.push("compression");
+        }
+        // A key file, by its name among the Keychain's keys.
+        if let Some(file) = &q.identity_file {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            match self.keys.iter().position(|k| k.name.eq_ignore_ascii_case(name)) {
+                Some(i) => {
+                    self.auth = 0;
+                    let index = i + usize::from(self.key_missing);
+                    self.key_select.update(cx, |s, cx| s.set_selected(index, cx));
+                    filled.push("key");
+                }
+                None => unused.push(format!("key file {file}: import it in the Keychain, then choose it")),
+            }
+        }
+        let mut note = format!("Filled the {}.", join_words(&filled));
+        if !unused.is_empty() {
+            note.push_str(&format!(" Not used: {}.", unused.join(", ")));
+        }
+        self.quick_note = Some((note.into(), false));
+        self.test = TestState::Idle;
+        cx.notify();
+    }
+
     fn selected_key(&self, cx: &Context<Self>) -> Option<&StoredKey> {
         let index = self.key_select.read(cx).selected().checked_sub(usize::from(self.key_missing))?;
         self.keys.get(index)
@@ -490,7 +608,7 @@ impl HostForm {
 
     /// The host as the form currently describes it.
     fn build(&self, cx: &Context<Self>) -> Host {
-        let mut host = self.original.clone().unwrap_or_else(|| Host::new(""));
+        let mut host = self.original.clone().or_else(|| self.draft.clone()).unwrap_or_else(|| Host::new(""));
         host.label = self.text(&self.label, cx);
         host.address = self.text(&self.address, cx);
         host.port = self.port(cx).unwrap_or(0);
@@ -505,6 +623,7 @@ impl HostForm {
         host.keep_alive = self.keep_alive;
         host.agent_forwarding = self.agent_forwarding;
         host.compression = self.compression;
+        host.log_output = self.log_output;
         let folder = self.text(&self.sftp_folder, cx);
         host.sftp_folder = (!folder.is_empty()).then_some(folder);
         host.jump_host = self.own_jump;
@@ -830,6 +949,33 @@ impl Render for HostForm {
         let narrow = window.viewport_size().width < px(1100.);
 
         // ------------------------------------------------------ fieldsets --
+        // NewHost.dc.html: Quick fill above General, for new hosts.
+        let quick_fill = (!editing).then(|| {
+            let has_text = !self.quick_fill.read(cx).text().trim().is_empty();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_meta()
+                        .text_color(theme::ink_muted())
+                        .child("Quick fill: paste an ssh command or a ~/.ssh/config entry"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(div().flex_1().min_w_0().child(self.quick_fill.clone()))
+                        .child(
+                            Button::secondary("quick-fill", "Fill in")
+                                .disabled(!has_text)
+                                .on_click(cx.listener(|this, _, _, cx| this.quick_fill(cx))),
+                        ),
+                )
+                .children(self.quick_note.clone().map(|(text, problem)| crate::ui::field_help(text, problem)))
+        });
         let general = fieldset("General")
             .child(field("Label", self.label.clone(), None))
             .child(div().w_full().max_w(px(360.)).child(field("Group", self.group_select.clone(), None)))
@@ -886,6 +1032,17 @@ impl Render for HostForm {
             .child(field("Tags", self.tags.clone(), None));
 
         let entity = cx.entity();
+        // Settings.dc.html's warning, shown while this host logs.
+        let logging = self.log_output.unwrap_or(self.log_default);
+        let log_note = format!(
+            "{}{}",
+            if self.log_output.is_none() { "From Settings. " } else { "" },
+            if logging {
+                "Logs can contain anything typed or printed, including secrets. They are encrypted with the vault."
+            } else {
+                "Output is not saved. SFTP sessions are never logged."
+            }
+        );
         // NewHost.dc.html: SSH key, Password, SSH agent; then Identity once
         // the vault has one. Each option carries its `auth` code.
         let mut auth_codes = vec![0, 1, AUTH_AGENT];
@@ -1108,7 +1265,8 @@ impl Render for HostForm {
                         None,
                     ))),
             )
-            // NewHost.dc.html: Agent forwarding, Keep connection alive, Compression in a row.
+            // NewHost.dc.html: Agent forwarding, Keep connection alive,
+            // Compression and Save terminal output to History in a row.
             .child(
                 div()
                     .flex()
@@ -1141,7 +1299,37 @@ impl Render for HostForm {
                                 cx.notify()
                             })
                         }
-                    })),
+                    }))
+                    .child(
+                        Checkbox::new("log-output", "Save terminal output to History", logging).on_toggle({
+                            let entity = entity.clone();
+                            move |v, _, cx| {
+                                entity.update(cx, |f, cx| {
+                                    f.log_output = Some(v);
+                                    cx.notify()
+                                })
+                            }
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::SPACE_3)
+                    .child(crate::ui::field_help(log_note, logging))
+                    .when(self.log_output.is_some(), |d| {
+                        d.child(Button::quiet("log-default", "Use the Settings default").compact().on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |f, cx| {
+                                    f.log_output = None;
+                                    cx.notify()
+                                })
+                            }
+                        }))
+                    }),
             )
             .when(self.agent_forwarding, |d| {
                 d.child(crate::ui::field_help(
@@ -1262,6 +1450,7 @@ impl Render for HostForm {
             .child(div().flex().flex_col().gap(theme::SPACE_1).child(breadcrumb).child(
                 div().text_title().text_color(theme::ink()).child(if editing { "Edit host" } else { "New host" }),
             ))
+            .children(quick_fill)
             .child(general)
             .child(credentials)
             .child(connection);
@@ -1339,4 +1528,13 @@ enum FollowField {
     Route,
     Jump,
     Key,
+}
+
+/// "label, address and port".
+fn join_words(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }

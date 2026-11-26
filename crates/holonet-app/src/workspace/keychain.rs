@@ -74,6 +74,17 @@ enum KcDialog {
         state: InstallState,
     },
     Identity(Box<IdentityForm>),
+    /// "Export private key": the key's own passphrase when none is saved,
+    /// and one for the file (or none, after the amber question).
+    Export {
+        key: KeyId,
+        current: Option<Entity<TextField>>,
+        new: Entity<TextField>,
+        confirm: Entity<TextField>,
+        problem: Option<SharedString>,
+        /// "Export without a passphrase" was offered after an empty one.
+        bare_ok: bool,
+    },
     DeleteIdentity {
         id: IdentityId,
     },
@@ -466,6 +477,11 @@ impl Workspace {
                             .compact()
                             .on_click(cx.listener(move |this, _, window, cx| this.open_rename(id, window, cx))),
                     )
+                    .child(
+                        Button::quiet("kc-export", "Export private key")
+                            .compact()
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_export(id, window, cx))),
+                    )
                     .child(Button::new("kc-delete", "Delete key", ButtonKind::DestructiveOutline).compact().on_click(
                         cx.listener(move |this, _, _, cx| {
                             this.kc.dialog = Some(KcDialog::Delete { key: id });
@@ -776,6 +792,10 @@ impl Workspace {
                 self.kc.dialog = Some(KcDialog::Identity(form));
                 self.save_identity(cx);
             }
+            export @ Some(KcDialog::Export { .. }) => {
+                self.kc.dialog = export;
+                self.run_export(cx);
+            }
             install @ Some(KcDialog::Install { .. }) => {
                 self.kc.dialog = install;
                 self.run_install(window, cx);
@@ -791,6 +811,82 @@ impl Workspace {
         self.kc_subscribe_dialog_field(&field, window, cx);
         field.read(cx).focus(window);
         self.kc.dialog = Some(KcDialog::Rename { key, field });
+        cx.notify();
+    }
+
+    // --------------------------------------------------------------- export --
+
+    fn open_export(&mut self, key: KeyId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(k) = self.vault.as_ref().and_then(|v| v.data().key(key)).cloned() else { return };
+        let secret = |cx: &mut Context<Self>| cx.new(|cx| TextField::new(cx, "").password());
+        let current = (k.encrypted && k.saved_passphrase.is_none()).then(|| secret(cx));
+        let (new, confirm) = (secret(cx), secret(cx));
+        for f in current.iter().chain([&new, &confirm]) {
+            self.kc_subscribe_dialog_field(f, window, cx);
+        }
+        current.as_ref().unwrap_or(&new).read(cx).focus(window);
+        self.kc.dialog = Some(KcDialog::Export { key, current, new, confirm, problem: None, bare_ok: false });
+        cx.notify();
+    }
+
+    /// Check the passphrases, write the key, and ask where to save it.
+    fn run_export(&mut self, cx: &mut Context<Self>) {
+        let Some(KcDialog::Export { key, current, new, confirm, problem, bare_ok }) = self.kc.dialog.as_mut() else {
+            return;
+        };
+        let Some(k) = self.vault.as_ref().and_then(|v| v.data().key(*key)).cloned() else { return };
+        let (new_text, confirm_text) = (new.read(cx).text().to_string(), confirm.read(cx).text().to_string());
+        if new_text != confirm_text {
+            *problem = Some("The two passphrases do not match.".into());
+            cx.notify();
+            return;
+        }
+        if new_text.is_empty() && !*bare_ok {
+            // The amber question first: the file alone would open the key.
+            *bare_ok = true;
+            *problem = None;
+            cx.notify();
+            return;
+        }
+        let own = match current {
+            Some(f) => Some(f.read(cx).text().to_string()),
+            None => k.saved_passphrase.as_ref().map(|s| s.expose().to_string()),
+        };
+        let text = match holonet_ssh::export_private_key(k.private_key.expose(), own.as_deref(), Some(&new_text)) {
+            Ok(text) => text,
+            Err(holonet_ssh::KeyFileError::NeedsPassphrase | holonet_ssh::KeyFileError::WrongPassphrase) => {
+                *problem = Some(format!("That is not the passphrase for {}.", k.name).into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                *problem = Some(format!("Holonet could not export this key: {e}").into());
+                cx.notify();
+                return;
+            }
+        };
+        self.kc.dialog = None;
+        // ~/.ssh when there is one, where OpenSSH looks for keys.
+        let dir = key_import::windows_ssh_dir()
+            .filter(|d| d.is_dir())
+            .or_else(|| std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join("Documents")))
+            .unwrap_or_else(std::env::temp_dir);
+        let answer = cx.prompt_for_new_path(&dir, Some(&k.name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            let result = std::fs::write(&path, text.expose());
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                match result {
+                    Ok(()) => {
+                        let shown = short_path(&path.display().to_string(), 80);
+                        w.notice = Some(format!("Saved the private key to {shown}. Keep the file safe.").into());
+                    }
+                    Err(e) => w.save_error = Some(format!("Holonet could not save the key: {e}").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1205,6 +1301,38 @@ impl Workspace {
                     ]))
                     .into_any_element(),
             ),
+            KcDialog::Export { key, current, new, confirm, problem, bare_ok } => {
+                let name = data.key(*key).map(|k| k.name.clone()).unwrap_or_default();
+                let bare = *bare_ok && new.read(cx).text().is_empty();
+                let mut card = dialog_card(
+                    format!("Export {name}"),
+                    "Holonet writes the private key as an OpenSSH file. Give the file a passphrase, so the file alone cannot be used.",
+                );
+                if let Some(f) = current {
+                    card = card.child(field("The key's passphrase", f.clone(), None));
+                }
+                card = card
+                    .child(field("Passphrase for the file", new.clone(), None))
+                    .child(field("Confirm passphrase", confirm.clone(), problem.clone().map(|p| (p, true))));
+                if bare {
+                    card = card.child(callout(crate::ui::CalloutKind::Warning).child(
+                        "Without a passphrase, anyone who gets the file can sign in wherever this key is accepted.",
+                    ));
+                }
+                let export = if bare {
+                    Button::new("kc-export-bare", "Export without a passphrase", ButtonKind::DestructiveFill)
+                } else {
+                    Button::primary("kc-export-go", "Export key")
+                };
+                (
+                    480.,
+                    card.child(dialog_buttons([
+                        cancel("kc-export-cancel", "Cancel"),
+                        export.on_click(cx.listener(|this, _, window, cx| this.kc_submit_dialog(window, cx))),
+                    ]))
+                    .into_any_element(),
+                )
+            }
             KcDialog::Delete { key } => {
                 let key = *key;
                 let name = data.key(key).map(|k| k.name.clone()).unwrap_or_default();

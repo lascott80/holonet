@@ -17,7 +17,7 @@ pub fn showcase() -> Vec<u8> {
     let prompt = |cmd: &str| {
         format!(
             "\x1b[?2004h\x1b]3008;start=abc;type=shell;user=holotest\x1b\\\
-             \x1b[38;2;92;200;255;1mholotest@sptogo\x1b[0m\x1b[38;2;138;138;138m:\x1b[0m\
+             \x1b[38;2;92;200;255;1mholotest@devbox\x1b[0m\x1b[38;2;138;138;138m:\x1b[0m\
              \x1b[38;2;207;207;207m~/src/holonet\x1b[0m \x1b[38;2;127;214;181m\u{E725} main\x1b[0m\
              \x1b[38;2;138;138;138m $\x1b[0m {cmd}\x1b[?2004l\r\n"
         )

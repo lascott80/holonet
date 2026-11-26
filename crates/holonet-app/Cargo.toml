@@ -17,15 +17,20 @@ anyhow = "1.0.105"
 gpui.workspace = true
 holonet-model = { version = "0.1.0", path = "../holonet-model" }
 holonet-files = { version = "0.1.0", path = "../holonet-files" }
+holonet-import = { version = "0.1.0", path = "../holonet-import" }
 holonet-net = { version = "0.1.0", path = "../holonet-net" }
 holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
 holonet-vault = { version = "0.1.0", path = "../holonet-vault" }
 jiff = "1.0.3"
 regex = "1.13"
+serde_json = "1.0.154"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 unicode-segmentation = "1.13.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_RemoteDesktop", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_RemoteDesktop", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_Networking_WinHttp", "Win32_System_Registry"] }
 # Windows Hello (hello.rs).
 windows = { version = "0.62", features = ["Foundation", "Security_Credentials", "Security_Cryptography", "Storage_Streams"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -38,6 +38,9 @@ const PREVIEW_ROWS: usize = 6;
 /// Shortcuts that work in this build (Settings.dc.html lists the full set;
 /// each joins this list when its feature lands).
 const SHORTCUTS: &[(&str, &str)] = &[
+    ("Command palette", "Ctrl Shift P"),
+    ("New host", "Ctrl Shift N"),
+    ("Lock vault", "Ctrl Shift L"),
     ("New tab", "Ctrl Shift T"),
     ("Close pane or tab", "Ctrl Shift W"),
     ("Next tab", "Ctrl Tab"),
@@ -47,6 +50,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Next pane", "Ctrl Shift ]"),
     ("Previous pane", "Ctrl Shift ["),
     ("Find in terminal", "Ctrl Shift F"),
+    ("Broadcast to the tab's panes", "Ctrl Shift B"),
     ("Copy", "Ctrl Shift C"),
     ("Paste", "Ctrl Shift V"),
 ];
@@ -62,8 +66,15 @@ const LICENCES: &[(&str, &str)] = &[
 ];
 
 /// Sections, in page order: (chip label, child index in the scroll container).
-const SECTIONS: &[(&str, usize)] =
-    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("SFTP", 4), ("Keyboard", 5), ("About", 6)];
+const SECTIONS: &[(&str, usize)] = &[
+    ("Terminal", 1),
+    ("Appearance", 2),
+    ("Vault and security", 3),
+    ("Connection", 4),
+    ("SFTP", 5),
+    ("Keyboard", 6),
+    ("Updates", 7),
+];
 
 /// Settings, SFTP, "When a file already exists" and "Transfers at once"
 /// options in order.
@@ -80,10 +91,17 @@ pub(crate) struct SettingsUi {
     scrollback: Entity<Select>,
     keep_alive: Entity<Select>,
     fallback_wait: Entity<Select>,
+    /// "Keep logs for": 7, 30 or 90 days, or forever.
+    log_keep: Entity<Select>,
     on_conflict: Entity<Select>,
     at_once: Entity<Select>,
     /// "Lock vault after": 15 minutes, 1 hour, Never.
     lock_after: Entity<Select>,
+    /// "Look for new releases": when Holonet starts, once a day, never.
+    update_check: Entity<Select>,
+    /// A check running now, and why the last one failed (until the next).
+    pub(super) update_checking: bool,
+    pub(super) update_failed: Option<SharedString>,
     /// Whether Windows Hello is set up on this PC; `None` while checking.
     hello_available: Option<bool>,
     /// "Turn on Windows Hello", asking for the vault password first.
@@ -127,6 +145,16 @@ const FALLBACK_WAITS: [holonet_model::FallbackWait; 4] = [
     holonet_model::FallbackWait::Secs3,
     holonet_model::FallbackWait::Secs5,
     holonet_model::FallbackWait::Secs10,
+];
+
+const UPDATE_CHECKS: [holonet_model::UpdateCheck; 3] =
+    [holonet_model::UpdateCheck::Start, holonet_model::UpdateCheck::Daily, holonet_model::UpdateCheck::Never];
+
+const LOG_KEEP: [holonet_model::LogKeep; 4] = [
+    holonet_model::LogKeep::Days7,
+    holonet_model::LogKeep::Days30,
+    holonet_model::LogKeep::Days90,
+    holonet_model::LogKeep::Forever,
 ];
 
 fn keep_alive_index(k: KeepAlive) -> usize {
@@ -178,6 +206,20 @@ impl SettingsUi {
                 FALLBACK_WAITS.iter().position(|w| *w == settings.connection.fallback_wait).unwrap_or(1),
             )
         });
+        let log_keep = cx.new(|cx| {
+            Select::new(
+                cx,
+                LOG_KEEP.iter().map(|k| k.label().into()).collect(),
+                LOG_KEEP.iter().position(|k| *k == settings.connection.log_keep).unwrap_or(1),
+            )
+        });
+        let update_check = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["When Holonet starts".into(), "Once a day".into(), "Never".into()],
+                UPDATE_CHECKS.iter().position(|c| *c == settings.updates.check).unwrap_or(0),
+            )
+        });
         let lock_after = cx.new(|cx| {
             Select::new(
                 cx,
@@ -209,8 +251,12 @@ impl SettingsUi {
         })
         .detach();
         Self {
+            update_check,
+            update_checking: false,
+            update_failed: None,
             unknown_keys,
             fallback_wait,
+            log_keep,
             lock_after,
             on_conflict,
             at_once,
@@ -268,6 +314,16 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let w = FALLBACK_WAITS[i.min(3)];
                 this.save(|d| d.settings.connection.fallback_wait = w, cx);
+            }),
+            cx.subscribe(&self.update_check, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let check = UPDATE_CHECKS[i.min(2)];
+                this.save(|d| d.settings.updates.check = check, cx);
+            }),
+            cx.subscribe(&self.log_keep, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let keep = LOG_KEEP[i.min(LOG_KEEP.len() - 1)];
+                this.save(|d| d.settings.connection.log_keep = keep, cx);
             }),
             cx.subscribe(&self.keep_alive, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -393,9 +449,13 @@ impl Workspace {
             .gap(theme::SPACE_5)
             .child(page_block(
                 width,
-                div().child(div().text_title().text_color(theme::ink()).child("Settings")).child(chips),
+                div()
+                    .child(div().text_title().text_color(theme::ink()).child("Settings"))
+                    .child(chips)
+                    .children(self.update_notice(cx)),
             ))
             .child(page_block(width, self.terminal_section(&settings, &installed, preview, cx)))
+            .child(page_block(width, self.appearance_section(cx)))
             .child(page_block(width, self.security_section(cx)))
             .child(page_block(width, self.connection_section(&connection, cx)))
             .child(page_block(width, self.sftp_section(cx)))
@@ -723,6 +783,16 @@ impl Workspace {
                 }),
             )
             .into_any_element(),
+            setting_row(
+                "Vault backup",
+                Some(
+                    "An encrypted copy of the vault, opened with the vault password. Session logs are not included."
+                        .into(),
+                ),
+                Button::secondary("export-backup", "Export encrypted file")
+                    .on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))),
+            )
+            .into_any_element(),
         ]))
     }
 
@@ -758,7 +828,96 @@ impl Workspace {
                     cx.notify();
                 }),
             ),
+            check_row(
+                "restore-sessions",
+                "Restore open sessions on launch",
+                Some("Reopens the tabs and splits open when Holonet closed, each connecting again. Startup snippets do not run again."),
+                connection.restore_sessions,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| {
+                        let c = &mut d.settings.connection;
+                        c.restore_sessions = !c.restore_sessions;
+                        // Off keeps nothing about open tabs.
+                        if !c.restore_sessions {
+                            d.open_tabs.clear();
+                        }
+                    }, cx);
+                    cx.notify();
+                }),
+            ),
+            // Settings.dc.html's wording; the help is amber while it is on.
+            check_row_with(
+                "log-default",
+                "Save terminal output to History",
+                Some(
+                    "Off by default. Logs can contain anything typed or printed, including secrets. You can turn it on for single hosts instead."
+                        .into(),
+                ),
+                connection.log_default,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| d.settings.connection.log_default = !d.settings.connection.log_default, cx);
+                    cx.notify();
+                }),
+            ),
+            setting_row(
+                "Keep logs for",
+                Some(
+                    "History removes sessions, and their saved output, this long after they end. Checked when Holonet starts."
+                        .into(),
+                ),
+                div().w(px(200.)).child(self.settings_ui.log_keep.clone()),
+            )
+            .into_any_element(),
         ]))
+    }
+
+    /// Settings.dc.html, Appearance: the accent. The app theme stays dark
+    /// gray ("Follow Windows" needs a light theme that is not designed).
+    fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.vault_data().is_some_and(|d| d.settings.appearance.windows_accent);
+        let available = crate::platform::windows_accent().is_some();
+        section("Appearance").child(setting_card(vec![check_row(
+            "windows-accent",
+            "Use Windows accent color",
+            Some(if available {
+                "Buttons, links and highlights use the accent color chosen in Windows' Personalization settings."
+            } else {
+                "Windows did not report an accent color, so Holonet's own is used."
+            }),
+            on,
+            available,
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.save(|d| d.settings.appearance.windows_accent = !d.settings.appearance.windows_accent, cx);
+                let on = this.vault_data().is_some_and(|d| d.settings.appearance.windows_accent);
+                crate::platform::apply_accent(on, cx);
+            }),
+        )]))
+    }
+
+    /// "Vault backup: Export encrypted file".
+    fn export_backup(&mut self, cx: &mut Context<Self>) {
+        let dir = std::env::var_os("USERPROFILE")
+            .map(|p| std::path::PathBuf::from(p).join("Documents"))
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let answer = cx.prompt_for_new_path(&dir, Some("holonet-backup.holonet"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                let Some(vault) = w.vault.as_ref() else { return };
+                match vault.export_backup(&path) {
+                    Ok(()) => {
+                        let shown = super::short_path(&path.display().to_string(), 80);
+                        w.notice = Some(format!("Saved an encrypted copy of the vault to {shown}.").into())
+                    }
+                    Err(e) => w.save_error = Some(format!("Holonet could not export the vault: {e}").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Settings.dc.html, SFTP.
@@ -790,12 +949,75 @@ impl Workspace {
         ]))
     }
 
+    /// Settings.dc.html's notice: a newer release, with View release on
+    /// GitHub and Later.
+    fn update_notice(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (tag, published) = crate::updates::notice(&self.vault_data()?.settings.updates)?;
+        let version = tag.trim_start_matches(['v', 'V']).to_string();
+        let url = crate::updates::release_page(&tag);
+        let released = super::hosts::format_date(published);
+        let view = Button::primary("update-view", "View release on GitHub").on_click(move |_, _, cx| cx.open_url(&url));
+        let later = Button::secondary("update-later", "Later").on_click(cx.listener(move |this, _, _, cx| {
+            let tag = tag.clone();
+            this.save(move |d| d.settings.updates.dismissed = Some(tag), cx);
+        }));
+        Some(div().mt(theme::SPACE_5).child(crate::ui::ship::update_card(
+            &version,
+            crate::updates::CURRENT,
+            &released,
+            view,
+            later,
+        )))
+    }
+
+    /// "Last checked": when, and what it found.
+    fn last_checked(&self) -> SharedString {
+        if self.settings_ui.update_checking {
+            return "Checking…".into();
+        }
+        if let Some(why) = &self.settings_ui.update_failed {
+            return why.clone();
+        }
+        let Some(u) = self.vault_data().map(|d| &d.settings.updates) else { return "".into() };
+        match u.last_checked {
+            None => "Not yet.".into(),
+            Some(t) => {
+                let found = match &u.latest {
+                    Some((tag, _)) if crate::updates::is_newer(tag, crate::updates::CURRENT) => {
+                        "A newer release was found."
+                    }
+                    _ => "Holonet is up to date.",
+                };
+                format!("{}. {found}", crate::updates::when(t)).into()
+            }
+        }
+    }
+
     fn about_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        section("About").child(setting_card(vec![
+        let arch = if cfg!(target_arch = "aarch64") { "Windows ARM64" } else { "Windows x64" };
+        section("About and updates")
+            .child(setting_card(vec![
             setting_row(
-                "Holonet",
-                Some(format!("Version {}", env!("CARGO_PKG_VERSION")).into()),
-                div(),
+                "Version",
+                None,
+                div()
+                    .text_mono_small()
+                    .text_color(theme::ink())
+                    .child(SharedString::from(format!("{} · {arch}", crate::updates::CURRENT))),
+            )
+            .into_any_element(),
+            setting_row(
+                "Look for new releases",
+                None,
+                div().w(px(200.)).child(self.settings_ui.update_check.clone()),
+            )
+            .into_any_element(),
+            setting_row(
+                "Last checked",
+                Some(self.last_checked()),
+                Button::secondary("update-check-now", "Check now")
+                    .disabled(self.settings_ui.update_checking)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
             )
             .into_any_element(),
             setting_row(
@@ -811,6 +1033,47 @@ impl Workspace {
             )
             .into_any_element(),
         ]))
+            .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(format!(
+                "Holonet only reads the public releases page of {}. Nothing is installed automatically: download the new build and replace the old one. Builds are unsigned, so Windows warns the first time each one runs.",
+                crate::updates::repo_label()
+            ))))
+    }
+
+    /// Ask GitHub for a newer release now (Check now, at start, daily).
+    pub(crate) fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.settings_ui.update_checking {
+            return;
+        }
+        self.settings_ui.update_checking = true;
+        self.settings_ui.update_failed = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                w.settings_ui.update_checking = false;
+                let now = holonet_model::Timestamp::now();
+                match result {
+                    crate::updates::CheckResult::Newer { tag, published } => w.save(
+                        move |d| {
+                            d.settings.updates.last_checked = Some(now);
+                            d.settings.updates.latest = Some((tag, published));
+                        },
+                        cx,
+                    ),
+                    crate::updates::CheckResult::UpToDate => w.save(
+                        move |d| {
+                            d.settings.updates.last_checked = Some(now);
+                            d.settings.updates.latest = None;
+                        },
+                        cx,
+                    ),
+                    // A failed check is not counted, so a daily one tries again.
+                    crate::updates::CheckResult::Failed(why) => w.settings_ui.update_failed = Some(why.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The Settings switch: on asks for the vault password, off removes the

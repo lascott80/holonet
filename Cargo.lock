@@ -2978,12 +2978,15 @@ dependencies = [
  "base64 0.23.1",
  "gpui",
  "holonet-files",
+ "holonet-import",
  "holonet-model",
  "holonet-net",
  "holonet-ssh",
  "holonet-vault",
  "jiff",
  "regex",
+ "serde_json",
+ "tempfile",
  "tokio",
  "unicode-segmentation",
  "windows 0.62.2",
@@ -3004,11 +3007,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonet-import"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "hmac 0.13.0",
+ "sha1",
+]
+
+[[package]]
 name = "holonet-model"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "hmac 0.13.0",
  "serde",
  "serde_json",
+ "sha1",
  "uuid",
  "zeroize",
 ]

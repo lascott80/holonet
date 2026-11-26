@@ -67,6 +67,41 @@ impl Node {
         }
     }
 
+    /// The layout to save for restoring, keeping panes whose host `saved`
+    /// accepts (a quick connect's is left out).
+    fn layout(&self, saved: &dyn Fn(HostId) -> bool, cx: &App) -> Option<holonet_model::SavedLayout> {
+        use holonet_model::{SavedLayout, SplitAxis};
+        match self {
+            Node::Leaf(p) => {
+                let host = p.read(cx).host.id;
+                saved(host).then_some(SavedLayout::Pane { host })
+            }
+            Node::Split(s) => match (s.first.layout(saved, cx), s.second.layout(saved, cx)) {
+                (Some(first), Some(second)) => Some(SavedLayout::Split {
+                    axis: match s.axis {
+                        Axis::Right => SplitAxis::Right,
+                        Axis::Down => SplitAxis::Down,
+                    },
+                    permille: (s.ratio * 1000.0).round().clamp(50.0, 950.0) as u16,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// Set the ratio of the split whose second part is `pane`.
+    fn set_ratio_before(&mut self, pane: &Entity<Pane>, ratio: f32) -> bool {
+        let Node::Split(s) = self else { return false };
+        if matches!(&s.second, Node::Leaf(p) if p == pane) {
+            s.ratio = ratio;
+            return true;
+        }
+        s.first.set_ratio_before(pane, ratio) || s.second.set_ratio_before(pane, ratio)
+    }
+
     /// Replace the leaf holding `target` with a split of it and `new`.
     fn split(&mut self, target: &Entity<Pane>, axis: Axis, new: Entity<Pane>) -> bool {
         match self {
@@ -144,6 +179,8 @@ pub enum TabEvent {
         axis: Axis,
         host: Option<HostId>,
     },
+    /// "Save as host": the active pane's host is a quick connect.
+    SaveAsHost(Box<holonet_model::Host>),
     /// "Open SFTP here": an SFTP tab for the active pane's host, with its
     /// typed secrets.
     OpenFiles {
@@ -366,6 +403,26 @@ impl Tab {
         self.activate(pane, window, cx);
     }
 
+    /// This tab's layout for "Restore open sessions on launch".
+    pub fn layout(&self, saved: &dyn Fn(HostId) -> bool, cx: &App) -> Option<holonet_model::SavedLayout> {
+        self.root.layout(saved, cx)
+    }
+
+    /// Add a pane as a restored layout had it: beside or below `target`,
+    /// taking `1 - ratio` of the space.
+    pub fn restore_pane(
+        &mut self,
+        target: &Entity<Pane>,
+        axis: Axis,
+        pane: Entity<Pane>,
+        ratio: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_pane(target, axis, pane.clone(), cx);
+        self.root.set_ratio_before(&pane, ratio.clamp(0.05, 0.95));
+        cx.notify();
+    }
+
     /// Add a pane beside or below `target` without making it active
     /// (a multi-host run lays out its panes this way).
     pub fn add_pane(&mut self, target: &Entity<Pane>, axis: Axis, pane: Entity<Pane>, cx: &mut Context<Self>) {
@@ -385,8 +442,8 @@ impl Tab {
         cx.notify();
     }
 
-    /// Run a snippet from the drawer in the active pane.
-    fn run_from_drawer(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
+    /// Run a snippet in the active pane (the drawer, the palette).
+    pub fn run_snippet_here(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active.clone();
         if !pane.read(cx).can_run() {
             return;
@@ -430,7 +487,7 @@ impl Tab {
                 .when(ready, |d| {
                     d.cursor_pointer()
                         .hover(|d| d.border_color(theme::line_strong()))
-                        .on_click(cx.listener(move |this, _, window, cx| this.run_from_drawer(s.clone(), window, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_snippet_here(s.clone(), window, cx)))
                 })
                 .when(!ready, |d| d.opacity(0.5))
                 .child(
@@ -989,6 +1046,10 @@ impl Render for Tab {
         };
         let can_split = self.can_split();
         let files = self.is_files(cx);
+        let saved = {
+            let id = self.active.read(cx).host.id;
+            self.app.upgrade().is_none_or(|app| app.read(cx).is_saved(id, cx))
+        };
         let body = self.render_node(&self.root, Vec::new(), cx);
         let drawer = if files { None } else { self.drawer(cx) };
         div()
@@ -1046,8 +1107,17 @@ impl Render for Tab {
                                         .child(format!("A tab holds up to {MAX_PANES} panes.")),
                                 )
                             })
+                            // A quick connect's host is not saved yet.
+                            .when(!saved, |d| {
+                                d.child(Button::primary("save-as-host", "Save as host").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let host = this.active.read(cx).draft_host();
+                                        cx.emit(TabEvent::SaveAsHost(Box::new(host)));
+                                    },
+                                )))
+                            })
                             // Terminal.dc.html: "Open SFTP here" for the active pane's host.
-                            .when(!files, |d| {
+                            .when(!files && saved, |d| {
                                 d.child(Button::secondary("open-sftp-here", "Open SFTP here").icon("folder").on_click(
                                     cx.listener(|this, _, _, cx| {
                                         let (host, remembered) = {

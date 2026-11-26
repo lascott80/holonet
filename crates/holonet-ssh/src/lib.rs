@@ -37,7 +37,8 @@ pub use connect::{
 pub use forward::{Forward, ForwardError, ForwardSpec, ForwardStatus};
 pub use hostkey::{KeyStatus, PresentedKey, classify, fingerprint};
 pub use keys::{
-    GeneratedKey, KeyFileError, KeyInfo, KeyKind, algorithm_label, convert_ppk, generate_key, inspect_private_key,
+    GeneratedKey, KeyFileError, KeyInfo, KeyKind, algorithm_label, convert_ppk, export_private_key, generate_key,
+    inspect_private_key,
 };
 pub use russh_sftp;
 

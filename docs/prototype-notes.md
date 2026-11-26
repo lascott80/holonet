@@ -2282,3 +2282,609 @@ Carried forward, not tested or not built:
 - **"Windows' OpenSSH agent is not running"** was not shown live: that needs the service stopped, which Holonet's work never does.
 - **The dynamic rule's port placeholder** still reads 8080, where 1080 would suit SOCKS better.
 - **A snippet run from the editor before it is saved** remembers its values under a new id each time, so they are not offered on the next run.
+
+## Milestone 7, phase 0: spikes (26 Nov 2026)
+
+**(a) A release build from CI, downloaded and run here.**
+
+- `.github/workflows/release.yml` builds `holonet.exe` for ARM64 and x64 and keeps them as workflow artifacts. For now it runs only when the file itself changes on `milestone-7`; phase 9 adds `v*` tags and the release.
+- A cold build took 18 minutes on `windows-11-arm` and 24 on `windows-latest`. The exe is 66 MB, most of it the bundled fonts.
+- The ARM64 exe, downloaded to a folder in Downloads, opened its window both as it was and with an internet mark added (`Zone.Identifier`, `ZoneId=3`, as a browser download carries). `--parse-bench` printed from it too.
+- **Smart App Control is now off on this PC.** Both `CI\Policy` in the registry and `Get-MpComputerStatus` say so; milestone 1 found it on. Windows cannot turn it back on without a reinstall, so it no longer stands in the way of unsigned builds here.
+- **Not checked:** a double-click from Explorer, where SmartScreen may still warn the first time, as `decisions.md` expects. Phase 9 checks that with the zip from a draft release.
+
+**(b) The update check.**
+
+- `examples/m7_update.rs` asks `api.github.com/repos/<repo>/releases/latest` through WinHTTP, Windows' own HTTP client, which follows the system proxy and certificates and needs no new crate (only the `Win32_Networking_WinHttp` feature of `windows-sys`).
+- Public repositories answered in about 150 ms with `tag_name` and `published_at`.
+- This repository answers 404 while it is private. A public repository with no releases also gives 404, so Holonet will read 404 as "no release yet", not as an error.
+- A host that cannot be resolved fails at once (WinHTTP error 12007). Each step has a 10-second timeout.
+- `releases/latest` never returns drafts or pre-releases, so a draft release cannot reach the notice.
+- GitHub allows 60 unauthenticated requests an hour per address, far more than a daily check needs.
+
+**(c) The log writer.**
+
+- `examples/m7_log.rs` strips escape sequences with `vte` (through `alacritty_terminal`), keeping printed text and line ends. `\r` and backspace overwrite within the line, so a redrawn progress bar is saved once, as its last state.
+- It then seals 64 KB chunks with XChaCha20-Poly1305: a length, a nonce, then the ciphertext, with the chunk number as associated data so chunks cannot be reordered.
+- 10 MB of coloured output became 7.4 MB of plain text in 102 chunks. Stripping took 31 ms and sealing and writing 13 ms, about 204 MB/s for the whole writer. Reading it back took 14 ms.
+- For comparison, `--stream-bench` moves output through the terminal to the screen at 86 MB/s. A writer on its own thread will not slow the terminal.
+- A file cut off 100 bytes short of its end read back 101 of its 102 chunks, dropping only the torn one.
+
+**(d) No console window.**
+
+- `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` makes release builds Windows apps: subsystem 2 in the PE header. Started from Explorer, the app has no console.
+- The hidden modes (`--gallery`, `--parse-bench` and the rest) call `AttachConsole(ATTACH_PARENT_PROCESS)` when they have no output handle. Their output reached both a pipe and a real console window.
+- Debug builds keep their console for logs.
+
+Cleanup: the downloaded exe and its folder, and the throwaway vault folder, were removed.
+
+## Milestone 7, phase 1: model and vault (26 Nov 2026)
+
+**Model (`holonet-model`, schema 4):**
+
+- **`history` module:** `SessionRecord` (host and its name at the time, kind, start, end, route, user, how it ended, whether output was logged, and the log's size), `SessionKind`, `SessionEnd` and `LogKeep` (7, 30 or 90 days, or forever).
+  - `length()` and `log_size()` read as History draws them: "38 min", "1 h 12 min", "84 KB", "No log".
+  - An SFTP record is never marked logged, whatever is asked.
+- **`VaultData.history`** holds the records, with:
+  - `logs_output(host)`: the host's own switch, or else the Settings default
+  - `record`, `record_mut`, `delete_record` and `host_history`
+  - `expire_history(now)`: removes records that ended longer ago than Settings keeps them, and returns them so their logs can go. Open records stay.
+  - `close_open_records(last_seen)`: a record a crash left open is closed as "Connection dropped", at its log's last write
+- **`Host.log_output: Option<bool>`.** `None` follows Settings.
+- **Settings:**
+  - Connection gains `log_default` (off), `log_keep` (30 days) and `restore_sessions` (off).
+  - New `AppearanceSettings { windows_accent }` and `UpdateSettings { check, last_checked, latest, dismissed }`, where `due()` says when a check should run.
+- **Why schema 4 with nothing to migrate:** an older build would read the vault but drop the history and new settings on its next save. With the higher number, an older build reports "saved by a newer version" instead.
+
+**Vault (`holonet-vault::logs`):**
+
+- **Where logs live:** each log is a file named by its record id, in a folder named after the vault file, for example `vault.holonet.logs\<id>.log`. Naming the folder after the vault keeps two vaults in one folder (as test vaults often are) from sharing logs.
+- **Keys:**
+  - `UnlockedVault::log_key()` derives a log key from the data key.
+  - Each file's key is SHA-256 over a domain string, that log key and the record id.
+  - A password change keeps the data key, so logs stay readable.
+  - The app keeps a `LogStore` (folder and key) after locking, so open sessions keep logging.
+- **Chunks:**
+  - `LogWriter` seals text in chunks of up to 64 KB, cut on a character boundary, as it arrives, and `flush()` seals the rest.
+  - Each chunk's associated data is the file header (magic, version, record id) and its number.
+  - Swapped chunks, a file renamed to another log's name, and a flipped bit are all refused.
+  - A torn last chunk is skipped and reported as `torn`.
+- **The rest of `LogStore`:** `read`, `delete` (a missing file counts as deleted), `last_write`, `remove_orphans` (deletes `.log` files with no record and leaves other files alone), and `create`, which never overwrites an existing log.
+- **`export_backup(dest)`:**
+  - Writes the vault, encrypted as it is saved, to another file. It opens with the same password.
+  - It refuses the vault's own path and its `.bak`.
+  - Logs are not included.
+
+**Check:**
+- A copy of the milestone 6 test vault (schema 3, 8 hosts, 3 keys) opened, saved with a record and reopened as schema 4 with its hosts unchanged. The throwaway program and the copy were removed.
+- `decisions.md` records where logs live.
+
+fmt, clippy `-D warnings` and the unit tests pass. `holonet-model` has 27 and `holonet-vault` 22, with new tests for the milestone 6 vault, history ageing, closing open records, update timing, log chunks, a torn chunk, tampering, orphans, backup export and logs across a password change.
+
+## Milestone 7, phase 2: `holonet-import` (26 Nov 2026)
+
+A new crate with three readers. It takes text and returns plain data: reading files, following `Include` and finding key files belong to the caller. Its dependencies (`base64`, `hmac`, `sha1`) were already in the lockfile through russh, so nothing new was downloaded.
+
+**`config`, OpenSSH `config` into hosts:**
+
+- **Settings read:** `HostName` (with `%h` and `%%`), `Port`, `User`, `IdentityFile`, `ProxyJump` (a chain, or `none`), `ForwardAgent` and `Compression`.
+  - Lines may be written `Keyword value`, `Keyword=value` or `Keyword = value`.
+  - Double and single quotes group words, and an unquoted `#` starting a word ends the line.
+- **Which value wins:** values are found the way `ssh` finds them. For each host name, every block that applies is read in file order:
+  - lines before the first `Host`
+  - `Host` blocks whose patterns match, with `*`, `?` and `!` negation
+  - The first value of each setting wins.
+  - So `Host *` at the end fills in what hosts left unset, and `Host *` at the start overrides them, as in `ssh`.
+  - `IdentityFile` collects every value in order.
+  - This corrects the plan, which said `Host *` applies to "the hosts after it".
+- **What becomes a host:** every name on a `Host` line without wildcards, in the order it first appears. Pattern names are not hosts: each one except `*` is listed with "Its settings are used for the hosts it matches."
+- **`Include`:** the caller's callback gets each argument as written and returns the files it names. Their lines go in place, so an `Include` inside a `Host` block adds to that block until the included file's own `Host`. Nesting stops at 16 levels, as in `ssh`, so files that include each other end.
+- **What is not imported, and how it is reported:**
+  - **Notes on the host they apply to:** `ProxyCommand`, the three kinds of forward, `CertificateFile`, a bad port, a `ForwardAgent` socket path, and an unreadable `ProxyJump`.
+  - **Listed once for the whole file:** `Match` blocks (with the settings in them), an unclosed quote, and every other setting name in a single "Holonet does not use these settings" line.
+
+**`known_hosts`:**
+
+- **What it reads:** `host`, `[host]:port` and hashed `|1|salt|hash` names, comma-separated, then the key type and key.
+- **Hashed names:** matched with HMAC-SHA1 as `ssh` writes them. Two lines hashed by OpenSSH 10.2's `ssh-keygen -H` in WSL are the test vectors, and they match by host and port, without case. Hashed names are kept as they were read and written back the same way.
+- **What it skips, counting each with a reason:**
+  - `@revoked` and `@cert-authority` lines
+  - wildcard and negated names (the other names on the same line are kept)
+  - lines without a key, and keys that are not base64
+- **`write` for export:** writes lowercase names (`[host]:port` when the port is not 22) under an "Exported from Holonet" comment. The output reads back.
+
+**`command`, Quick fill:**
+
+- **An `ssh` command line:**
+  - **Options read:** `-p`, `-l`, `-i`, `-J`, `-A`, `-a` and `-C`, grouped (`-AC`) or with an attached value (`-p2222`).
+  - **`-o`:** `Port`, `User`, `IdentityFile`, `ProxyJump`, `ForwardAgent` and `Compression`.
+  - **Destination:** `user@host` or `ssh://user@host:port`.
+  - **Order:** like `ssh`, options after the destination are read too, so the drawn `ssh -J bastion-east deploy@10.30.0.9 -p 22` fills port 22. The first other word after the destination starts the remote command, which is listed as unused with everything after it.
+  - **Which value wins:** `user@` over `-l`, and a URI's port over `-p`, as in `ssh`.
+  - **Anything else** is listed as written (`-L 5432:db:5432`, `-v`, `-o StrictHostKeyChecking=no`).
+- **A `Host` block** reads as config does. The first host gives the label and fields. Further hosts, further key files and unused settings are listed.
+- **Errors, with their messages:** empty text, no address, an unclosed quote, and a block of patterns only.
+
+`holonet-import` has 18 unit tests, covering `Include`, `Host *` in both places, patterns and negation, jump chains, hashed and ported names, skipped lines, export, and command lines in their forms. fmt and clippy `-D warnings` pass.
+
+## Milestone 7, phase 3: logging and History (26 Nov 2026)
+
+**Records (`app.rs`, `session.rs`):**
+
+- **When a record is made:** a pane makes its record on its first successful connection.
+  - **Route:** the jump hosts' names, else "Primary" or "Tailscale".
+  - **User:** the sign-in's user name.
+  - **Kind:** Terminal or SFTP.
+- **When it ends:**
+  - **Closed by you:** the pane or tab is closed (`disconnect`), or the shell exits.
+  - **Connection dropped:**
+    - the server closes the channel
+    - a drop with reconnect off
+    - reconnecting giving up
+    - a reconnect refused at sign-in
+    - a changed key while reconnecting
+  - A Retry after that starts a new record.
+- **Avoiding re-entry:** the pane ends its record through `cx.defer`, because closing a tab runs inside the app's update, and the app may not be updated while it is mid-update.
+- **While locked:** record changes made while the vault is locked wait in `HolonetApp::pending_history` and are saved at the next unlock. The app keeps the vault's `LogStore` (folder and key) from the first unlock, so locked sessions keep logging.
+- **Clean-up once per start, at the first unlock:**
+  - A log a crash left open is read to count its size.
+  - Its record is closed as dropped, at the log's last write.
+  - Records past "Keep logs for" go, with their logs.
+  - `.log` files with no logged record are deleted.
+
+**Logs (`history.rs`):**
+
+- **Where output comes from:** the terminal view sends each output batch to a `LogTap`.
+- **The writer:** a thread per log (`holonet-log`) turns the batches into plain text and appends them to the `LogWriter`.
+  - It seals what it has every 2 seconds, so a crash loses at most that, and History can show an open session's log.
+  - `finish` returns the thread's handle. The app joins it off the UI thread and then records the final size.
+- **The stripper (`Plain`):** extends spike (c).
+  - Cursor left and right, column moves, erase-line and delete-character work within the line, so a command line edited with readline is saved as it last looked.
+  - Window titles are not text.
+  - **Full-screen programs:** the alternate screen (`?1049`, `?1047` and `?47`) is left out. A line says "A full-screen program ran here. Its screen is not saved." Without this, `less`, `vim` or `top` would fill the log with screen redraws.
+- A reconnect writes "-- Reconnected at 14:54. The shell restarted. --".
+- **Status bar:** shows "Logging to History" while a log is open.
+
+**Settings and the host form:**
+
+- **Host form:** "Save terminal output to History" joins Agent forwarding, Keep connection alive and Compression, as drawn.
+  - While it follows Settings, the note starts "From Settings."
+  - While it is on, the note is amber: "Logs can contain anything typed or printed, including secrets. They are encrypted with the vault."
+  - "Use the Settings default" goes back to following.
+- **Settings, Connection:**
+  - "Save terminal output to History", with the drawn help.
+  - "Keep logs for": 7, 30 or 90 days, or Forever, with 30 the default.
+
+**History page (`workspace/history.rs`):**
+
+- **Navigation:** the Sessions section of the side navigation shows History.
+- **The table:** columns as drawn (Host with the group colour and kind, Started, Length, Route, Log), newest first, with "Filter by host" and "No sessions match this filter."
+  - An open session reads "Writing" in the Log column.
+  - Length reads "< 1 min" instead of "Under a minute", to fit the drawn 90px column.
+- **The 380px panel:**
+  - The colour, name, and start · length · route.
+  - **Connect again** opens the same kind of tab, when the host still exists.
+  - **Export log** writes the whole log as CRLF text to a file you choose, named like "wsl-a 2026-11-26 1454.txt", starting in Documents.
+  - **Saved output:** the last 400 lines, scrolling both ways. Holonet's own notes wrap; the saved lines keep their layout.
+  - "Signed in as" and "Ended".
+  - **Delete this log:** asks first, and is not offered while the session is still open.
+- **Not drawn:**
+  - The empty page.
+  - A deleted host ("This host was deleted.").
+  - An open session ("This session is still open. Pick it again to see newer output.").
+  - A deleted log: a new `log_deleted` field on the record, so the panel says "Its saved output was deleted." and the column says "Deleted", instead of claiming logging was off.
+
+**Live check** (copy of the test vault, WSL server):
+
+- **A logged session:** wsl-a with its switch on, through every kind of output:
+  - `ls --color`
+  - a `\r` progress line
+  - `less`
+  - a dropped connection that reconnected
+- **The export read:**
+  - colours gone
+  - the progress line as its final "done"
+  - the full-screen note in place of `less`
+  - the reconnect line, then the output after it
+- **What else was recorded:**
+  - an SFTP tab: a record with "No log", and no logging item in its status bar
+  - wsl-b, with logging off: "No log"
+  - `exit` there: "Closed by you"
+- **A crash:** Holonet killed during a logged session. At the next start, the record read "Connection dropped" with its output.
+  - This found that the size stayed 0 bytes, so the clean-up now reads the log to count it.
+- **Delete this log:** removed the file. This found the panel saying "Logging is off", which `log_deleted` now corrects.
+- **A shell ended while locked:** its record was ended and sized after unlocking.
+
+**Cleanup and checks:**
+- The test vault copy, its logs and the export were removed, and so was the `.lesshst` that `less` left in the test account.
+- The spike program `m7_log.rs` and its test-only dependencies are gone, replaced by `history.rs`.
+- fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 42 tests, including the stripper and the writer thread.
+
+**Left for wrap-up:** the History table row and log viewer in `--gallery`.
+
+## Milestone 7, phase 4: import (26 Nov 2026)
+
+**Config import (`import.rs`, `workspace/import.rs`):**
+
+- **Opening it:** the Hosts page has an Import button. The dialog offers FirstRun's three cards: the Windows profile, WSL, and another file.
+  - **WSL:** lists distributions through `wsl_ssh_dirs` (as the Keychain does), and asks which one when there are several.
+  - **Another file:** opens Windows' file dialog.
+- **Paths:**
+  - **What `~` and `%d` mean:**
+    - the profile, for the Windows source
+    - the distribution's home, for WSL
+    - for a chosen file inside a `.ssh` folder, that folder's parent, so `\wsl.localhost\Ubuntu-26.04\home\holotest\.ssh\config` behaves like WSL
+  - Linux absolute paths (`/etc/...`) map into the distribution, and resolve nowhere on Windows itself.
+  - Relative `Include` paths are relative to `~/.ssh`, and a wildcard in the last part matches files in that folder.
+  - Files over 1 MB are not read.
+- **Planning, on a background thread:**
+  - **Key files:** each `IdentityFile` is read with `key_import::read_file`.
+    - A key already in the Keychain (same public key) is reused.
+    - A new one becomes one `StoredKey` per file, however many hosts name it.
+    - A missing file or a PuTTY key with a passphrase is a note on the host.
+  - **Host names:** the `Host` name becomes the label when it differs from `HostName`. A name already in the vault reads "Already in the vault" and starts unticked.
+- **The preview:** a ticked row per host shows user@address:port, the key (new or existing), "Through" the jump hosts, and the host's notes. "Show what is not imported (n)" lists the file's skipped entries with their line numbers. "Import n hosts" applies the ticked ones.
+- **Applying:**
+  - **Keys:** new keys are added once, by public key.
+  - **Jump hosts:** found by name, else by address and port, among all hosts now in the vault.
+    - A chain `a,b` sets the host's jump host to b and, when b came in with this import and has none, b's to a. Own values are marked as not following a group.
+    - A hop that cannot be found leaves the jump host empty, and the notice says to set it on the host form.
+  - **The notice:** "Imported 2 hosts and 1 key. 2 entries were not imported."
+
+**known_hosts:**
+
+- **Hashed names in the model:** `KnownHost::matches` now matches hashed names (`|1|salt|hash`) by HMAC-SHA1, so `holonet-model` gains `hmac`, `sha1` and `base64` (all already in the lockfile).
+  - A hashed entry is stored as its text with port 0, so the page can find it by its own text, and `forget` works.
+  - The OpenSSH 10.2 vectors from phase 2 are the test.
+- **Import:** the Known hosts page's "Import known_hosts" offers the same three sources. It imports at once and reports:
+  - how many it imported
+  - how many were already trusted
+  - how many differ from a trusted key (never imported, per `decisions.md`)
+  - how many lines were skipped
+- **On the page:** hashed entries read "Hashed name", or the saved host whose address matches the hash, "(hashed in known_hosts)".
+- **Export known_hosts:** writes every trusted key to a file you choose, with hashed names as they were (`holonet-import`'s writer now leaves `|1|` names alone).
+
+**Quick fill:**
+
+- **Where:** above General on New host, as drawn: a mono field, Enter or "Fill in".
+- **What it fills:** label, address, user, port, jump host, agent forwarding, compression and key.
+  - **Jump host:** the last hop, matched by name or address among the saved hosts. Earlier hops are named as belonging on that host's own form.
+  - **Key:** a key file is matched by file name among the Keychain's keys.
+- **The note:** "Filled the address, user, port, jump host, agent forwarding and key. Not used: -L 5432:db:5432, uptime."
+- **One-line paste:** the text field turns a pasted block's line breaks into spaces, so `holonet-import` now splits a one-line `Host ...` text back into lines at known setting names (54 of OpenSSH's). A new test covers it.
+
+**Live check** (copy of the test vault, the WSL server):
+
+- **Setup:** a throwaway `m7_key` in the test account (its public key added to `authorized_keys`), a config with m7-jump, m7-target (`ProxyJump m7-jump`, a `LocalForward`, `ServerAliveInterval`), `Host m7-*` and `Host * Compression yes`, and a `known_hosts` with a plain, a hashed (by `ssh-keygen -H`) and a `@revoked` line.
+- **Reading it from Windows:** `\wsl.localhost` reads as the default WSL user, so for the test the test account's home got `o+x`, `.ssh` 755 and the four files 644.
+- **The Windows profile card:** with no `%USERPROFILE%\.ssh\config` (only its existence was checked), it says "%USERPROFILE%\.ssh\config: There is no file here."
+- **Another config file** on the WSL path:
+  - **The preview:** both hosts, one new key, "Through m7-jump", the forward note, and two skipped entries (`Host m7-*` and `ServerAliveInterval`).
+  - **After import:** "Imported 2 hosts and 1 key. 2 entries were not imported."
+- **m7-target connected:** "Key m7_key · Through m7-jump · Compressed", where Compressed came from `Host *`.
+- **known_hosts import:** "Imported 2 trusted keys. 1 line was skipped." The hashed entry shows as "Hashed name".
+- **Export:** WSL's `ssh-keygen -F` found both `[m7-hashed.test]:2222` (hashed) and `[m7-plain.test]:2222` in the exported file, and not a name that is not there.
+- **Quick fill:**
+  - **A command:** `ssh -A -J m7-jump -i ~/.ssh/m7_key -L 5432:db:5432 holotest@localhost -p 2222 uptime` filled everything but the forward and the command, which it named.
+  - **A pasted block:** filled the label, address, user, port and compression, and named `ServerAliveInterval`.
+- **Not tried live:** the WSL card, which reads the owner's own WSL user's `~/.ssh` (the same path logic as the WSL file, covered by unit tests).
+
+**Fixed along the way:**
+- The Hosts header wrapped New host under Import. The two buttons now stay together, and the search field is 260px.
+- An export notice's long path ran past its strip. Export notices now shorten the path.
+
+**Cleanup and checks:**
+- The test account's key, config and `known_hosts` were removed, `authorized_keys` restored (3 lines), and the home, `.ssh` and `authorized_keys` permissions put back to 750, 700 and 600. The test vault copy and exports were removed.
+- The paste test used the Windows clipboard, so whatever was on it before is gone.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-app` 45, `holonet-model` 28, `holonet-import` 18.
+
+## Milestone 7, phase 5: first run and quick connect (26 Nov 2026)
+
+**First run (`workspace/hosts.rs`):**
+
+- An empty vault shows FirstRun.dc.html in place of the milestone 2 welcome:
+  - the globe, "Welcome to Holonet" and the drawn sentence
+  - **Connect now:** an accent `ssh` and a mono `user@address` field, with Connect and New host
+  - **Import what you already have:** the three config cards, which start the import from that source directly
+  - **Add your keys** (Keychain), **Bring your known_hosts** (Known hosts import) and **Set up the terminal** (Settings)
+  - the note that imports are copied
+- **Card layout:** the card rows are three-column grids. Flex rows with a basis put each card on its own line, because their text set a wide minimum.
+
+**Quick connect:**
+
+- **What it accepts:** `import::quick_host` reads `user@address`, `user@address:port`, `user@[v6]:port` or a full `ssh` command (through `holonet-import`'s Quick fill reader).
+  - **Must be present:** a user ("Add the user name: user@127.0.0.1.") and a valid address.
+  - **Must already be saved:** a jump host, matched by name or address, and a key file, matched by name in the Keychain. Otherwise it says what to add first.
+- **Where it starts:** from Connect now, and from the Hosts search. Text that starts with `ssh ` or is `user@address` with no spaces shows a "Connect to …" row ("Opens a terminal without saving a host. Its tab offers Save as host."), and Enter there connects. The placeholder is now "Find a host, or type ssh user@address", as Palette.dc.html draws.
+- **The tab:** the app opens it with `new_pane_for`, now split from `new_pane` so a pane can be made from a host that is not in the vault. The host key is checked as usual.
+- **Opening the tab:** `Workspace::new` has no window, so a quick connect waits in `pending_quick` and the next render (which has the window) opens the tab.
+- **What changes for an unsaved host:**
+  - The tab shows **Save as host** and hides Open SFTP here.
+  - Splitting opens another pane to the same unsaved host.
+  - A failed connection's Edit host becomes Save as host.
+  - The password prompt has no "Save in the encrypted vault" (there is nowhere to save it). It says "This host is not saved. Save as host keeps the password, if you want to."
+  - Its History record has no saved host, so "Connect again" is not offered.
+- **Save as host:**
+  - **The form:** opens New host filled in from the pane (`HostForm` gains a `draft`), including the password typed in the pane, with "Save in the encrypted vault" ticked.
+  - **The same id:** the saved host keeps the draft's id, so the open tab counts as saved at once and shows Open SFTP here instead.
+
+**Live check** (a new vault in an empty folder, the WSL server):
+
+1. **Creating the vault** showed First run.
+2. **A missing user:** `127.0.0.1:2222` in Connect now said "Add the user name: user@127.0.0.1."
+3. **The first quick connect:** `holotest@127.0.0.1:2222` opened a tab named 127.0.0.1 with Save as host. It asked to trust the key, then for the password, and the shell ran.
+4. **After rebuilding** (for the password prompt change):
+   - The same quick connect asked for the password without the save checkbox.
+   - Save as host opened the form with the user, address, port and password filled in.
+   - Save added the host, and the tab switched to Open SFTP here.
+5. **From the Hosts search:** `ssh holotest@localhost -p 2222` showed the Connect to row, and Enter opened a tab asking to trust localhost's key (cancelled).
+6. **Import:** the phase 4 WSL test config, through Import, added m7-jump and m7-target: "Imported 2 hosts and 1 key."
+
+**Cleanup and checks:**
+- The test account's config, key and `known_hosts` were removed, and its `authorized_keys` and permissions (750, 700, 600) restored. The test vault folder was removed.
+- fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 46, including `quick_hosts`.
+
+## Milestone 7, phase 6: command palette (26 Nov 2026)
+
+**The palette (`palette.rs`):**
+
+- **Opening it:** Ctrl Shift P anywhere the vault is unlocked, over the vault view or a terminal, or the "Ctrl Shift P" chip in the Hosts search.
+- **The card, as Palette.dc.html draws it:** 640px over a dimmed window, 96px from the top. It has the search field ("Search hosts, snippets and commands"), an Esc chip, section headings, 44px rows with group colour squares, an "Enter" chip on the selected row, and the footer "Up and Down to move · Enter to open · Ctrl Enter to open in a split".
+- **Keys:** its own key context binds Up, Down and Ctrl Enter, as the host picker does. Enter, Esc and a click outside work through the field and the layer. Ctrl-click on a row opens it in a split.
+- **Ranking (`rank`, unit tested):**
+  - **Within a section, best first:** an exact match, then a prefix, then a word's start, then anywhere, then the letters in order.
+  - **Ties:** go to the more recent (hosts with an open tab first, then by last connection).
+  - **Sections:** always in the drawn order.
+  - **With nothing typed:** at most 6 hosts and 4 snippets or rules are shown, and the search-only rows are hidden.
+
+**Entries (`HolonetApp::palette_entries`), built when it opens:**
+
+- **Hosts:**
+  - "Go to session" when a terminal tab has the host, else "Connect". They split with Ctrl Enter when the current tab is a terminal with room.
+  - While searching, an "Open SFTP" row for each host.
+- **Snippets:** "Run in active session", only while a terminal can run them. They run through the tab's drawer path (`run_snippet_here`), so variables and Ask before running still prompt.
+- **Port forwarding:** "Turn on" or "Turn off" for each rule.
+- **Go to:** the eight screens.
+- **Actions:**
+  - always: New host (Ctrl Shift N), Lock vault (Ctrl Shift L) and New tab (Ctrl Shift T)
+  - only when they would work: Split right, Broadcast and Find in terminal
+- **Running an entry:** deferred, as the picker's are.
+- **Focus:** after a rule, Broadcast or a snippet, focus goes back to the active tab. Without that, typing after the palette went nowhere (found in the check).
+
+**Shortcuts:** Ctrl Shift N (New host) and Ctrl Shift L (Lock vault) are new, both Ctrl Shift like the others. Settings' Keyboard list adds them, the palette, and Broadcast (Ctrl Shift B), which was missing.
+
+**Live check** (a copy of the test vault with a snippet and a rule added by a throwaway program):
+
+- **Opening it:** Ctrl Shift P over the vault view showed hosts, the rule and the screens. There were no snippets, as no terminal was open.
+- **Hosts:**
+  - `wsl-a`, Enter connected.
+  - Over that terminal, `wsl-b` showed Connect and Open SFTP, and Ctrl Enter opened wsl-b in a split.
+- **Running the rest:**
+  - "Palette hello" ran in the active pane.
+  - "Palette rule" turned port 18190 on (listening), and again turned it off.
+- **Focus:** the first build lost focus after the palette, so typed text went nowhere. After the fix, a rule and a snippet each kept typing in the pane, and the status bar listed the forward.
+- **Every other action:**
+  - Find opened the find bar, New tab opened the picker, and Settings showed the screen with the new Keyboard rows.
+  - Ctrl Shift N opened New host, and Ctrl Shift L locked the vault.
+  - The Hosts chip opened the palette, and Esc closed it.
+- **Not run through the palette:** Broadcast, which uses the same toggle as Ctrl Shift B.
+
+**Hosts header:** the chip sits inside the search field, as drawn. The field is 300px wide and the title's basis 110px, so it all fits on one line at 150% scale. The long placeholder is clipped under the chip ("Find a host, or type ssh us…").
+
+**Cleanup and checks:** the test vault copy was removed, and port 18190 is closed. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 49.
+
+## Milestone 7, phase 7: the new-release check (26 Nov 2026)
+
+**`updates.rs`:**
+
+- **The request:** WinHTTP from spike (b), with a generic "Holonet" user agent, to `api.github.com/repos/lascott80/holonet/releases/latest`. Nothing else is sent or read.
+- **Reading the answer:**
+  - **200:** the tag and `published_at`. The release counts as newer when its version beats `CARGO_PKG_VERSION`. Versions are compared as numbers: `v0.2.0`, `0.2`, and `-rc1` ignored.
+  - **404:** up to date. That is what a repository with no releases, or a private one, answers.
+  - **403 or 429:** "GitHub is limiting requests right now."
+  - **Anything else, or no connection:** "Holonet could not reach GitHub."
+- **Testing without a release:** `HOLONET_UPDATE_REPO` (`owner/name`) and `HOLONET_UPDATE_HOST` let a check ask a stand-in repository, or an unreachable host.
+
+**When it runs:**
+- **At the first unlock of each start**, when "Look for new releases" says so. For "Once a day", it runs then only if a day has passed.
+- **Once a day:** the workspace looks every hour, and checks when a day has passed since the last check.
+- **Check now.**
+- **Recording the result:** a successful check records `last_checked` and the release found (or none). A failed one records nothing, so a daily check tries again.
+
+**Settings (`Settings.dc.html`):**
+
+- **The notice** at the top of the page, while the newest release found is newer than this build and not hidden with Later:
+  - "Holonet 0.2.0 is available", then "You have 0.1.0. Released on GitHub on …"
+  - **View release on GitHub** opens the release page.
+  - **Later** stores that tag as dismissed, so a different, newer release shows again.
+- **The dot** on the Settings entry while the notice would show.
+- **"About and updates"** (the chip reads Updates, as drawn):
+  - **Version:** "0.1.0 · Windows ARM64" (x64 on x64 builds).
+  - **Look for new releases:** When Holonet starts, Once a day, Never.
+  - **Last checked:** "Today at 15:53. A newer release was found.", "… Holonet is up to date.", "Checking…" or "Holonet could not reach GitHub.", with Check now.
+  - **Bundled fonts.**
+  - **The note:** "Holonet only reads the public releases page of github.com/lascott80/holonet. …"
+
+**Live check** (a copy of the test vault):
+
+1. **First stand-in:** with `HOLONET_UPDATE_REPO=zed-industries/zed`, the start-up check showed "Holonet 1.30.2 is available" and the dot.
+2. **Later:** hid both.
+3. **Second stand-in:** after a restart with `microsoft/terminal`, that release's notice showed again, since a different release is not the one dismissed.
+4. **Offline:** with `HOLONET_UPDATE_HOST=nonexistent.invalid`, Check now said "Holonet could not reach GitHub." The last release found stayed.
+5. **No overrides:** this private repository answered 404, so "Today at 15:54. Holonet is up to date.", and the notice and dot cleared.
+
+**Not clicked:** "View release on GitHub", which would open the browser.
+
+The spike program `m7_update.rs` is gone, replaced by `updates.rs`. `serde_json` (already in the lockfile) reads the answer. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 52.
+
+## Milestone 7, phase 8: restore, accent, key and vault export (26 Nov 2026)
+
+**Restore open sessions on launch:**
+
+- **Saving the layout:**
+  - `VaultData.open_tabs` holds a `SavedTab` (terminal or SFTP) per tab. Each tab's layout is a `SavedLayout` tree: a pane by saved host, or a split with its axis, its share in thousandths, and two parts.
+  - It is saved only while the setting is on. Turning it off clears it.
+  - It is saved when a tab opens, a pane splits, a pane or tab closes, and on WM_CLOSE, through `Window::on_window_should_close`.
+  - Quick connects' panes are left out.
+- **Restoring:**
+  - At the first unlock of a start, the saved tabs are kept for hosts that still exist (`SavedLayout::keep` collapses a split that lost one side) and rebuilt at the next render, which has the window.
+  - Each split adds a pane for its second part's first host beside or below the pane of its first part (`Tab::restore_pane`), with the saved ratio.
+  - Restored panes skip their startup snippet (`Pane::skip_startup`), since commands are never replayed (`decisions.md`). The vault view stays in front.
+- **Settings, Connection:** "Restore open sessions on launch".
+
+**Use Windows accent color:**
+
+- **Where the colour comes from:** AccentPalette in `HKCU\…\Explorer\Accent` (`windows-sys` gains `Win32_System_Registry`). Holonet takes its second entry, the lighter shade Windows uses on dark backgrounds.
+- **How it applies:**
+  - `theme::accent()`, `accent_alpha()` and `on_accent()` read an override set by `platform::apply_accent`.
+  - Text on the accent turns white when the accent is dark (relative luminance under 0.25).
+  - The Cyan group colour stays Holonet's own, so groups do not change with Windows.
+  - It applies at unlock and when switched, and redraws every window.
+- **Settings:** a new Appearance section with that one row. "Follow Windows" is not built.
+
+**Export private key (Keychain):**
+
+- **`holonet_ssh::export_private_key`:** opens the stored key with its own passphrase if it has one (saved, or asked for in the dialog), then protects it with a new one, or none.
+- **The dialog:**
+  - Asks for the key's passphrase when none is saved, then "Passphrase for the file" and "Confirm passphrase".
+  - When both are empty, the amber question: "Without a passphrase, anyone who gets the file can sign in wherever this key is accepted." The button becomes "Export without a passphrase".
+- **Saving:** in Windows' file dialog, starting in `~/.ssh` when it exists.
+- **Test:** the export unit test covers a wrong passphrase, a new passphrase and none.
+
+**Vault backup (Settings, Vault and security):** "Export encrypted file" writes `export_backup` (phase 1) to a file you choose.
+
+**Live check** (a copy of the test vault):
+
+- **Restore:**
+  - With Restore on, I opened wsl-a with wsl-b split beside it, then behind-a (through jump-a), and started again. Both tabs came back: the split with both panes, behind-a through its jump host, all connected again.
+  - I closed behind-a's tab, then sent WM_CLOSE (`CloseMainWindow`). The process exited, and the next start brought back only the split tab.
+- **The accent:**
+  - Windows' light-2 accent on this PC is #4CC2FF.
+  - Sampled from screenshots, a checked box went from #5CC8FF to #4CC2FF when switched on, and back when off.
+- **Export:**
+  - The ECDSA test key (no passphrase of its own) was exported with "export pass", then without one after the amber question.
+  - In WSL, `ssh-keygen -y` opened the first with its passphrase (and refused a wrong one), and both were the same key.
+  - With that key in the test account's `authorized_keys` for the moment, OpenSSH signed in with each file (the passphrase given through `SSH_ASKPASS`).
+- **Backup:** the export starts with `HOLONETV` and opened with the vault password. It also restored its saved tab.
+
+**Problems found:**
+
+- **The caption X button:** my synthetic clicks (move, press, release) on the window's X, and on Minimize, do nothing. GPUI handles these buttons through non-client messages, which this harness's clicks do not seem to produce. WM_CLOSE, which the X sends, works. The owner should check the X by hand at the done check.
+- **A test started on the real vault path:** one test call started Holonet without `HOLONET_VAULT`, so it opened on the default `%APPDATA%` path at the Create screen. Nothing was created, because the screen needs the password twice. Every call that starts Holonet now sets the variable itself.
+- **Restoring `authorized_keys`:** copying it back as root left it owned by root with mode 644. It was put back to the test account, 600.
+
+**Cleanup and checks:**
+- The test vault, the exported keys and the backup were removed. The test account's `authorized_keys` is its original 3 lines, mode 600, and nothing was left in `/tmp`.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-model` 29, `holonet-ssh` 8 unit tests, `holonet-app` 52.
+
+
+## Milestone 7 phase 9: release packaging
+
+**The icon:**
+- `crates/holonet-app/assets/app-icon/make_icon.py` (standard library only; there is no image library here) draws the globe mark from `globe.svg` in `accent` on a `card` tile with a `line` border.
+- It writes `holonet.ico` with sizes 16 to 256 as PNG entries, plus a 256px PNG preview.
+- Small sizes get a thicker stroke so the globe still reads.
+
+**Version details:**
+- `build.rs` writes a resource script and compiles it with the Windows SDK's `rc.exe`, then links the `.res` into the binary.
+  - It finds the newest SDK for this PC's processor, falling back to the x64 one. `RC` overrides it.
+  - The script uses numbers in place of `winver.h`'s names, so no include path is needed.
+- **The icon is resource 1:** GPUI 0.2.2 loads resource 1 for the window (`load_icon` in its Windows platform), so the same resource gives both the file icon and the window icon.
+- **Without the SDK:** the build still succeeds, with a warning. `release.yml` sets `HOLONET_REQUIRE_RC`, which makes that case an error instead.
+- **Details:** Holonet, version 0.1.0, "Copyright (c) 2026 the Holonet authors. MIT licence."
+
+**Licences:**
+- `LICENSE` (MIT, matching the workspace's `license = "MIT"`) is new at the root.
+- `scripts/package.py` makes `dist/holonet-<version>-windows-<arch>.zip` holding:
+  - `holonet.exe`
+  - `README.txt` (running it, the SmartScreen warning, where the vault and logs are, licences)
+  - `LICENSE.txt`
+  - `licenses/fonts/`: the three OFL texts, the fonts README and the Nerd Font NOTICE
+  - `licenses/THIRD-PARTY-LICENSES.txt`
+- **The crate list:**
+  - It comes from `cargo metadata --filter-platform <target>`, following only normal dependencies from `holonet-app`: 556 crates for ARM64.
+  - Each crate's LICENSE, COPYING and NOTICE files are included (about 5 MB of text).
+  - 31 crates ship no licence file. For those, the list gives their declared licence only.
+
+**`release.yml`:**
+- **Trigger:** a `v*` tag now runs it (the phase 0 branch trigger is gone).
+- **Version check:** it checks that the tag matches `holonet-app`'s version.
+- **Builds:** ARM64 on `windows-11-arm` and x64 on `windows-latest`, each packaged.
+- **The release:** an Ubuntu job attaches both zips and `SHA256SUMS.txt` to a draft release with `gh release create --draft`. A tag with a suffix makes a pre-release, which the update check never reports.
+
+**The history check** (every blob on every ref, 66 commits; the script printed no secret values):
+
+| Looked for | Found |
+| --- | --- |
+| `.dev` files, the test passwords and passphrases, the test key bodies | Never committed |
+| Private key blocks | Only the throwaway test fixtures and test constants |
+| Tailnet and LAN addresses, `ts.net` names, emails | Only examples and the designs' placeholders (100.64.0.x, 10.x, 192.168.1.40 and .51, `tail1234`, `deploy@…`) |
+| Personal names and paths | This PC's short Windows user name in one test string, and this PC's name in the showcase's canned prompt. Both were replaced in this phase; older commits keep them. |
+| Commit identities | The owner's name with GitHub's noreply address, and Claude's |
+
+- The owner was told about the leftovers and accepted them. The owner then made the repository public.
+- **Actions minutes:** while the repository was private, its Windows runners (counted at 2×) were using up the free minutes. One CI run was cancelled to save them. Public repositories run free.
+
+**The exit check:**
+- **The workflow:** the `v0.1.0-rc1` tag ran it with arm64, x64 and release all successful. It made a draft pre-release, "Holonet 0.1.0-rc1", with both zips (32 and 33 MB) and the checksums.
+- **The download:**
+  - The ARM64 zip's hash matched `SHA256SUMS.txt`.
+  - I added an internet mark to the exe (`Expand-Archive` does not carry the zip's mark over), then started it with `HOLONET_VAULT` set to a copy of the test vault.
+- **What ran:**
+  - It opened at Vault locked, with no console window.
+  - The window class has its icon, and the exe's version details read as above.
+  - It closed cleanly with WM_CLOSE.
+- **SmartScreen:** starting the exe through ShellExecute did not prompt. A double-click from Explorer may still warn once; README.txt explains that warning.
+- **Cleanup:** the download, the test vault copy and `dist/` were removed. No `%APPDATA%\Holonet` exists.
+- **Checks:** fmt, clippy `-D warnings` and the `holonet-app` tests (52) pass.
+
+
+## Milestone 7 phase 10: wrap-up
+
+**Gallery:**
+- History's rows, saved output, palette rows and sections, the update notice, and First run's cards moved from their pages into `ui/ship.rs`. The pages and `--gallery` now draw the same code.
+- The gallery's new section, "History, palette, updates and first run", has three History rows (selectable), saved output with Holonet's notes, a palette with three sections (selectable rows), the update notice with its two buttons, an import card, a First run link, and key chips. Each click is listed under Events.
+- The palette's sample rows use the real palette's hints, so the gallery matches the design: the title takes the space and the hint sits on the right.
+
+**Fixed during the done check:**
+- **Save as host kept the old name on the open tab:**
+  - After a quick connect was saved as "done7", its tab and pane still read "127.0.0.1". A pane keeps its own copy of the host.
+  - Saving a host now gives every open pane for it the new label through `HolonetApp::host_renamed`. Only the name changes; the connection keeps its details. This also covers renaming a host while it is connected.
+  - Checked live: a quick connect to `localhost` saved as "quick7" now shows "quick7" on its tab and pane.
+
+**`CLAUDE.md`:** milestone 7 is listed as done. It now covers:
+- the crates' new parts and the console behaviour
+- `HOLONET_UPDATE_REPO` and `HOLONET_UPDATE_HOST`
+- the release process
+- a note that the repository is public, and to check test data for personal details before committing it
+
+The next task is publishing 0.1.0, which is the owner's.
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| First run | Creating the vault opened Welcome to Holonet, with Connect now, the three import cards and the three next steps |
+| Quick connect without saving | `holotest@127.0.0.1 -p 2222` from Welcome: the host key prompt ("Trust and connect" saved it to Known hosts), then the password prompt saying the host is not saved. The shell ran a command. The tab offered Save as host and hid Open SFTP |
+| Save as host | The form opened filled in (address, port 2222, user, the password typed). It was saved as "done7" with "Save terminal output to History" on, and the tab became a saved host's (Open SFTP here) |
+| Command palette | Ctrl Shift P, "done7": "Go to session" and "Open SFTP". After a restart, Enter connected done7 with its saved password |
+| History with opt-in logging | done7's status bar read "Logging to History". After `exit`, History listed done7 (2 KB, Closed by you, signed in as holotest) and the quick session ("No log"). Saved output ended with the commands typed and `logout`. The log file beside the vault did not contain the output in plain text |
+| OpenSSH config import | Import → Another config file, then a two-block config. The preview listed imp7 (`holotest@127.0.0.1:2222 · Password`) and "Show what is not imported (1)" (the `Host *` block). Import 1 host added it, and the notice said "Imported 1 host. 1 entry was not imported." |
+| The new-release notice | With `HOLONET_UPDATE_REPO` pointed at a public repository with a newer release, the check at unlock showed "Holonet 1.30.2 is available" in Settings and the Settings dot. Later hid both |
+| Release | Phase 9: the `v0.1.0-rc1` draft release's ARM64 zip ran here |
+
+Earlier phases checked the rest live: known_hosts import and export, Quick fill, Restore open sessions, the accent, private key export and the vault backup.
+
+**Not checked by me:** the window's own X and Minimize buttons. Synthetic clicks do not reach GPUI's caption buttons (phase 8); WM_CLOSE works. The owner should click X once.
+
+**Cleanup and checks:**
+- The throwaway vault, its logs and the test config were removed. No `%APPDATA%\Holonet` exists.
+- "Connect once" kept `localhost` out of Known hosts.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-app` 52, `holonet-model` 29, `holonet-vault` 22, `holonet-import` 18, and the rest.
+
+**Milestone 7 is done.** What is left is the owner's: merge PRs #1 to #7, delete the `v0.1.0-rc1` draft and tag, tag `v0.1.0` on `main`, and publish the draft the workflow makes.
+
+Carried forward, not done:
+- **The Hosts search placeholder** is cut off by the Ctrl Shift P chip when the detail panel is open. The design's field shrinks the same way (`min-width: 0`); a wider window shows all of it.
+- **Ctrl Enter on a host that already has a session** goes to that session rather than opening a split, because the palette offers "Go to session" for it.
+- **31 crates ship no licence file;** the third-party list gives their declared licence only.
