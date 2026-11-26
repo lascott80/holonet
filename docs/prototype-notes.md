@@ -1718,3 +1718,48 @@ fmt, clippy and all workspace tests pass.
 **A test-harness problem, not Holonet's:** the phase 5 Shift click test left Shift held down in Windows. The unlock field then got "CORRECT HORSE BATTERYWSL_A", and the next runs looked like a broken unlock. Releasing the key with `keybd_event` fixed it.
 
 fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 8: wrap-up (26 Nov 2026)
+
+**Removed:**
+- The phase 0 spikes: `holonet-ssh`'s `m5_sftp` and `holonet-app`'s `m5_drag` and `m5_local` examples. `holonet-app` has no examples left.
+- The `Win32_Storage_FileSystem` and `Win32_UI_Shell` features of `holonet-app`'s `windows-sys`, which only `m5_local` used. The Recycle Bin code lives in `holonet-files`.
+
+**Gallery:**
+- The SFTP screen's controls moved into `ui/files.rs`, which the SFTP tab uses too:
+  - `check_box`, `nav_button`, `breadcrumbs`
+  - `file_header` and `file_row` with `FileRow`
+  - `selection_bar`, `progress_bar` and `permissions_grid`
+- `--gallery` has a Files section:
+  - a host-side pane with Back, Up, a disabled Refresh, New folder and collapsed breadcrumbs (`/ › … › www › site › releases`)
+  - the selection bar for two selected rows, with Rename disabled
+  - five rows (folder, linked folder, code, archive, lock file) that toggle when clicked, and the select-all box
+  - the drop banner
+  - the four progress bar states (upload, download, paused, waiting to reconnect)
+  - the permissions grid, whose boxes toggle and update `750 rwxr-x---`
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Open an SFTP tab from a host and browse this PC and the host side by side | Created the vault, added done-a (127.0.0.1:2222, password asked). Open SFTP in the host detail: the first-connection key prompt, Trust and connect, the password prompt, then This PC in the profile folder and the host in its home folder |
+| Open SFTP from a terminal connected to the host | A terminal tab to done-a, then Open SFTP here: a new SFTP tab, connected with no prompts. This PC opened in the folder last used for done-a |
+| Drag files and folders between the panes; the queue shows progress, rate and time left and runs several at once | A local `site` folder (two pages, four 300 MB files) dragged onto the host pane: "2 active · 2 queued", each row with percent, about 225 MB/s and time left. A 2 GB file dragged from the host onto the local `downloads` folder row went into that folder. Hashes matched on both sides |
+| Drop from Explorer onto the host's pane | A file dragged from a WinForms `DoDragDrop` source (Explorer's file-list format): dashed outline while over the pane, then the file was on the host. The first two tries moved the pointer too fast for OLE to register the drag; a slower drag worked |
+| A transfer that meets existing files asks once | `site` already existed on the host: "site already exists", one choice for the transfer. Overwrite merged the folders: the host's own `conf/` and `run.sh` stayed, and `index.html` was replaced |
+| Pause, resume and retry | Paused a download at 8%: "Paused at 8%". Changed the file on the host, then Resume: "Failed: The source changed since the transfer started." Retry started it again, and it finished with a matching hash |
+| A transfer interrupted by a dropped connection resumes after reconnecting | Killed the server's session 1.2 s into a 2 GB download: "Waiting to reconnect at 16%", the banner "The connection was lost. Trying again in 1 s.", then reconnected by itself, with no prompts, and continued from 16%. The finished file's hash matched |
+| Rename, delete and copy the path on both sides; permissions on the host | This PC: Copy path gave `C:\Users\…\holonet-done5\downloads`. Rename to `dl` worked. Delete moved `dl` to the Recycle Bin (its `$R`/`$I` entry was then removed). Host: Copy path gave `/home/holotest/done5/big.bin`. Rename to `big2.bin` worked. Permissions 644 → 600, and `stat` reported 600. Deleting `site` and `big2.bin` said "Deleted 12 files and folders." |
+
+fmt, clippy `-D warnings`, the unit tests (35, 15, 3, 16, 12, 7 and 16) and the WSL integration tests (13 for `holonet-ssh`, 5 for `holonet-files`) pass.
+
+The test folders on both sides, the throwaway vault and the Recycle Bin entry were removed. The test account's home has only its usual files.
+
+**Milestone 5 is done.**
+
+Carried forward, not tested or not built:
+- **Closing the window** (not a tab) while transfers run does not ask first.
+- **The drop banner** names the pane's folder even while the pointer is over a folder row, where the drop actually goes.
+- **The host's selection bar** wraps onto two lines at this window width (the design's bar wraps too).
+- **An identity whose key was deleted** opens its form with the first key selected (from milestone 4).
+- **Dragging out of the app to Explorer**: GPUI 0.2.2 has no drag source on Windows.

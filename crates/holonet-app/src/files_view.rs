@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EntityId, ExternalPaths, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, Render, Rgba, ScrollStrategy, SharedString, Stateful, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, relative, uniform_list,
+    AnyElement, ClickEvent, ClipboardItem, Context, Entity, EntityId, ExternalPaths, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, Render, Rgba, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
 use holonet_files::engine::{Engine, EngineEvent, Job, JobId, JobState};
 use holonet_files::plan::{self, Choice, Direction, Plan};
@@ -39,17 +39,10 @@ use holonet_model::{Host, HostId, OnConflict, SftpSettings};
 
 use crate::app::HolonetApp;
 use crate::theme::{self, TypeStyles};
-use crate::ui::{Button, ButtonKind, TextField, TextFieldEvent, icon, modal};
-
-/// Column widths (Sftp.dc.html's grid).
-const CHECK_W: f32 = 28.;
-const LOCAL_SIZE_W: f32 = 90.;
-const LOCAL_MODIFIED_W: f32 = 140.;
-const REMOTE_SIZE_W: f32 = 80.;
-const REMOTE_MODIFIED_W: f32 = 110.;
-const PERMISSIONS_W: f32 = 100.;
-const COLUMN_GAP: f32 = 10.;
-const ROW_PAD: f32 = 14.;
+use crate::ui::files::{
+    FileRow, breadcrumbs, check_box, file_header, file_row, nav_button, permissions_grid, progress_bar, selection_bar,
+};
+use crate::ui::{Button, ButtonKind, IndexHandler, TextField, TextFieldEvent, modal};
 
 /// How long after a transfer finishes the panes refresh (several finishing
 /// together refresh once).
@@ -419,40 +412,6 @@ fn drive_entries() -> Vec<Entry> {
             hidden: false,
         })
         .collect()
-}
-
-/// A 16px checkbox square (Sftp.dc.html's row and header boxes).
-fn check_box(checked: bool) -> gpui::Div {
-    div()
-        .size(px(16.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(theme::RADIUS_XS)
-        .border_1()
-        .when(checked, |b| b.bg(theme::accent()).border_color(theme::accent()))
-        .when(!checked, |b| b.bg(theme::card()).border_color(theme::line_strong()))
-        .when(checked, |b| b.child(icon("check", px(12.), theme::on_accent())))
-}
-
-/// A 36px icon button in a pane's navigation row.
-fn nav_button(
-    id: SharedString,
-    name: &'static str,
-    enabled: bool,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .size(theme::CONTROL_COMPACT)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(theme::RADIUS_SM)
-        .child(icon(name, px(16.), if enabled { theme::ink_muted() } else { theme::ink_faint() }))
-        .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(theme::raised())).on_click(handler))
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -1318,39 +1277,11 @@ impl FilesView {
                         "The same permissions are applied to every selected item.".to_string(),
                     ),
                 };
-                let digit = |k: usize| bits[k] as u32 * 4 + bits[k + 1] as u32 * 2 + bits[k + 2] as u32;
-                let octal = format!("{}{}{}", digit(0), digit(3), digit(6));
-                let symbolic: String =
-                    bits.iter().enumerate().map(|(i, on)| if *on { b"rwx"[i % 3] as char } else { '-' }).collect();
-                let header = |text: &'static str| {
-                    div().flex_1().flex().justify_center().text_label().text_color(theme::ink_muted()).child(text)
-                };
-                let mut rows = Vec::new();
-                for (r, who) in ["Owner", "Group", "Everyone else"].into_iter().enumerate() {
-                    let mut row = div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .border_t_1()
-                        .border_color(theme::line())
-                        .child(div().flex_none().w(relative(0.3)).text_body().text_color(theme::ink()).child(who));
-                    for c in 0..3 {
-                        let i = r * 3 + c;
-                        row = row.child(
-                            div()
-                                .id(("perm-bit", i))
-                                .flex_1()
-                                .h(theme::CONTROL)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .child(check_box(bits[i]))
-                                .on_click(cx.listener(move |this, _, _, cx| this.toggle_bit(i, cx))),
-                        );
-                    }
-                    rows.push(row);
-                }
+                let view = cx.entity().downgrade();
+                let on_toggle: IndexHandler = std::rc::Rc::new(move |i, _, cx| {
+                    let _ = view.update(cx, |this, cx| this.toggle_bit(i, cx));
+                });
+                let grid = permissions_grid(*bits, on_toggle);
                 Self::card(false)
                     .child(
                         div()
@@ -1377,39 +1308,7 @@ impl FilesView {
                                 cx.listener(|this, _, _, cx| this.close_dialog(cx)),
                             )),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .pb(px(6.))
-                                    .child(div().flex_none().w(relative(0.3)))
-                                    .child(header("READ"))
-                                    .child(header("WRITE"))
-                                    .child(header("RUN")),
-                            )
-                            .children(rows),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(20.))
-                            .px(px(14.))
-                            .py(theme::SPACE_3)
-                            .rounded(theme::RADIUS_MD)
-                            .border_1()
-                            .border_color(theme::line())
-                            .bg(theme::ground())
-                            .font_family(theme::mono())
-                            .child(div().text_size(px(20.)).text_color(theme::ink()).child(octal))
-                            .child(div().text_size(px(14.)).text_color(theme::ink_muted()).child(symbolic)),
-                    )
+                    .child(grid)
                     .children(error.map(|e| div().w_full().text_meta().text_color(theme::warn()).child(e)))
                     .child(self.dialog_buttons(Button::primary("dialog-confirm", "Apply"), busy, cx))
             }
@@ -1457,65 +1356,20 @@ impl FilesView {
             let selected = pane.selected.contains(&entry.raw_name);
             let (glyph, color) = if drives { ("folder", theme::accent()) } else { entry_icon(entry) };
             let size = if entry.kind.opens() { String::new() } else { format::size(entry.size) };
-            let mut el = div()
-                .id((if remote { "remote-row" } else { "local-row" }, row))
-                .w_full()
-                .h(theme::CONTROL)
-                .px(px(ROW_PAD))
-                .flex()
-                .items_center()
-                .gap(px(COLUMN_GAP))
-                .border_b_1()
-                .border_color(theme::line_soft())
-                .cursor_pointer()
-                .when(selected, |d| d.bg(theme::card_selected()))
-                .when(!selected, |d| d.hover(|s| s.bg(theme::card())))
-                .child(div().w(px(CHECK_W)).flex_none().when(!drives, |d| d.child(check_box(selected))))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(COLUMN_GAP))
-                        .child(icon(glyph, px(18.), color))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_body()
-                                .text_color(theme::ink())
-                                .child(SharedString::from(entry.name.clone())),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(if remote { REMOTE_SIZE_W } else { LOCAL_SIZE_W }))
-                        .flex_none()
-                        .text_mono_small()
-                        .text_color(theme::ink_muted())
-                        .child(SharedString::from(size)),
-                )
-                .child(
-                    div()
-                        .w(px(if remote { REMOTE_MODIFIED_W } else { LOCAL_MODIFIED_W }))
-                        .flex_none()
-                        .text_meta()
-                        .text_color(theme::ink_muted())
-                        .child(SharedString::from(format_modified(entry.modified, !remote))),
-                )
-                .when(remote, |d| {
-                    d.child(
-                        div()
-                            .w(px(PERMISSIONS_W))
-                            .flex_none()
-                            .text_mono_small()
-                            .text_color(theme::ink_muted())
-                            .child(SharedString::from(entry.symbolic_mode().unwrap_or_default())),
-                    )
-                })
-                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.row_click(side, row, event, cx)));
+            let mut el = file_row(
+                (if remote { "remote-row" } else { "local-row" }, row),
+                FileRow {
+                    glyph,
+                    color,
+                    name: entry.name.clone().into(),
+                    size: size.into(),
+                    modified: format_modified(entry.modified, !remote).into(),
+                    permissions: remote.then(|| entry.symbolic_mode().unwrap_or_default().into()),
+                    selected,
+                    checkable: !drives,
+                },
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.row_click(side, row, event, cx)));
             // Drag the selection when this row is part of it.
             if !drives {
                 let dragged: Vec<&Entry> = if selected { pane.selection() } else { vec![entry] };
@@ -1563,31 +1417,16 @@ impl FilesView {
 
     fn header_row(&self, side: Side, cx: &mut Context<Self>) -> impl IntoElement {
         let pane = self.side(side);
-        let remote = side == Side::Remote;
         let all = !pane.visible.is_empty() && pane.selected.len() == pane.visible.len();
-        let label = |text: &'static str| div().text_label().text_color(theme::ink_muted()).child(text);
-        div()
-            .flex_none()
-            .px(px(ROW_PAD))
-            .py(theme::SPACE_2)
-            .flex()
-            .items_center()
-            .gap(px(COLUMN_GAP))
-            .border_b_1()
-            .border_color(theme::line())
-            .child(div().w(px(CHECK_W)).flex_none().when(!pane.at_drives(), |d| {
-                d.child(
-                    div()
-                        .id(SharedString::from(format!("{}-all", side.tag())))
-                        .cursor_pointer()
-                        .child(check_box(all))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_all(side, cx))),
-                )
-            }))
-            .child(label("NAME").flex_1().min_w_0())
-            .child(label("SIZE").w(px(if remote { REMOTE_SIZE_W } else { LOCAL_SIZE_W })).flex_none())
-            .child(label("MODIFIED").w(px(if remote { REMOTE_MODIFIED_W } else { LOCAL_MODIFIED_W })).flex_none())
-            .when(remote, |d| d.child(label("PERMISSIONS").w(px(PERMISSIONS_W)).flex_none()))
+        let select_all = (!pane.at_drives()).then(|| {
+            div()
+                .id(SharedString::from(format!("{}-all", side.tag())))
+                .cursor_pointer()
+                .child(check_box(all))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_all(side, cx)))
+                .into_any_element()
+        });
+        file_header(side == Side::Remote, select_all)
     }
 
     fn action_bar(&self, side: Side, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -1601,62 +1440,46 @@ impl FilesView {
             Side::Remote => ("← Download", self.can_receive(Side::Local)),
         };
         let can_edit = self.can_edit(side);
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(6.))
-                .px(px(10.))
-                .py(theme::SPACE_2)
-                .bg(theme::card())
-                .border_b_1()
-                .border_color(theme::line())
-                .child(div().px(px(6.)).text_body_strong().text_color(theme::ink()).child(plural(
-                    count,
-                    "item selected",
-                    "items selected",
-                )))
-                .child(div().flex_1())
-                .child(
-                    Button::primary(SharedString::from(format!("{tag}-send")), send_label)
-                        .compact()
-                        .disabled(!can_send)
-                        .on_click(cx.listener(move |this, _, _, cx| this.send(side, cx))),
-                )
-                .child(
-                    Button::secondary(SharedString::from(format!("{tag}-rename")), "Rename")
-                        .compact()
-                        .disabled(count != 1 || !can_edit)
-                        .on_click(cx.listener(move |this, _, window, cx| this.open_name(side, true, window, cx))),
-                )
-                .when(side == Side::Remote, |d| {
-                    d.child(
-                        Button::secondary("remote-permissions", "Permissions")
-                            .compact()
-                            .disabled(!can_edit)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_permissions(cx))),
-                    )
-                })
-                .child(
-                    Button::secondary(SharedString::from(format!("{tag}-copy-path")), "Copy path")
-                        .compact()
-                        .on_click(cx.listener(move |this, _, _, cx| this.copy_paths(side, cx))),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("{tag}-delete")), "Delete", ButtonKind::DestructiveOutline)
-                        .compact()
-                        .disabled(!can_edit)
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_delete(side, cx))),
-                )
-                .child(nav_button(
-                    format!("{tag}-clear").into(),
-                    "close",
-                    true,
-                    cx.listener(move |this, _, _, cx| this.clear_selection(side, cx)),
-                )),
-        )
+        let mut actions = vec![
+            Button::primary(SharedString::from(format!("{tag}-send")), send_label)
+                .compact()
+                .disabled(!can_send)
+                .on_click(cx.listener(move |this, _, _, cx| this.send(side, cx)))
+                .into_any_element(),
+            Button::secondary(SharedString::from(format!("{tag}-rename")), "Rename")
+                .compact()
+                .disabled(count != 1 || !can_edit)
+                .on_click(cx.listener(move |this, _, window, cx| this.open_name(side, true, window, cx)))
+                .into_any_element(),
+        ];
+        if side == Side::Remote {
+            actions.push(
+                Button::secondary("remote-permissions", "Permissions")
+                    .compact()
+                    .disabled(!can_edit)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_permissions(cx)))
+                    .into_any_element(),
+            );
+        }
+        actions.extend([
+            Button::secondary(SharedString::from(format!("{tag}-copy-path")), "Copy path")
+                .compact()
+                .on_click(cx.listener(move |this, _, _, cx| this.copy_paths(side, cx)))
+                .into_any_element(),
+            Button::new(SharedString::from(format!("{tag}-delete")), "Delete", ButtonKind::DestructiveOutline)
+                .compact()
+                .disabled(!can_edit)
+                .on_click(cx.listener(move |this, _, _, cx| this.open_delete(side, cx)))
+                .into_any_element(),
+            nav_button(
+                SharedString::from(format!("{tag}-clear")),
+                "close",
+                true,
+                cx.listener(move |this, _, _, cx| this.clear_selection(side, cx)),
+            )
+            .into_any_element(),
+        ]);
+        Some(selection_bar(count, actions))
     }
 
     fn pane(&self, side: Side, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1676,7 +1499,6 @@ impl FilesView {
             crumbs.push(("…".into(), before));
             crumbs.extend(tail);
         }
-        let last = crumbs.len().saturating_sub(1);
         let can_up = pane.place.as_ref().and_then(Place::parent).is_some();
         let connected = !remote || self.remote.is_some();
 
@@ -1827,41 +1649,20 @@ impl FilesView {
                         self.can_edit(side),
                         cx.listener(move |this, _, window, cx| this.open_name(side, false, window, cx)),
                     ))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{tag}-crumbs")))
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .overflow_x_scroll()
-                            .text_mono_small()
-                            .children(crumbs.into_iter().enumerate().map(|(i, (label, place))| {
-                                let current = i == last;
-                                div()
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("{tag}-crumb-{i}")))
-                                            .px(px(6.))
-                                            .py(theme::SPACE_2)
-                                            .rounded(theme::RADIUS_SM)
-                                            .whitespace_nowrap()
-                                            .text_color(if current { theme::ink() } else { theme::ink_muted() })
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(theme::raised()))
-                                            .child(label)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if this.side(side).place.as_ref() != Some(&place) {
-                                                    this.open(side, place.clone(), cx);
-                                                }
-                                            })),
-                                    )
-                                    .when(!current, |d| d.child(div().text_color(theme::ink_faint()).child("›")))
-                            })),
-                    ),
+                    .child({
+                        let (labels, places): (Vec<SharedString>, Vec<Place>) =
+                            crumbs.into_iter().map(|(label, place)| (SharedString::from(label), place)).unzip();
+                        let view = cx.entity().downgrade();
+                        let on_open: IndexHandler = std::rc::Rc::new(move |i, _, cx| {
+                            let Some(place) = places.get(i).cloned() else { return };
+                            let _ = view.update(cx, |this, cx| {
+                                if this.side(side).place.as_ref() != Some(&place) {
+                                    this.open(side, place, cx);
+                                }
+                            });
+                        });
+                        breadcrumbs(tag, labels, on_open)
+                    }),
             )
             .children(self.action_bar(side, cx))
             .child(self.header_row(side, cx))
@@ -2016,27 +1817,13 @@ impl FilesView {
         let failed = matches!(job.state, JobState::Failed(_));
         row.child(name)
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .h(px(4.))
-                            .w_full()
-                            .rounded(px(2.))
-                            .bg(theme::line())
-                            .child(div().h(px(4.)).w(relative(percent as f32 / 100.)).rounded(px(2.)).bg(color)),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_meta()
-                            .text_color(if failed { theme::warn() } else { theme::ink_muted() })
-                            .child(SharedString::from(meta)),
-                    ),
+                div().flex_1().min_w_0().flex().flex_col().gap(px(6.)).child(progress_bar(percent, color)).child(
+                    div()
+                        .truncate()
+                        .text_meta()
+                        .text_color(if failed { theme::warn() } else { theme::ink_muted() })
+                        .child(SharedString::from(meta)),
+                ),
             )
             .child(
                 div()

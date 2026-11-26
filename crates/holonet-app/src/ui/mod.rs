@@ -2,6 +2,7 @@
 //! in docs/design/components. Stateless controls live here; the text field and
 //! select keep state and have their own modules.
 
+pub mod files;
 pub mod lists;
 pub mod select;
 pub mod slider;
