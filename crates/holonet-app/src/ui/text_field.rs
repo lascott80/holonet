@@ -166,6 +166,10 @@ impl TextField {
         window.focus(&self.focus);
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     fn masked(&self) -> bool {
         self.password && !self.revealed
     }

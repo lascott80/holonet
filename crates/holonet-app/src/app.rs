@@ -33,7 +33,7 @@ use crate::ui::icon;
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
 
-actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane]);
+actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find]);
 
 const CONTEXT: &str = "HolonetApp";
 
@@ -44,6 +44,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
         // With Shift held, Windows layouts report ] and [ as } and {.
         KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
@@ -596,6 +597,15 @@ impl Render for HolonetApp {
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
                 if let Some(tab) = this.active_tab() {
                     this.split(&tab, Axis::Down, None, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Find, window, cx| {
+                if let Some(tab) = this.active_tab() {
+                    tab.update(cx, |t, cx| {
+                        if !t.focus_find(window, cx) {
+                            t.toggle_find(window, cx);
+                        }
+                    });
                 }
             }))
             .on_action(cx.listener(|this, _: &NextPane, window, cx| {

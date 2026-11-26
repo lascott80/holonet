@@ -44,6 +44,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Split down", "Ctrl Shift E"),
     ("Next pane", "Ctrl Shift ]"),
     ("Previous pane", "Ctrl Shift ["),
+    ("Find in terminal", "Ctrl Shift F"),
     ("Copy", "Ctrl Shift C"),
     ("Paste", "Ctrl Shift V"),
 ];

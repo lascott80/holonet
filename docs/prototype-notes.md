@@ -739,3 +739,46 @@ Not reached by hand: "the saved password" wording. That path depends only on whe
 - Sleep: `PBT_APMSUSPEND`, then on wake `PBT_APMRESUMEAUTOMATIC` and `PBT_APMRESUMESUSPEND` within 1 ms, followed by a burst of interface changes.
 - The monotonic clock (`Instant`, which uses QPC) counted through sleep: wall and monotonic both read 39.4 s. A clock-gap check could not detect sleep, so the power notification is the signal to use.
 - The open sessions are to WSL on this PC, so the connection survived sleep: typing after wake worked at once. **A drop after sleep from a remote server was not tested** (there is none in this setup). The code path is the same as the tests above, with the cause set by the power event.
+
+## Milestone 3, phase 8: find in the terminal (25 Nov 2026)
+
+**Behaviour** (Terminal.dc.html's find bar).
+- **Opening and closing:**
+  - Ctrl Shift F or the header's **Find** button opens a bar under the tab header. The button has an accent border while the bar is open.
+  - Ctrl Shift F with the bar open puts focus back in its field.
+  - Esc or the button closes the bar and clears the highlights. The view stays where it was scrolled.
+- **Searching:**
+  - The search covers the active pane's history and screen, one line at a time, so a match never spans a wrapped line.
+  - It is plain text and ignores case by default. **Match case** and **Regex** (the `regex` crate) change that.
+  - An invalid regex shows "Invalid regex" in amber and clears the highlights.
+- **Count:** "Type to search", "No matches", "1 line matches" or "N lines match", as drawn.
+- **Moving between matches:**
+  - Every match gets a faint accent background and the current match a stronger one. Both pass 4.5:1 with the foreground in all three schemes, and a test checks this.
+  - The first current match is the newest. Enter and the up button go to the previous (older) match; Shift Enter and the down button go to the next. Both wrap around.
+  - When the current match is off screen, the view scrolls so it sits a few lines from the top (at most 3, and a third of the pane in short panes).
+- **Live updates:** new output re-runs the search, at most every 150 ms, and the current match keeps its distance from the bottom.
+- **Panes:** the bar follows the active pane. Clicking another pane clears the old pane's highlights and searches the new one.
+
+**`--find-bench`** (10,000-line history at 150×40, from `sample::bulk`; release build, ARM64):
+
+| Query | Matches | Find | Snapshot with highlights |
+| --- | --- | --- | --- |
+| plain, every line | 10,039 | 6.95 ms | 0.43 ms |
+| plain, few lines | 11 | 7.92 ms | 0.22 ms |
+| plain, no match | 0 | 6.57 ms | 0.22 ms |
+| regex `took=\d{3}ms` | 6,039 | 8.98 ms | 0.40 ms |
+| case-sensitive | 10,039 | 7.44 ms | 0.36 ms |
+
+Every keystroke's search plus a frame stays under 16 ms. The time is spent reading cells into a string, so it barely depends on the query.
+
+**Checked against WSL** (`seq 1 3000 | sed 's/^/Row /'`):
+
+| Check | Result |
+| --- | --- |
+| "row 15" | "111 lines match" (Row 15, 150–159, 1500–1599); Row 1599 current |
+| Enter twice, then Shift Enter | Current moved to 1597, then back to 1598 |
+| Match case on | "No matches" |
+| Regex on, `Row (2\d` | "Invalid regex" in amber |
+| `Row (2\d00)$` | "10 lines match"; the view jumped from the bottom to Row 2900 |
+| Esc | Bar closed, highlights gone |
+| Split right, "Row 2999" in the new pane | "No matches"; clicking the first pane gave "1 line matches" with Row 2999 highlighted |

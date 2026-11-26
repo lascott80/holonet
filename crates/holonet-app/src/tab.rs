@@ -19,8 +19,10 @@ use holonet_model::HostId;
 use crate::app::HolonetApp;
 use crate::session::Pane;
 use crate::shell::TabState;
+use crate::terminal_view::{SearchQuery, SearchStatus};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{Button, icon};
+use crate::ui::{Checkbox, TextField, TextFieldEvent};
 
 /// Owner decision 1: up to four panes per tab.
 pub const MAX_PANES: usize = 4;
@@ -119,6 +121,23 @@ impl Node {
     }
 }
 
+gpui::actions!(find_bar, [FindNext]);
+
+const FIND_CONTEXT: &str = "FindBar";
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([gpui::KeyBinding::new("shift-enter", FindNext, Some(FIND_CONTEXT))]);
+}
+
+/// The find bar (Terminal.dc.html): searches the active pane's scrollback.
+struct FindBar {
+    field: Entity<TextField>,
+    match_case: bool,
+    regex: bool,
+    status: SearchStatus,
+    _subscription: Subscription,
+}
+
 /// The tab wants another pane (the app creates it: it knows hosts and settings).
 pub enum TabEvent {
     Split { axis: Axis, host: Option<HostId> },
@@ -132,6 +151,7 @@ pub struct Tab {
     drag: Option<Vec<bool>>,
     /// The split menu, while open: its axis and the hosts it offers.
     menu: Option<(Axis, Vec<(HostId, SharedString)>)>,
+    find: Option<FindBar>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -147,6 +167,7 @@ impl Tab {
             active: pane,
             drag: None,
             menu: None,
+            find: None,
             _subscriptions: subscriptions,
         }
     }
@@ -200,7 +221,16 @@ impl Tab {
     }
 
     fn activate(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
+        // Find follows the active pane.
+        if self.find.is_some() && self.active != pane {
+            self.active.read(cx).terminal().clone().update(cx, |t, cx| {
+                t.set_search(None, cx);
+            });
+        }
         self.active = pane;
+        if self.find.is_some() {
+            self.run_find(cx);
+        }
         self.mark_panes(cx);
         self.focus(window, cx);
         cx.notify();
@@ -238,6 +268,160 @@ impl Tab {
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.active.update(cx, |p, cx| p.focus(window, cx));
+    }
+
+    /// Ctrl Shift F or the Find button: open the bar (and focus its field),
+    /// or close it.
+    pub fn toggle_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.is_some() {
+            self.close_find(window, cx);
+            return;
+        }
+        let field = cx.new(|cx| TextField::new(cx, "Find in scrollback"));
+        let sub =
+            cx.subscribe_in(&field, window, |this: &mut Self, _, event: &TextFieldEvent, window, cx| match event {
+                TextFieldEvent::Changed => this.run_find(cx),
+                // Enter goes up to the previous (older) match; Shift Enter down.
+                TextFieldEvent::Submitted => this.step_find(-1, cx),
+                TextFieldEvent::Cancelled => this.close_find(window, cx),
+            });
+        field.read(cx).focus(window);
+        self.find =
+            Some(FindBar { field, match_case: false, regex: false, status: SearchStatus::Empty, _subscription: sub });
+        cx.notify();
+    }
+
+    /// Ctrl Shift F with the bar open: focus its field again.
+    pub fn focus_find(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match &self.find {
+            Some(f) if !f.field.read(cx).is_focused(window) => {
+                f.field.read(cx).focus(window);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find = None;
+        self.active.read(cx).terminal().clone().update(cx, |t, cx| {
+            t.set_search(None, cx);
+        });
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    fn run_find(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else { return };
+        let query = SearchQuery {
+            text: find.field.read(cx).text().to_string(),
+            match_case: find.match_case,
+            regex: find.regex,
+        };
+        let terminal = self.active.read(cx).terminal().clone();
+        find.status = terminal.update(cx, |t, cx| t.set_search(Some(&query), cx));
+        cx.notify();
+    }
+
+    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let terminal = self.active.read(cx).terminal().clone();
+        let status = terminal.update(cx, |t, cx| {
+            t.search_step(delta, cx);
+            t.search_status()
+        });
+        if let Some(find) = self.find.as_mut() {
+            find.status = status;
+        }
+        cx.notify();
+    }
+
+    fn find_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let find = self.find.as_ref()?;
+        // Live: new output changes the count without a keystroke.
+        let status = match find.status {
+            SearchStatus::Invalid | SearchStatus::Empty => find.status,
+            _ => self.active.read(cx).terminal().read(cx).search_status(),
+        };
+        let warn = matches!(status, SearchStatus::Invalid);
+        let found = matches!(status, SearchStatus::Found { .. });
+        let _ = window;
+        let nav = |id: &'static str, glyph: &'static str, delta: isize, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .size(theme::CONTROL_COMPACT)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme::RADIUS_MD)
+                .border_1()
+                .border_color(theme::line())
+                .when(found, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.bg(theme::raised()))
+                        .on_click(cx.listener(move |this, _, _, cx| this.step_find(delta, cx)))
+                })
+                .when(!found, |d| d.opacity(0.4))
+                .child(icon(glyph, px(16.), theme::ink_muted()))
+        };
+        Some(
+            div()
+                .key_context(FIND_CONTEXT)
+                .on_action(cx.listener(|this, _: &FindNext, _, cx| this.step_find(1, cx)))
+                .flex_none()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(theme::SPACE_3)
+                .px(px(18.))
+                .py(theme::SPACE_2)
+                .bg(theme::panel())
+                .border_b_1()
+                .border_color(theme::line())
+                .child(
+                    div()
+                        .flex_1()
+                        .max_w(px(420.))
+                        .min_w(px(220.))
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(icon("search", px(16.), theme::ink_muted()))
+                        .child(div().flex_1().child(find.field.clone())),
+                )
+                .child(
+                    div()
+                        .min_w(px(90.))
+                        .text_mono_small()
+                        .text_color(if warn { theme::warn() } else { theme::ink_muted() })
+                        .child(SharedString::from(status.text())),
+                )
+                .child(nav("find-prev", "chevron-up", -1, cx))
+                .child(nav("find-next", "chevron-down", 1, cx))
+                .child(Checkbox::new("find-case", "Match case", find.match_case).on_toggle({
+                    let this = cx.weak_entity();
+                    move |v, _, cx| {
+                        let _ = this.update(cx, |t, cx| {
+                            if let Some(f) = t.find.as_mut() {
+                                f.match_case = v;
+                            }
+                            t.run_find(cx);
+                        });
+                    }
+                }))
+                .child(Checkbox::new("find-regex", "Regex", find.regex).on_toggle({
+                    let this = cx.weak_entity();
+                    move |v, _, cx| {
+                        let _ = this.update(cx, |t, cx| {
+                            if let Some(f) = t.find.as_mut() {
+                                f.regex = v;
+                            }
+                            t.run_find(cx);
+                        });
+                    }
+                }))
+                .into_any_element(),
+        )
     }
 
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
@@ -476,7 +660,8 @@ impl FlexGrowRatio for gpui::Div {
 }
 
 impl Render for Tab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let find_bar = self.find_bar(window, cx);
         let (name, target, status) = {
             let p = self.active.read(cx);
             (p.name(), p.target_line(), p.status_bar())
@@ -539,9 +724,32 @@ impl Render for Tab {
                                 )
                             })
                             .child(self.split_control(Axis::Right, can_split, cx))
-                            .child(self.split_control(Axis::Down, can_split, cx)),
+                            .child(self.split_control(Axis::Down, can_split, cx))
+                            .child({
+                                // A toggle: the accent border while the bar is open.
+                                let on = self.find.is_some();
+                                div()
+                                    .id("find-toggle")
+                                    .h(theme::CONTROL)
+                                    .px(px(14.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme::SPACE_2)
+                                    .rounded(theme::RADIUS_MD)
+                                    .border_1()
+                                    .border_color(if on { theme::accent() } else { theme::line() })
+                                    .bg(theme::card())
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::raised()))
+                                    .text_body()
+                                    .text_color(theme::ink())
+                                    .child(icon("search", px(16.), theme::ink_muted()))
+                                    .child("Find")
+                                    .on_click(cx.listener(|this, _, window, cx| this.toggle_find(window, cx)))
+                            }),
                     ),
             )
+            .children(find_bar)
             // Gutter and panes.
             .child(div().flex_1().min_h_0().p(theme::SPACE_2).bg(theme::sunken()).child(body))
             .child(status)

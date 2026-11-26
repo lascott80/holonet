@@ -355,6 +355,10 @@ impl Pane {
         }
     }
 
+    pub fn terminal(&self) -> &Entity<TerminalView> {
+        &self.terminal
+    }
+
     pub fn grid_size(&self, cx: &gpui::App) -> GridSize {
         self.terminal.read(cx).grid_size()
     }

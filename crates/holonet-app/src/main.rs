@@ -9,6 +9,7 @@
 //!   holonet --fonts         spike 1: font and glyph width check
 //!   holonet --font-spike    milestone 3 phase 0: ligatures, icon widths, font load cost
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
+//!   holonet --find-bench    time find over a full 10,000-line history, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
 
 mod app;
@@ -110,8 +111,40 @@ fn showcase_settings(args: impl Iterator<Item = String>) -> holonet_model::Termi
     s
 }
 
+/// Find over a full history, as the find bar runs it on each keystroke.
+fn find_bench() {
+    let mut model = TerminalModel::new(GridSize { cols: 150, rows: 40 }, 10_000);
+    for chunk in sample::bulk(10_000_000).chunks(32 * 1024) {
+        model.advance(chunk);
+    }
+    for (label, pattern) in [
+        ("plain, every line", "(?i)status=200"),
+        ("plain, few lines", "(?i)items/996 "),
+        ("plain, no match", "(?i)nothing-here"),
+        ("regex, every line", r"took=\d{3}ms"),
+        ("case-sensitive", "INFO"),
+    ] {
+        let re = regex::Regex::new(pattern).unwrap();
+        let t = Instant::now();
+        let mut hits = Vec::new();
+        for _ in 0..10 {
+            hits = model.find(&re);
+        }
+        let per = t.elapsed().as_secs_f64() * 1e3 / 10.0;
+        let t = Instant::now();
+        model.set_hits(hits.clone(), hits.len().checked_sub(1));
+        let _ = model.snapshot();
+        let snap = t.elapsed().as_micros();
+        println!("{label:<20} {:>6} matches  find {per:.2} ms  snapshot with highlights {snap} us", hits.len());
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1);
+    if arg.as_deref() == Some("--find-bench") {
+        find_bench();
+        return;
+    }
     if arg.as_deref() == Some("--parse-bench") {
         parse_bench();
         return;
@@ -139,6 +172,7 @@ fn main() {
         ui::slider::bind_keys(cx);
         app::bind_keys(cx);
         host_picker::bind_keys(cx);
+        tab::bind_keys(cx);
         if font_spike {
             match font_spike::load(cx) {
                 Some((n, mb, read, add)) => {

@@ -42,6 +42,9 @@ pub struct Palette {
     /// Text drawn on top of a block cursor.
     pub cursor_text: u32,
     pub selection: u32,
+    /// Find: every match, and the current one (undrawn state, from the accent).
+    pub find_hit: u32,
+    pub find_current: u32,
     pub ansi: [u32; 16],
 }
 
@@ -53,6 +56,8 @@ impl Palette {
         cursor: 0xEDEDED,     // ink
         cursor_text: 0x101010,
         selection: 0x274758, // accent at about 30% over terminal
+        find_hit: 0x1C2D36,  // accent at 16% (Terminal.dc.html's hit lines)
+        find_current: 0x2B5568,
         ansi: [
             0x2A2A2A, 0xF0776C, 0x7FD6B5, 0xF2A65A, 0x5CC8FF, 0xB9A5FF, 0x6FD3D6, 0xCFCFCF, 0x8A8A8A, 0xFF9A90,
             0xA3EBCF, 0xFFC285, 0x8FDBFF, 0xD3C6FF, 0x9AE6E8, 0xEDEDED,
@@ -66,6 +71,8 @@ impl Palette {
         cursor: 0xFFFFFF,
         cursor_text: 0x000000,
         selection: 0x1F4F66,
+        find_hit: 0x142229,
+        find_current: 0x2E5A6E,
         ansi: [
             0x3A3A3A, 0xFF8A80, 0x9FF0CF, 0xFFD27A, 0x7AD7FF, 0xD2C2FF, 0x8CF0F2, 0xE6E6E6, 0xBDBDBD, 0xFFB0A8,
             0xC4FFE6, 0xFFE3AA, 0xB0E8FF, 0xE6DCFF, 0xB8FAFB, 0xFFFFFF,
@@ -80,6 +87,8 @@ impl Palette {
         cursor: 0x1F1F1F,
         cursor_text: 0xFAFAFA,
         selection: 0xC5E1F0,
+        find_hit: 0xE2EDF2,
+        find_current: 0xF5D9A8,
         ansi: [
             0x1F1F1F, 0xB3261E, 0x1B7A55, 0x8A5A00, 0x0B6A99, 0x7442C8, 0x0E6F75, 0x5F5F5F, 0x6B6B6B, 0xA8201A,
             0x18694A, 0x7A4F00, 0x095A82, 0x6538B0, 0x0B5F64, 0x3A3A3A,
@@ -160,12 +169,35 @@ pub struct TerminalModel {
     parser: Processor,
     size: GridSize,
     palette: &'static Palette,
+    /// Bumped on every change to the grid, so search results know when they
+    /// are stale.
+    generation: u64,
+    /// Find results to highlight, sorted top to bottom, and the current one.
+    hits: Vec<Match>,
+    current_hit: Option<usize>,
+}
+
+/// One find match: a grid line (negative in the history) and a column range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Match {
+    pub line: i32,
+    pub start: usize,
+    /// Exclusive.
+    pub end: usize,
 }
 
 impl TerminalModel {
     pub fn new(size: GridSize, scrollback: usize) -> Self {
         let config = Config { scrolling_history: scrollback, ..Default::default() };
-        Self { term: Term::new(config, &size, VoidListener), parser: Processor::new(), size, palette: &Palette::DARK }
+        Self {
+            term: Term::new(config, &size, VoidListener),
+            parser: Processor::new(),
+            size,
+            palette: &Palette::DARK,
+            generation: 0,
+            hits: Vec::new(),
+            current_hit: None,
+        }
     }
 
     /// Apply terminal settings: colors, history length and the default cursor
@@ -185,7 +217,82 @@ impl TerminalModel {
         self.term.set_options(config);
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Every match of `re` in the history and the screen, top to bottom.
+    /// Lines are matched one at a time, as their cells read; a match never
+    /// spans a wrapped line.
+    pub fn find(&self, re: &regex::Regex) -> Vec<Match> {
+        let grid = self.term.grid();
+        let top = -(grid.history_size() as i32);
+        let cols = self.size.cols;
+        let mut text = String::with_capacity(cols * 2);
+        // Byte offset in `text` -> column, for each character pushed.
+        let mut col_at: Vec<(usize, usize)> = Vec::with_capacity(cols);
+        let mut out = Vec::new();
+        for line in top..self.size.rows as i32 {
+            let row = &grid[Line(line)];
+            text.clear();
+            col_at.clear();
+            for col in 0..cols {
+                let cell = &row[Column(col)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                col_at.push((text.len(), col));
+                text.push(cell.c);
+                if let Some(zw) = cell.zerowidth() {
+                    text.extend(zw);
+                }
+            }
+            let trimmed = text.trim_end().len();
+            if trimmed == 0 {
+                continue;
+            }
+            for m in re.find_iter(&text[..trimmed]) {
+                if m.start() == m.end() {
+                    continue;
+                }
+                let column = |byte: usize| match col_at.binary_search_by_key(&byte, |(b, _)| *b) {
+                    Ok(i) => col_at[i].1,
+                    Err(i) => col_at.get(i).map_or(cols, |(_, c)| *c),
+                };
+                let start = column(m.start());
+                // The last character's column, plus its width.
+                let last = col_at.iter().rev().find(|(b, _)| *b < m.end()).map_or(start, |(_, c)| *c);
+                let wide = row[Column(last)].flags.contains(Flags::WIDE_CHAR);
+                out.push(Match { line, start, end: last + if wide { 2 } else { 1 } });
+            }
+        }
+        out
+    }
+
+    /// Matches to highlight in snapshots, and which is current.
+    pub fn set_hits(&mut self, hits: Vec<Match>, current: Option<usize>) {
+        self.hits = hits;
+        self.current_hit = current;
+    }
+
+    /// Scroll so a grid line is on screen, a few lines from the top when the
+    /// view has to move.
+    pub fn reveal(&mut self, line: i32) {
+        let offset = self.term.grid().display_offset() as i32;
+        let rows = self.size.rows as i32;
+        let first = -offset;
+        if line >= first && line < first + rows {
+            return;
+        }
+        let history = self.term.grid().history_size() as i32;
+        // A little context above the match, less in a short pane.
+        let margin = (rows / 3).min(3);
+        let wanted = (-(line - margin)).clamp(0, history);
+        self.term.scroll_display(Scroll::Delta(wanted - offset));
+    }
+
     pub fn advance(&mut self, bytes: &[u8]) {
+        self.generation = self.generation.wrapping_add(1);
         self.parser.advance(&mut self.term, bytes);
     }
 
@@ -196,6 +303,7 @@ impl TerminalModel {
 
     pub fn resize(&mut self, size: GridSize) {
         if size != self.size && size.cols > 1 && size.rows > 0 {
+            self.generation = self.generation.wrapping_add(1);
             self.size = size;
             self.term.resize(size);
         }
@@ -279,8 +387,11 @@ impl TerminalModel {
             if flags.contains(Flags::DIM) {
                 fg = p.dim(fg);
             }
+            let hit = self.hit_at(indexed.point);
             let bg = if selection.is_some_and(|s| s.contains(indexed.point)) {
                 Some(p.selection)
+            } else if let Some(current) = hit {
+                Some(if current { p.find_current } else { p.find_hit })
             } else {
                 (bg != p.background).then_some(bg)
             };
@@ -342,6 +453,22 @@ impl TerminalModel {
             palette: p,
             cursor_blinking: self.term.cursor_style().blinking,
         }
+    }
+
+    /// Whether a grid point is in a find match, and whether that match is the
+    /// current one.
+    fn hit_at(&self, point: Point) -> Option<bool> {
+        if self.hits.is_empty() {
+            return None;
+        }
+        let line = point.line.0;
+        let first = self.hits.partition_point(|m| m.line < line);
+        self.hits[first..]
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.line == line)
+            .find(|(_, m)| (m.start..m.end).contains(&point.column.0))
+            .map(|(i, _)| self.current_hit == Some(first + i))
     }
 
     /// Text of the visible screen, for tests and debugging.
@@ -519,5 +646,53 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.cursor.map(|c| c.2), Some(CursorShape::Block));
         assert!(snap.cursor_blinking);
+    }
+
+    #[test]
+    fn find_plain_regex_case_and_history() {
+        let mut m = TerminalModel::new(GridSize { cols: 20, rows: 3 }, 100);
+        m.advance(b"alpha Beta\r\nnothing\r\nbeta gamma beta\r\nlast line\r\n");
+        // "alpha Beta" has scrolled into the history.
+        let insensitive = regex::Regex::new("(?i)beta").unwrap();
+        let hits = m.find(&insensitive);
+        assert_eq!(hits.len(), 3);
+        assert!(hits[0].line < 0, "first hit is in the history");
+        assert_eq!((hits[0].start, hits[0].end), (6, 10));
+        assert_eq!((hits[2].start, hits[2].end), (11, 15));
+        assert_eq!(m.find(&regex::Regex::new("beta").unwrap()).len(), 2);
+        assert_eq!(m.find(&regex::Regex::new(r"g\w+").unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn find_counts_wide_characters_in_columns() {
+        let mut m = TerminalModel::new(GridSize { cols: 20, rows: 2 }, 10);
+        m.advance("日本 ok".as_bytes());
+        let hits = m.find(&regex::Regex::new("本").unwrap());
+        assert_eq!((hits[0].start, hits[0].end), (2, 4));
+        let hits = m.find(&regex::Regex::new("ok").unwrap());
+        assert_eq!((hits[0].start, hits[0].end), (5, 7));
+    }
+
+    #[test]
+    fn hits_are_highlighted_and_revealed() {
+        let mut m = TerminalModel::new(GridSize { cols: 10, rows: 2 }, 100);
+        for i in 0..20 {
+            m.advance(format!("line {i}\r\n").as_bytes());
+        }
+        let hits = m.find(&regex::Regex::new("line 3$").unwrap());
+        assert_eq!(hits.len(), 1);
+        m.set_hits(hits.clone(), Some(0));
+        m.reveal(hits[0].line);
+        let snap = m.snapshot();
+        let row = snap.lines.iter().position(|r| r.iter().any(|run| run.text.contains("line 3"))).unwrap();
+        assert!(snap.lines[row].iter().any(|r| r.bg == Some(Palette::DARK.find_current)));
+    }
+
+    #[test]
+    fn find_colors_keep_text_readable() {
+        for p in [Palette::DARK, Palette::HIGH_CONTRAST, Palette::LIGHT] {
+            assert!(contrast(p.foreground, p.find_hit) >= 4.5);
+            assert!(contrast(p.foreground, p.find_current) >= 4.5);
+        }
     }
 }

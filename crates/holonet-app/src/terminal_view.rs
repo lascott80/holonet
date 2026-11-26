@@ -25,7 +25,7 @@ use holonet_ssh::{PtySize, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input;
-use crate::terminal::{GridSize, Snapshot, TerminalModel};
+use crate::terminal::{GridSize, Match, Snapshot, TerminalModel};
 use holonet_model::TerminalSettings;
 
 /// How long the cursor stays on, and off, while blinking.
@@ -84,9 +84,62 @@ pub struct TerminalView {
     preview: bool,
     /// Settings to apply at the next render (where a window is available).
     pending: Option<TerminalSettings>,
+    /// Find in this terminal's scrollback, while the find bar targets it.
+    search: Option<Search>,
     /// Grid size measured from the canvas at paint time; applied next render.
     measured: Rc<Cell<Option<GridSize>>>,
 }
+
+/// What the find bar asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub match_case: bool,
+    pub regex: bool,
+}
+
+/// The find bar's count line (Terminal.dc.html).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchStatus {
+    /// Nothing typed yet.
+    Empty,
+    /// The text is not a valid regular expression.
+    Invalid,
+    /// `lines` lines match, `matches` matches in all; `current` is 1-based.
+    Found {
+        lines: usize,
+        matches: usize,
+        current: usize,
+    },
+    NoMatches,
+}
+
+impl SearchStatus {
+    pub fn text(&self) -> String {
+        match self {
+            SearchStatus::Empty => "Type to search".into(),
+            SearchStatus::Invalid => "Invalid regex".into(),
+            SearchStatus::NoMatches => "No matches".into(),
+            SearchStatus::Found { lines: 1, .. } => "1 line matches".into(),
+            SearchStatus::Found { lines, .. } => format!("{lines} lines match"),
+        }
+    }
+}
+
+struct Search {
+    regex: regex::Regex,
+    hits: Vec<Match>,
+    lines: usize,
+    current: Option<usize>,
+    /// Model generation the hits were found at, and when.
+    generation: u64,
+    searched_at: Instant,
+    /// Re-runs the search once output has settled.
+    refresh: Option<gpui::Task<()>>,
+}
+
+/// How often a live search is re-run while output keeps arriving.
+const SEARCH_REFRESH: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Emitted when the remote shell ends or the connection under it is lost.
 #[derive(Clone, Debug)]
@@ -168,6 +221,7 @@ impl TerminalView {
             embedded: false,
             preview: false,
             pending: None,
+            search: None,
             measured: Rc::new(Cell::new(None)),
         };
         view.apply_settings(&TerminalSettings::default(), window, cx);
@@ -216,6 +270,109 @@ impl TerminalView {
         self.measured.set(None);
         self.blink_visible = true;
         cx.notify();
+    }
+
+    /// Start, change or (with `None`) clear a find. The current match starts
+    /// at the most recent one.
+    pub fn set_search(&mut self, query: Option<&SearchQuery>, cx: &mut Context<Self>) -> SearchStatus {
+        let Some(q) = query.filter(|q| !q.text.is_empty()) else {
+            self.search = None;
+            self.model.set_hits(Vec::new(), None);
+            cx.notify();
+            return SearchStatus::Empty;
+        };
+        let pattern = if q.regex { q.text.clone() } else { regex::escape(&q.text) };
+        let pattern = if q.match_case { pattern } else { format!("(?i){pattern}") };
+        let Ok(regex) = regex::Regex::new(&pattern) else {
+            self.search = None;
+            self.model.set_hits(Vec::new(), None);
+            cx.notify();
+            return SearchStatus::Invalid;
+        };
+        self.search = Some(Search {
+            regex,
+            hits: Vec::new(),
+            lines: 0,
+            current: None,
+            generation: u64::MAX,
+            searched_at: Instant::now(),
+            refresh: None,
+        });
+        self.run_search(true);
+        if let Some(line) = self.search.as_ref().and_then(|s| s.current.map(|i| s.hits[i].line)) {
+            self.model.reveal(line);
+        }
+        cx.notify();
+        self.search_status()
+    }
+
+    fn run_search(&mut self, fresh: bool) {
+        let Some(search) = self.search.as_mut() else { return };
+        let old_len = search.hits.len();
+        let from_bottom = search.current.map(|c| old_len.saturating_sub(c + 1));
+        search.hits = self.model.find(&search.regex);
+        search.lines = {
+            let mut lines: Vec<i32> = search.hits.iter().map(|m| m.line).collect();
+            lines.dedup();
+            lines.len()
+        };
+        // New output pushes matches up: keep the same distance from the bottom.
+        search.current = match (fresh, from_bottom) {
+            _ if search.hits.is_empty() => None,
+            (false, Some(d)) => Some(search.hits.len().saturating_sub(d + 1)),
+            _ => Some(search.hits.len() - 1),
+        };
+        search.generation = self.model.generation();
+        search.searched_at = Instant::now();
+        self.model.set_hits(search.hits.clone(), search.current);
+    }
+
+    /// Move to the previous (-1, older) or next (+1, newer) match.
+    pub fn search_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else { return };
+        if search.hits.is_empty() {
+            return;
+        }
+        let n = search.hits.len() as isize;
+        let next = (search.current.map_or(n - 1, |c| c as isize) + delta).rem_euclid(n) as usize;
+        search.current = Some(next);
+        let line = search.hits[next].line;
+        self.model.set_hits(search.hits.clone(), Some(next));
+        self.model.reveal(line);
+        cx.notify();
+    }
+
+    pub fn search_status(&self) -> SearchStatus {
+        match &self.search {
+            None => SearchStatus::Empty,
+            Some(s) if s.hits.is_empty() => SearchStatus::NoMatches,
+            Some(s) => {
+                SearchStatus::Found { lines: s.lines, matches: s.hits.len(), current: s.current.map_or(0, |c| c + 1) }
+            }
+        }
+    }
+
+    /// Re-run a live search after output changed the grid, at most every
+    /// [`SEARCH_REFRESH`] so a flood of output stays fast.
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let generation = self.model.generation();
+        let Some(search) = self.search.as_mut() else { return };
+        if search.generation == generation {
+            return;
+        }
+        if search.searched_at.elapsed() >= SEARCH_REFRESH {
+            self.run_search(false);
+        } else if search.refresh.is_none() {
+            search.refresh = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_REFRESH).await;
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(s) = view.search.as_mut() {
+                        s.refresh = None;
+                    }
+                    cx.notify();
+                });
+            }));
+        }
     }
 
     pub fn grid_size(&self) -> GridSize {
@@ -564,6 +721,7 @@ impl Render for TerminalView {
         }
         self.step_stream(window, cx);
 
+        self.refresh_search(cx);
         let started = Instant::now();
         let snapshot = self.model.snapshot();
         self.snapshot_us = started.elapsed().as_micros();
