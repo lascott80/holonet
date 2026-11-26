@@ -216,7 +216,8 @@ impl RenderOnce for Checkbox {
             .text_body()
             .text_color(theme::ink())
             .child(box_)
-            .child(self.label);
+            // A box that can shrink, so a long label wraps in a narrow panel.
+            .child(div().flex_1().min_w_0().child(self.label));
         if let Some(handler) = self.on_toggle {
             row = row.on_click(move |_, window, cx| handler(!checked, window, cx));
         }

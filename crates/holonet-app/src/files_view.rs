@@ -1488,7 +1488,13 @@ impl FilesView {
         let remote = side == Side::Remote;
         let view = cx.entity_id();
         let title: SharedString = if remote { self.host_name.clone() } else { "This PC".into() };
-        let top = if remote { theme::no_group() } else { theme::ink_muted() };
+        // The host's side carries its group's color (Sftp.dc.html).
+        let top = if remote {
+            let tag = self.app.upgrade().and_then(|app| app.read(cx).group_tag(self.host_id, cx));
+            crate::workspace::GroupTag::color_of(tag.as_ref())
+        } else {
+            theme::ink_muted()
+        };
         // Long paths keep the first crumb and the last few; "…" opens the
         // folder just before those.
         let mut crumbs = pane.place.as_ref().map(Place::crumbs).unwrap_or_default();

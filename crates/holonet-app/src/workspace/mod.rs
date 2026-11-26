@@ -1,11 +1,13 @@
-//! The unlocked workspace: side navigation and pages (Hosts, the host form,
-//! Settings). Phases 6 and 7 add the session tab and Known hosts.
+//! The unlocked workspace: side navigation and pages (Hosts and Groups, the
+//! host form, Keychain, Known hosts, Settings).
 
+mod groups;
 mod hosts;
 mod keychain;
 mod known_hosts;
 mod settings;
 
+pub use groups::GroupTag;
 pub use hosts::format_date;
 
 use std::path::PathBuf;
@@ -48,6 +50,7 @@ const PAGES: [NavEntry; 4] = [NavEntry::Hosts, NavEntry::Keychain, NavEntry::Kno
 
 pub(crate) enum Page {
     Hosts,
+    Groups,
     Form(Entity<HostForm>),
     Keychain,
     KnownHosts,
@@ -80,6 +83,9 @@ pub struct Workspace {
     search: Entity<TextField>,
     cards: bool,
     selected: Option<HostId>,
+    /// Hosts page: the group card picked to filter the hosts.
+    group_filter: Option<holonet_model::GroupId>,
+    groups_ui: groups::GroupsUi,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -118,6 +124,8 @@ impl Workspace {
         ];
         let path = vault.path().to_path_buf();
         let kc = keychain::KeychainUi::new(cx);
+        let groups_ui = groups::GroupsUi::new(cx);
+        let groups_subs = groups_ui.subscribe(cx);
         Self {
             app,
             vault: Some(vault),
@@ -127,6 +135,8 @@ impl Workspace {
             search,
             cards: true,
             selected: None,
+            group_filter: None,
+            groups_ui,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -137,7 +147,7 @@ impl Workspace {
             settings_ui,
             kc,
             change_password: None,
-            _subscriptions: subscriptions.into_iter().chain(settings_subs).collect(),
+            _subscriptions: subscriptions.into_iter().chain(settings_subs).chain(groups_subs).collect(),
         }
     }
 
@@ -394,6 +404,7 @@ impl Render for Workspace {
             Page::Settings => self.settings_page(window, cx).into_any_element(),
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
+            Page::Groups => self.groups_page(cx),
             Page::KnownHosts => self.known_hosts_page(cx),
             Page::Keychain => self.keychain_page(cx),
         };

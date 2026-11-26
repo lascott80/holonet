@@ -1,8 +1,9 @@
 //! New host and Edit host (NewHost.dc.html, EditHost.dc.html), with the
 //! milestone 2 fields: label, address, port, tags, username, SSH key or
 //! password, keep-alive. Milestone 4 adds identities, the Tailscale address
-//! and route, and the jump host. Later milestones add group, startup snippet,
-//! SFTP folder and logging.
+//! and route, and the jump host. Milestone 5 adds the SFTP folder. Milestone
+//! 6 adds the group: route, jump host and sign-in can follow the group's
+//! defaults, shown "from group" until changed. Logging comes in milestone 7.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,7 +12,9 @@ use gpui::{
     Context, Entity, EventEmitter, IntoElement, PathPromptOptions, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
-use holonet_model::{Auth, Host, HostId, Identity, KeyId, KnownHost, Secret, StoredKey};
+use holonet_model::{
+    Auth, FromGroup, Group, GroupId, GroupKey, Host, HostId, Identity, KeyId, KnownHost, Secret, StoredKey,
+};
 use holonet_ssh::{ConnectError, KeyStatus, PresentedKey, algorithm_label, classify};
 
 use crate::theme::{self, TypeStyles};
@@ -80,6 +83,16 @@ pub struct HostForm {
     /// "Jump host": None, then these saved hosts (by name).
     jump_options: Vec<(HostId, String)>,
     jump_select: Entity<Select>,
+    /// "Group": No group, then these groups.
+    group_ids: Vec<GroupId>,
+    group_select: Entity<Select>,
+    /// Which fields follow the group. The host's own route (`route`), jump
+    /// host (`own_jump`) and sign-in are kept either way.
+    from_group: FromGroup,
+    own_jump: Option<HostId>,
+    /// The vault as it was when the form opened: groups, and resolving the
+    /// summary as connecting will.
+    vault: holonet_model::VaultData,
     /// The vault's hosts, to find a jump host's own jump hosts for the test.
     all_hosts: Vec<Host>,
     /// The last test reached this jump host rather than the host itself.
@@ -223,6 +236,20 @@ impl HostForm {
             )
         });
 
+        let mut groups: Vec<&Group> = data.groups.iter().collect();
+        groups.sort_by_key(|g| g.display_name().to_lowercase());
+        let group_ids: Vec<GroupId> = groups.iter().map(|g| g.id).collect();
+        let group_index = h.group.and_then(|g| group_ids.iter().position(|id| *id == g)).map_or(0, |i| i + 1);
+        let group_select = cx.new(|cx| {
+            Select::new(
+                cx,
+                std::iter::once(SharedString::from("No group"))
+                    .chain(groups.iter().map(|g| SharedString::from(g.display_name().to_string())))
+                    .collect(),
+                group_index,
+            )
+        });
+
         let mut subscriptions = Vec::new();
         for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase, &sftp_folder] {
             subscriptions.push(cx.subscribe_in(f, window, |this: &mut Self, _, e: &TextFieldEvent, window, cx| {
@@ -239,6 +266,25 @@ impl HostForm {
         }
         subscriptions.push(cx.observe(&identity_select, |_: &mut Self, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&jump_select, |this: &mut Self, _, cx| {
+            // Showing the group's jump host is following it; anything else
+            // chosen is this host's own.
+            let shown = this.jump_select.read(cx).selected();
+            if !(this.follows(FollowField::Jump, cx) && shown == this.jump_index(this.group_jump(cx))) {
+                this.own_jump = this.selected_jump(cx).map(|(id, _)| *id);
+                // Without a group there is nothing to stop following.
+                if this.selected_group(cx).is_some() {
+                    this.from_group.jump_host = false;
+                }
+            }
+            this.test = TestState::Idle;
+            cx.notify();
+        }));
+        subscriptions.push(cx.observe(&group_select, |this: &mut Self, _, cx| {
+            // A new host follows its first group's sign-in too.
+            if this.original.is_none() && this.selected_group(cx).is_some() {
+                this.from_group.key = true;
+            }
+            this.show_jump(cx);
             this.test = TestState::Idle;
             cx.notify();
         }));
@@ -251,7 +297,12 @@ impl HostForm {
         } else {
             label.read(cx).focus(window);
         }
-        Self {
+        let mut form = Self {
+            group_ids,
+            group_select,
+            from_group: h.from_group,
+            own_jump: h.jump_host,
+            vault: data.clone(),
             save_password: host.is_none() || saved_password.is_some(),
             save_passphrase: host.is_none() || saved_passphrase.is_some(),
             forget_passphrase: false,
@@ -287,6 +338,99 @@ impl HostForm {
             runtime,
             delete_dialog: None,
             _subscriptions: subscriptions,
+        };
+        form.show_jump(cx);
+        form
+    }
+
+    fn selected_group(&self, cx: &Context<Self>) -> Option<&Group> {
+        let index = self.group_select.read(cx).selected().checked_sub(1)?;
+        self.group_ids.get(index).and_then(|id| self.vault.group(*id))
+    }
+
+    /// Whether a field currently follows the chosen group.
+    fn follows(&self, field: FollowField, cx: &Context<Self>) -> bool {
+        self.selected_group(cx).is_some()
+            && match field {
+                FollowField::Route => self.from_group.route,
+                FollowField::Jump => self.from_group.jump_host,
+                FollowField::Key => self.from_group.key && self.auth != 2,
+            }
+    }
+
+    /// The group's jump host for this host (never the host itself).
+    fn group_jump(&self, cx: &Context<Self>) -> Option<HostId> {
+        let own = self.original.as_ref().map(|h| h.id);
+        self.selected_group(cx).and_then(|g| g.jump_host).filter(|j| Some(*j) != own)
+    }
+
+    fn jump_index(&self, jump: Option<HostId>) -> usize {
+        jump.and_then(|id| self.jump_options.iter().position(|(j, _)| *j == id)).map_or(0, |i| i + 1)
+    }
+
+    /// Show the jump host in use: the group's while following it, otherwise
+    /// the host's own.
+    fn show_jump(&mut self, cx: &mut Context<Self>) {
+        let jump = if self.follows(FollowField::Jump, cx) { self.group_jump(cx) } else { self.own_jump };
+        let index = self.jump_index(jump);
+        self.jump_select.update(cx, |s, cx| s.set_selected(index, cx));
+    }
+
+    /// The route in use: the group's while following it.
+    fn route_in_use(&self, cx: &Context<Self>) -> holonet_model::Route {
+        match self.selected_group(cx) {
+            Some(g) if self.from_group.route => g.route,
+            _ => ROUTES[self.route.min(2)],
+        }
+    }
+
+    /// "Use group default" for a field.
+    fn use_group_default(&mut self, field: FollowField, cx: &mut Context<Self>) {
+        match field {
+            FollowField::Route => self.from_group.route = true,
+            FollowField::Jump => {
+                self.from_group.jump_host = true;
+                self.show_jump(cx);
+            }
+            FollowField::Key => self.from_group.key = true,
+        }
+        self.test = TestState::Idle;
+        cx.notify();
+    }
+
+    /// A field label with "from group" while the field follows the group,
+    /// or "Use group default" once it has its own value.
+    fn inherit_label(&self, label: &'static str, field: FollowField, cx: &mut Context<Self>) -> gpui::Div {
+        let row = div().flex().items_center().gap(theme::SPACE_3).child(crate::ui::field_label(label));
+        let Some(group) = self.selected_group(cx) else { return row };
+        if self.follows(field, cx) {
+            row.child(
+                div()
+                    .text_meta()
+                    .text_color(theme::accent())
+                    .child(SharedString::from(format!("from {}", group.display_name()))),
+            )
+        } else {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("use-group-{label}")))
+                    .text_meta()
+                    .text_color(theme::accent())
+                    .cursor_pointer()
+                    .child("Use group default")
+                    .on_click(cx.listener(move |this, _, _, cx| this.use_group_default(field, cx))),
+            )
+        }
+    }
+
+    /// The group's sign-in, as the form says it.
+    fn group_sign_in(&self, group: &Group) -> String {
+        match group.key {
+            GroupKey::AskEachTime => "a password asked on connect".into(),
+            GroupKey::Key(id) => match self.keys.iter().find(|k| k.id == id) {
+                Some(k) => format!("the key {} ({})", k.name, algorithm_label(&k.algorithm)),
+                None => "a key that was deleted from the vault".into(),
+            },
         }
     }
 
@@ -325,13 +469,15 @@ impl HostForm {
         let tailscale = self.text(&self.tailscale, cx);
         host.tailscale_address = (!tailscale.is_empty()).then_some(tailscale);
         host.route = ROUTES[self.route.min(2)];
+        host.group = self.selected_group(cx).map(|g| g.id);
+        host.from_group = self.from_group;
         host.username = self.text(&self.username, cx);
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         host.keep_alive = self.keep_alive;
         let folder = self.text(&self.sftp_folder, cx);
         host.sftp_folder = (!folder.is_empty()).then_some(folder);
-        host.jump_host = self.selected_jump(cx).map(|(id, _)| *id);
+        host.jump_host = self.own_jump;
         host.identity = self.selected_identity(cx).map(|i| i.id);
         if let Some(identity) = self.selected_identity(cx) {
             // The summary and equivalent command show who signs in.
@@ -371,7 +517,16 @@ impl HostForm {
         if self.port(cx).is_none() && !problems.iter().any(|p| p.contains("port")) {
             problems.push("Use a port from 1 to 65535.".into());
         }
-        if self.auth == 0 && self.selected_key(cx).is_none() {
+        let group_key = self.selected_group(cx).map(|g| g.key).filter(|_| self.follows(FollowField::Key, cx));
+        if let Some(GroupKey::Key(id)) = group_key
+            && !self.keys.iter().any(|k| k.id == id)
+        {
+            problems.push(
+                "The group's key was deleted from the vault. Choose another key for the group, or use this host's own sign-in."
+                    .into(),
+            );
+        }
+        if group_key.is_none() && self.auth == 0 && self.selected_key(cx).is_none() {
             problems.push(if self.key_missing {
                 DELETED_KEY_PROBLEM.into()
             } else {
@@ -481,10 +636,13 @@ impl HostForm {
             return;
         }
         // Behind a jump host, this PC reaches only the first hop: test that.
-        let first_hop = self.selected_jump(cx).and_then(|(id, _)| {
-            let mut hop = self.all_hosts.iter().find(|h| h.id == *id)?;
+        let in_use = self.selected_jump(cx).map(|(id, _)| *id);
+        let first_hop = in_use.and_then(|id| {
+            let mut hop = self.all_hosts.iter().find(|h| h.id == id)?;
             let mut seen = vec![hop.id];
-            while let Some(next) = hop.jump_host.and_then(|j| self.all_hosts.iter().find(|h| h.id == j)) {
+            while let Some(next) =
+                self.vault.effective_jump(hop).and_then(|j| self.all_hosts.iter().find(|h| h.id == j))
+            {
                 if seen.contains(&next.id) {
                     break;
                 }
@@ -574,6 +732,17 @@ impl HostForm {
         if let Some(identity) = self.selected_identity(cx) {
             return format!("Identity {}", identity.name).into();
         }
+        if self.follows(FollowField::Key, cx)
+            && let Some(group) = self.selected_group(cx)
+        {
+            return match group.key {
+                GroupKey::AskEachTime => "Password, asked".into(),
+                GroupKey::Key(id) => match self.keys.iter().find(|k| k.id == id) {
+                    Some(k) => k.name.clone().into(),
+                    None => "Deleted key".into(),
+                },
+            };
+        }
         if self.auth == 1 {
             let saved = self.save_password && !self.password.read(cx).text().is_empty();
             if saved { "Password, saved".into() } else { "Password, asked on connect".into() }
@@ -617,6 +786,7 @@ impl Render for HostForm {
         // ------------------------------------------------------ fieldsets --
         let general = fieldset("General")
             .child(field("Label", self.label.clone(), None))
+            .child(div().w_full().max_w(px(360.)).child(field("Group", self.group_select.clone(), None)))
             .child(
                 div()
                     .flex()
@@ -639,23 +809,30 @@ impl Render for HostForm {
             .child({
                 let has_tailscale = host.tailscale().is_some();
                 let entity = cx.entity();
+                let in_use = self.route_in_use(cx);
                 let control = Segmented::new(
                     "route",
                     ROUTES.iter().map(|r| SharedString::from(route_label(*r))).collect(),
-                    if has_tailscale { self.route } else { 1 },
+                    if has_tailscale { ROUTES.iter().position(|r| *r == in_use).unwrap_or(0) } else { 1 },
                 )
                 .on_change(move |i, _, cx| {
                     entity.update(cx, |f, cx| {
                         f.route = i;
+                        f.from_group.route = false;
                         cx.notify()
                     })
                 });
-                let help = route_help(host.effective_route(), has_tailscale, self.fallback_secs);
+                let shown = if has_tailscale { in_use } else { holonet_model::Route::Primary };
+                let help = route_help(shown, has_tailscale, self.fallback_secs);
                 div()
                     .flex()
                     .flex_col()
                     .gap(theme::SPACE_2)
-                    .child(crate::ui::field_label("Connect using"))
+                    .child(if has_tailscale {
+                        self.inherit_label("Connect using", FollowField::Route, cx)
+                    } else {
+                        crate::ui::field_label("Connect using")
+                    })
                     // Without a Tailscale address the route is Primary (NewHost.dc.html).
                     .when(has_tailscale, |d| d.child(control))
                     .child(crate::ui::field_help(help, false))
@@ -680,11 +857,32 @@ impl Render for HostForm {
             }
         });
         let identity = self.selected_identity(cx).cloned();
+        let follows_key = self.follows(FollowField::Key, cx);
+        let auth_label = if identity.is_none() {
+            self.inherit_label("Authentication", FollowField::Key, cx)
+        } else {
+            crate::ui::field_label("Authentication")
+        };
         let mut credentials = fieldset("Credentials")
             // An identity brings its own username.
             .when(identity.is_none(), |d| d.child(field("Username", self.username.clone(), None)))
-            .child(field("Authentication", auth_choice, None));
-        if self.auth == 2 {
+            .child(div().flex().flex_col().gap(px(6.)).child(auth_label).when(!follows_key, |d| d.child(auth_choice)));
+        if follows_key && let Some(group) = self.selected_group(cx) {
+            let text = format!(
+                "Signs in with {}, the {} group's default. Change it on the Groups page, or give this host its own sign-in.",
+                self.group_sign_in(group),
+                group.display_name()
+            );
+            credentials = credentials
+                .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(text)))
+                .child(div().flex().child(Button::secondary("own-sign-in", "Use this host's own sign-in").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.from_group.key = false;
+                        this.test = TestState::Idle;
+                        cx.notify()
+                    }),
+                )));
+        } else if self.auth == 2 {
             let how = identity.as_ref().map(|i| match &i.auth {
                 Auth::Password { saved: Some(_) } => "a password stored in the vault".to_string(),
                 Auth::Password { saved: None } => "a password asked on connect".to_string(),
@@ -797,6 +995,11 @@ impl Render for HostForm {
         }
 
         let jump_name = self.selected_jump(cx).map(|(_, name)| name.clone());
+        // The host as it will connect: the group's values where it follows them.
+        let mut preview = host.clone();
+        preview.route = self.route_in_use(cx);
+        let group_name: SharedString =
+            self.selected_group(cx).map_or_else(|| "No group".into(), |g| g.display_name().to_string().into());
         let connection = fieldset("Connection")
             // NewHost.dc.html: None, or a saved host.
             // NewHost.dc.html: Jump host and Default SFTP folder side by side.
@@ -805,11 +1008,17 @@ impl Render for HostForm {
                     .flex()
                     .flex_wrap()
                     .gap(theme::SPACE_4)
-                    .child(div().flex_grow().flex_basis(px(220.)).max_w(px(360.)).child(field(
-                        "Jump host",
-                        self.jump_select.clone(),
-                        None,
-                    )))
+                    .child(
+                        div()
+                            .flex_grow()
+                            .flex_basis(px(220.))
+                            .max_w(px(360.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(self.inherit_label("Jump host", FollowField::Jump, cx))
+                            .child(self.jump_select.clone()),
+                    )
                     .child(div().flex_grow().flex_basis(px(220.)).child(field(
                         "Default SFTP folder",
                         self.sftp_folder.clone(),
@@ -843,7 +1052,7 @@ impl Render for HostForm {
                     .flex_col()
                     .gap(theme::SPACE_2)
                     .child(section_label("Equivalent command"))
-                    .child(code_box(host.ssh_command_via(jump_name.as_deref()))),
+                    .child(code_box(preview.ssh_command_via(jump_name.as_deref()))),
             )
             .child(key_values(vec![
                 ("Authentication".into(), self.auth_summary(cx).into_any_element()),
@@ -855,7 +1064,8 @@ impl Render for HostForm {
                     "Tailscale address".into(),
                     SharedString::from(host.tailscale().unwrap_or("Not set").to_string()).into_any_element(),
                 ),
-                ("Connect using".into(), route_label(host.effective_route()).into_any_element()),
+                ("Group".into(), group_name.into_any_element()),
+                ("Connect using".into(), route_label(preview.effective_route()).into_any_element()),
                 ("Keep alive".into(), (if self.keep_alive { "On" } else { "Off" }).into_any_element()),
             ]));
         for problem in &problems {
@@ -1006,4 +1216,12 @@ impl Render for HostForm {
 
 pub fn host_name(host: &Host) -> String {
     host.display_name().to_string()
+}
+
+/// The fields a host can take from its group.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FollowField {
+    Route,
+    Jump,
+    Key,
 }

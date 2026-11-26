@@ -193,6 +193,25 @@ impl HolonetApp {
         self.workspace().and_then(|w| w.read(cx).vault_data())
     }
 
+    /// A saved host's group, read from the vault each time so renaming or
+    /// recoloring a group shows at once. `None` when it has no group, or
+    /// while the vault is locked (session tabs are hidden then).
+    /// The group whose "Ask each time" a host's sign-in follows, by name:
+    /// its password is asked on every connection and never saved.
+    pub fn asks_each_time(&self, host: holonet_model::HostId, cx: &App) -> Option<SharedString> {
+        let data = self.vault_data(cx)?;
+        let host = data.host(host)?;
+        let group = data.host_group(host)?;
+        let has_identity = host.identity.and_then(|id| data.identity(id)).is_some();
+        (host.from_group.key && !has_identity && group.key == holonet_model::GroupKey::AskEachTime)
+            .then(|| group.display_name().to_string().into())
+    }
+
+    pub fn group_tag(&self, host: holonet_model::HostId, cx: &App) -> Option<crate::workspace::GroupTag> {
+        let data = self.vault_data(cx)?;
+        crate::workspace::GroupTag::of(data, data.host(host)?)
+    }
+
     /// Change the vault and save it (no-op while locked).
     pub fn update_vault(&mut self, change: impl FnOnce(&mut VaultData) + 'static, cx: &mut Context<Self>) {
         if let Some(w) = self.workspace().cloned() {
@@ -661,12 +680,13 @@ impl Render for HolonetApp {
                 .enumerate()
                 .map(|(i, t)| {
                     let t = t.read(cx);
+                    let host = t.active_pane().read(cx).host.id;
                     TabInfo {
                         id: SharedString::from(format!("session-{i}")).into(),
                         name: t.name(cx),
                         kind: if t.is_files(cx) { TabKind::Sftp } else { TabKind::Terminal },
                         state: t.state(cx),
-                        color: theme::no_group(),
+                        color: crate::workspace::GroupTag::color_of(self.group_tag(host, cx).as_ref()),
                         active: self.active == Some(i),
                     }
                 })

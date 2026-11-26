@@ -1080,7 +1080,9 @@ impl Pane {
                     TextFieldEvent::Cancelled => this.answer_secret(false, cx),
                     TextFieldEvent::Changed => {}
                 }));
-                let save = !matches!(request, SecretRequest::Challenge { .. });
+                // A group that asks each time never has its password saved.
+                let asks = matches!(request, SecretRequest::Password { .. }) && self.group_asks(hop, cx).is_some();
+                let save = !matches!(request, SecretRequest::Challenge { .. }) && !asks;
                 self.state = State::Secret { hop, request, field, save, reply: Some(reply) };
                 self.focus_pending = true;
             }
@@ -1865,6 +1867,12 @@ impl Pane {
         self.center_card(card).into_any_element()
     }
 
+    /// The group whose "Ask each time" this hop's sign-in follows.
+    fn group_asks(&self, hop: usize, cx: &gpui::App) -> Option<SharedString> {
+        let host = self.hop_host(hop).id;
+        self.app.upgrade().and_then(|app| app.read(cx).asks_each_time(host, cx))
+    }
+
     fn secret_view(
         &self,
         hop: usize,
@@ -1874,11 +1882,18 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (title, body, save_label): (SharedString, SharedString, Option<&str>) = match request {
-            SecretRequest::Password { user, host } => (
-                format!("Enter the password for {user}@{host}").into(),
-                "This host has no saved password.".into(),
-                Some("Save in the encrypted vault"),
-            ),
+            SecretRequest::Password { user, host } => match self.group_asks(hop, cx) {
+                Some(group) => (
+                    format!("Enter the password for {user}@{host}").into(),
+                    format!("The {group} group asks for the password each time, so it is not saved.").into(),
+                    None,
+                ),
+                None => (
+                    format!("Enter the password for {user}@{host}").into(),
+                    "This host has no saved password.".into(),
+                    Some("Save in the encrypted vault"),
+                ),
+            },
             SecretRequest::Passphrase { key_name } => (
                 format!("Enter the passphrase for {key_name}").into(),
                 "The key is protected with a passphrase.".into(),
@@ -2061,7 +2076,8 @@ impl Render for Pane {
         if !terminal_shown && self.terminal.read(cx).is_focused(window) {
             window.focus(&self.focus_handle);
         }
-        let color = theme::no_group();
+        let tag = self.app.upgrade().and_then(|app| app.read(cx).group_tag(self.host.id, cx));
+        let color = crate::workspace::GroupTag::color_of(tag.as_ref());
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
             _ if self.reconnect.is_some() => "Reconnecting".into(),
@@ -2162,7 +2178,7 @@ impl Render for Pane {
                             .gap(theme::SPACE_2)
                             .child(crate::ui::group_square(color))
                             .child(div().text_color(theme::ink()).font_weight(FontWeight::MEDIUM).child(self.name()))
-                            .child(div().text_color(color).child("No group")),
+                            .child(div().text_color(color).child(crate::workspace::GroupTag::name_of(tag.as_ref()))),
                     )
                     .child(
                         div()

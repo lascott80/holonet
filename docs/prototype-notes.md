@@ -1871,3 +1871,70 @@ fmt and clippy `-D warnings` pass. The host's home has only its usual files.
 - A copy of the milestone 5 test vault (8 hosts) opened in this build. `behind-a` connected through its jump host ("Through jump-a"). The copy was then removed.
 
 fmt, clippy `-D warnings` and all workspace tests pass (`holonet-model`: 22).
+
+## Milestone 6, phase 2: groups (26 Nov 2026)
+
+**Groups page** (`workspace/groups.rs`, Groups.dc.html), opened from "Manage groups" on the Hosts page, with the breadcrumb "Hosts / Groups" back:
+- **Group cards:** name, host count, and the Key, Jump host and Connect using defaults ("Automatic, Tailscale fallback" as drawn). The group's color is a 3px strip down the left edge.
+  - GPUI has one border color per element, so the strip is a div inside a clipped card, not `border-left`.
+- **The editor** (360px, so the six 44px swatches fit in one row):
+  - Name
+  - Color (Cyan, Violet, Mint, Gray, Rose, Lime; Rose #F29BB8 and Lime #B5D67F are the drawn swatches, named in `theme::group_color`)
+  - Key ("Ask each time" or a key), Jump host, Connect using
+  - "Warn before broadcast or multi-host snippets"
+  - Save group, and Delete group for a saved one
+- **Names** must be given and unique. Saving shows no notice: the card appearing or changing is the confirmation, and a notice pushed the editor's buttons off the panel.
+- **The delete prompt** follows the design: "Its hosts are kept and become ungrouped." With "Also delete its n hosts" ticked it says "The group and its hosts are removed. Their server keys stay in Known hosts." and the button becomes "Delete group and hosts".
+- **Not drawn:** "No groups yet" in a dashed box, and "New group" in the editor, with Cancel when other groups exist.
+
+**Hosts page:**
+- **The Groups row** (Main.dc.html): a card per group with a 2px color strip along the top and its host count, and "Manage groups".
+  - Clicking a card filters the hosts. The section label becomes the group's name with "Show all hosts"; clicking the card again also shows all.
+  - An empty group says "No hosts in this group" with "Show all hosts".
+- **The summary** reads "8 hosts in 2 groups".
+- **Group color and name** show on cards, list rows (a new Group column) and the detail panel's icon, plus a Group row in its details.
+- **The detail panel's route** says "From the Lab A group." when inherited; choosing a route there makes it the host's own.
+
+**Host form:**
+- A **Group** select under Label.
+- **Connect using, Jump host and Authentication follow the group's value while marked "from <group>"** next to their labels.
+  - Changing the route or jump host makes it the host's own, and the label becomes "Use group default", which returns it.
+  - For sign-in, following the group replaces the Authentication controls with "Signs in with the key holotest_ed25519 (Ed25519), the Lab A group's default. Change it on the Groups page, or give this host its own sign-in." and a "Use this host's own sign-in" button.
+  - An identity always signs in instead.
+- **Defaults:**
+  - Existing hosts keep their own sign-in when put in a group.
+  - A new host follows its first group's sign-in.
+  - Route and jump host follow by default (`FromGroup::default`).
+- **Following the jump host:** GPUI runs observers after the update, so a "changing it ourselves" flag cannot tell the form's own updates from the person's choice. The jump select's observer compares instead: showing the group's jump host is following, any other choice is the host's own.
+  - Choosing "No group" never marks a field as overridden.
+- **The summary and equivalent command show what connecting will use** (`ssh -J jump-a …` from the group). The summary has a Group row.
+- **A deleted group key** is reported: "The group's key was deleted from the vault. Choose another key for the group, or use this host's own sign-in."
+
+**Tabs, panes and SFTP:**
+- **Colors:** the tab's top edge, the pane's top edge and header, and the host's side of an SFTP tab take the group's color, and the pane header shows its name.
+- **Lookups are live:** `HolonetApp::group_tag(host)` reads the vault each time they draw, so renaming, recoloring or deleting a group shows at once in open tabs. Session tabs are hidden while locked, so nothing needs caching.
+
+**"Ask each time" and saving passwords:**
+- A host following a group's "Ask each time" gets a password prompt that says "The Lab A group asks for the password each time, so it is not saved." and offers no Save checkbox (`HolonetApp::asks_each_time`).
+- The first test showed the checkbox, and a saved password would have gone into the host's own sign-in, which the group's default ignores.
+
+**Shared control fix:** `Checkbox` now puts its label in a shrinkable box, so long labels wrap ("Warn before broadcast or multi-host snippets" was clipped at the panel's edge).
+
+**Taffy pitfall:** a grid item with `overflow_hidden` shrank to nothing (the first Groups row drew two lines). Without it, the strip rounds its own top corners.
+
+**Check** (release build, a copy of the milestone 5 test vault, the WSL test server; the copy was deleted afterwards):
+
+| Step | Result |
+| --- | --- |
+| Import the test server's key; create Lab A (Violet, that key, jump-a, Primary, warn) and Lab B (Mint, Ask each time, no jump, Automatic) | Both cards show their defaults; the Hosts page reads "8 hosts in 2 groups" |
+| Put wsl-b in Lab A, use the group's sign-in, Save and connect | Connected. Status bar "Key holotest_ed25519 · Through jump-a"; tab, pane edge and header violet, "wsl-b Lab A" |
+| Give wsl-b its own jump host (None), Save and connect | "Use group default" appeared and `-J` left the command. Connected directly, still with the group's key |
+| "Use group default" on the jump host | Back to "from Lab A", jump-a, `ssh -J jump-a …` |
+| Put wsl-a in Lab B, use the group's sign-in, connect | Password prompt despite wsl-a's own saved password, without Save (after the fix). Signed in with the typed password; tab mint |
+| Filter by Lab A | Only wsl-b, with "Lab A · Show all hosts" |
+| Recolor Lab A to Rose with wsl-b open | The open tab, pane edge and header dot turned rose |
+| Delete Lab B, keeping its host | The prompt changed its text and button when "Also delete its 1 host" was ticked. Without it, wsl-a stayed and its open tab turned gray "No group" |
+
+fmt, clippy `-D warnings` and all workspace tests pass.
+
+The gallery gets the swatches and group cards in phase 9 with the other milestone 6 controls.

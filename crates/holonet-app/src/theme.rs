@@ -191,3 +191,17 @@ pub const INACTIVE_TAB_EDGE_ALPHA: f32 = 0.45;
 pub fn no_group() -> Rgba {
     ink_faint()
 }
+
+/// A group's color. Cyan, Violet, Mint and Gray are tokens; Rose and Lime
+/// are the two extra swatches Groups.dc.html draws (#F29BB8, #B5D67F).
+pub fn group_color(color: holonet_model::GroupColor) -> Rgba {
+    use holonet_model::GroupColor;
+    match color {
+        GroupColor::Cyan => accent(),
+        GroupColor::Violet => group_violet(),
+        GroupColor::Mint => group_mint(),
+        GroupColor::Gray => group_gray(),
+        GroupColor::Rose => rgb(0xF29BB8),
+        GroupColor::Lime => rgb(0xB5D67F),
+    }
+}
