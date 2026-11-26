@@ -866,3 +866,43 @@ The message-only window is enough. `platform::watch_system` gains it in phase 8,
 
 ### (f) WSL on this PC's Tailscale address: not reachable
 A TCP connection to this PC's own Tailscale IPv4 address on port 2222 was refused. WSL runs in NAT mode, and only `localhost` is forwarded into it. So the WSL test server cannot stand in for "a host on the tailnet" without a change. How phase 6 tests the fallback is an open question for the owner, recorded in the plan once decided.
+
+## Milestone 4, phase 1: model and vault (25 Nov 2026)
+
+**Model** (`holonet-model`, schema 2):
+- **`Host`** gains:
+  - `tailscale_address` and `route` (Automatic, Primary or Tailscale). `effective_route()` is Primary when no Tailscale address is set, as the host form forces.
+  - `jump_host`, a saved host.
+  - `identity`, which replaces the host's own username and sign-in when set (`VaultData::sign_in`).
+  - A Tailscale address must pass the same check as the primary address.
+- **`ssh_command_via(jump)`** builds the drawn `ssh -J bastion-east deploy@10.30.0.9`. The target is the Tailscale address only under the Tailscale route.
+- **`Identity`** holds a name, a username and an `Auth`. `VaultData.identities` stores them.
+- **`StoredKey`** gains `comment` and `saved_passphrase`.
+- **`Settings`** gains `lock_when_windows_locks` (on) and `hello_unlock` (off until a Hello slot exists). `ConnectionSettings.fallback_wait` offers 2, 3, 5 or 10 s, default 3.
+- **`VaultData::jump_chain`** lists the hops in order. It refuses a loop, including a host as its own jump host, and reports a deleted hop.
+- **`key_users`** returns the hosts (directly or through an identity) and the identities that use a key, for the Keychain's Hosts column and the delete prompt.
+
+**Migration:**
+- Schema 1 saved a key's passphrase on each host (`Auth::Key.passphrase`). That field is still read, as `legacy_passphrase`, but never written.
+- `VaultData::migrate` moves the passphrase onto the key; when hosts disagree, the first one wins. Unlock runs it, and the next save writes schema 2.
+- The host form now saves the passphrase on the key, and a passphrase typed at a prompt and saved goes to the key too.
+
+**Vault** (`holonet-vault`):
+- A **`hello` slot** holds the Hello credential's name, a random 32-byte challenge, and the data key wrapped with XChaCha20-Poly1305 under SHA-256 of Hello's signature. The vault crate never calls Windows; the app passes the signature in.
+- `LockedVault::hello()` returns the credential and challenge to sign, and `unlock_with_hello(signature)` opens the vault.
+- `UnlockedVault::set_hello` adds or replaces the slot, and `remove_hello` removes it. Both save twice so the backup matches.
+- Changing the password now replaces only the password slot, so it keeps the Hello slot.
+- Files with a Hello slot are written as **format 2**, so a milestone 3 build says "saved by a newer version" instead of failing on the unknown slot. Without one, files stay format 1.
+
+**Checks:**
+- Unit tests, using a fake signer that returns the same bytes for the same challenge:
+  - the Hello round trip, including that another device's signature is refused and that the backup matches
+  - the password change keeping Hello
+  - removing Hello falling back to format 1
+  - schema 1 data migrating on unlock
+  - jump chains and loops
+  - routes and `-J`
+  - identity sign-in and key users
+  - a schema 1 vault's JSON migrating, with the passphrase written only once
+- Live, on a copy of milestone 3's test vault: unlocked, connected `wsl-test` with its passphrase-protected key and no prompt, closed, reopened and connected again with no prompt.
+- fmt, clippy, the unit tests (28, 13, 5, 10 and 16) and the WSL tests (10) pass.

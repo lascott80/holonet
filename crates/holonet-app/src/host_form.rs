@@ -20,9 +20,19 @@ use crate::ui::{
 };
 
 pub enum HostFormEvent {
-    Saved { host: Host, new_keys: Vec<StoredKey>, connect: bool },
+    /// `passphrase`: for an encrypted key, the passphrase to save on the key
+    /// (`None` inside clears it). Passphrases belong to keys (schema 2).
+    Saved {
+        host: Box<Host>,
+        new_keys: Vec<StoredKey>,
+        passphrase: Option<(KeyId, Option<Secret>)>,
+        connect: bool,
+    },
     Cancelled,
-    Deleted { id: HostId, forget_key: bool },
+    Deleted {
+        id: HostId,
+        forget_key: bool,
+    },
 }
 
 enum TestState {
@@ -92,7 +102,10 @@ impl HostForm {
         let username = text(cx, "e.g. root", h.username.clone(), true);
         let (auth, saved_password, key_id, saved_passphrase) = match &h.auth {
             Auth::Password { saved } => (1, saved.clone(), None, None),
-            Auth::Key { key_id, passphrase } => (0, None, Some(*key_id), passphrase.clone()),
+            Auth::Key { key_id, .. } => {
+                let saved = keys.iter().find(|k| k.id == *key_id).and_then(|k| k.saved_passphrase.clone());
+                (0, None, Some(*key_id), saved)
+            }
         };
         // A new host defaults to a key when the vault has one.
         let auth = if host.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
@@ -186,16 +199,16 @@ impl HostForm {
             let password = self.password.read(cx).text().to_string();
             Auth::Password { saved: (self.save_password && !password.is_empty()).then(|| Secret::new(password)) }
         } else {
-            let key_id = self.selected_key(cx).map(|k| k.id).unwrap_or_default();
-            let encrypted = self.selected_key(cx).is_some_and(|k| k.encrypted);
-            let passphrase = self.passphrase.read(cx).text().to_string();
-            Auth::Key {
-                key_id,
-                passphrase: (encrypted && self.save_passphrase && !passphrase.is_empty())
-                    .then(|| Secret::new(passphrase)),
-            }
+            Auth::key(self.selected_key(cx).map(|k| k.id).unwrap_or_default())
         };
         host
+    }
+
+    /// The passphrase to save on the chosen key, when it has one.
+    fn key_passphrase(&self, cx: &Context<Self>) -> Option<(KeyId, Option<Secret>)> {
+        let key = self.selected_key(cx).filter(|k| self.auth == 0 && k.encrypted)?;
+        let passphrase = self.passphrase.read(cx).text().to_string();
+        Some((key.id, (self.save_passphrase && !passphrase.is_empty()).then(|| Secret::new(passphrase))))
     }
 
     /// Problems that stop saving, as interface text.
@@ -225,7 +238,8 @@ impl HostForm {
                 Auth::Password { .. } => None,
             };
             let new_keys = self.new_keys.iter().filter(|k| Some(k.id) == used).cloned().collect();
-            cx.emit(HostFormEvent::Saved { host, new_keys, connect });
+            let passphrase = self.key_passphrase(cx);
+            cx.emit(HostFormEvent::Saved { host: Box::new(host), new_keys, passphrase, connect });
         }
         cx.notify();
     }
@@ -274,7 +288,9 @@ impl HostForm {
                             algorithm: info.algorithm,
                             private_key: Secret::new(text),
                             encrypted: info.encrypted,
+                            comment: info.public_key.splitn(3, ' ').nth(2).unwrap_or_default().trim().to_string(),
                             public_key: info.public_key,
+                            saved_passphrase: None,
                             source: Some(path.display().to_string()),
                             imported_at: Timestamp::now(),
                         };

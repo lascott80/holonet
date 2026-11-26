@@ -161,12 +161,17 @@ impl Workspace {
             window,
             |this: &mut Self, _, event: &HostFormEvent, window, cx| {
                 match event {
-                    HostFormEvent::Saved { host, new_keys, connect } => {
-                        let (host, new_keys) = (host.clone(), new_keys.clone());
+                    HostFormEvent::Saved { host, new_keys, passphrase, connect } => {
+                        let (host, new_keys, passphrase) = ((**host).clone(), new_keys.clone(), passphrase.clone());
                         let id = host.id;
                         this.save(
                             move |d| {
                                 d.keys.extend(new_keys);
+                                if let Some((key_id, secret)) = passphrase
+                                    && let Some(key) = d.key_mut(key_id)
+                                {
+                                    key.saved_passphrase = secret;
+                                }
                                 match d.host_mut(id) {
                                     Some(existing) => *existing = host,
                                     None => d.hosts.push(host),

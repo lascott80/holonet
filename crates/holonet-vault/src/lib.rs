@@ -17,7 +17,15 @@
 //!
 //! - `password` (milestone 2): Argon2id over the vault password, with the salt
 //!   and cost stored in the slot so they can be raised later.
-//! - Windows Hello (milestone 4) adds a second slot without touching the body.
+//! - `hello` (milestone 4): SHA-256 of a Windows Hello signature over a random
+//!   challenge stored in the slot. Hello's key signs the same challenge the
+//!   same way every time (milestone 4 phase 0), so the signature is a stable
+//!   secret that only Hello on this PC can produce. This crate never calls
+//!   Windows: the app asks Hello for the signature and passes it in.
+//!
+//! Files with a Hello slot are written as format 2, so older builds report
+//! "saved by a newer version" instead of failing on the unknown slot.
+//! Files without one stay format 1.
 //!
 //! Every save writes a fresh body nonce. Saves are atomic: the new file is
 //! written beside the old one and renamed over it, and the previous good file
@@ -40,12 +48,14 @@ use zeroize::{Zeroize, Zeroizing};
 pub use holonet_model;
 
 const MAGIC: &[u8; 8] = b"HOLONETV";
-/// Current file format version.
-pub const FORMAT_VERSION: u16 = 1;
+/// Newest file format version this build reads and writes.
+pub const FORMAT_VERSION: u16 = 2;
 /// Minimum vault password length in characters (owner decision, 25 Nov 2026).
 pub const MIN_PASSWORD_LEN: usize = 8;
 /// Associated data for wrapping the data key in a password slot.
 const SLOT_AAD: &[u8] = b"holonet-vault/password-slot/v1";
+/// Associated data for wrapping the data key in a Windows Hello slot.
+const HELLO_AAD: &[u8] = b"holonet-vault/hello-slot/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -59,6 +69,10 @@ pub enum VaultError {
     NewerFormat(u16),
     #[error("wrong vault password")]
     WrongPassword,
+    #[error("this vault has no Windows Hello key")]
+    NoHello,
+    #[error("Windows Hello's key did not open this vault")]
+    HelloRejected,
     #[error("the vault contents failed their integrity check")]
     Corrupt,
     #[error("the vault password must be at least {MIN_PASSWORD_LEN} characters")]
@@ -108,6 +122,54 @@ enum Slot {
         #[serde(with = "b64")]
         wrapped_key: Vec<u8>,
     },
+    Hello {
+        /// Name of the Hello key credential (`KeyCredentialManager`).
+        credential: String,
+        #[serde(with = "b64")]
+        challenge: Vec<u8>,
+        #[serde(with = "b64")]
+        nonce: Vec<u8>,
+        #[serde(with = "b64")]
+        wrapped_key: Vec<u8>,
+    },
+}
+
+/// What the app needs to ask Windows Hello for a vault's key: the
+/// credential's name and the challenge to sign.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloRequest {
+    pub credential: String,
+    pub challenge: Vec<u8>,
+}
+
+/// A new random challenge for [`UnlockedVault::set_hello`].
+pub fn new_hello_challenge() -> Vec<u8> {
+    random::<32>().to_vec()
+}
+
+/// The key-encryption key from a Hello signature.
+fn hello_kek(signature: &[u8]) -> DataKey {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(signature);
+    let mut kek = Zeroizing::new([0u8; 32]);
+    kek.copy_from_slice(&digest);
+    kek
+}
+
+/// How an unlock proves itself.
+#[derive(Clone, Copy)]
+enum Proof<'a> {
+    Password(&'a str),
+    HelloSignature(&'a [u8]),
+}
+
+fn hello_request(slots: &[Slot]) -> Option<HelloRequest> {
+    slots.iter().find_map(|s| match s {
+        Slot::Hello { credential, challenge, .. } => {
+            Some(HelloRequest { credential: credential.clone(), challenge: challenge.clone() })
+        }
+        Slot::Password { .. } => None,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -277,21 +339,37 @@ impl LockedVault {
         &self.path
     }
 
+    /// The Windows Hello credential and challenge, if the vault has a Hello
+    /// slot. Read from the main file, or the backup when only it is readable.
+    pub fn hello(&self) -> Option<HelloRequest> {
+        let bytes = self.main.as_ref().or(self.backup.as_ref())?;
+        parse(bytes).ok().and_then(|(_, header, _)| hello_request(&header.slots))
+    }
+
     /// Decrypt with the vault password. If the main file's contents fail
     /// their integrity check, the backup is tried; the result says so in
     /// [`UnlockedVault::restored_from_backup`].
     pub fn unlock(&self, password: &str) -> Result<UnlockedVault> {
+        self.unlock_with(Proof::Password(password))
+    }
+
+    /// Decrypt with Windows Hello's signature over [`Self::hello`]'s challenge.
+    pub fn unlock_with_hello(&self, signature: &[u8]) -> Result<UnlockedVault> {
+        self.unlock_with(Proof::HelloSignature(signature))
+    }
+
+    fn unlock_with(&self, proof: Proof) -> Result<UnlockedVault> {
         match (&self.main, &self.backup) {
-            (Some(main), backup) => match self.unlock_bytes(main, password) {
+            (Some(main), backup) => match self.unlock_bytes(main, proof) {
                 Err(VaultError::Corrupt) if backup.is_some() => {
-                    let mut vault = self.unlock_bytes(backup.as_ref().unwrap(), password)?;
+                    let mut vault = self.unlock_bytes(backup.as_ref().unwrap(), proof)?;
                     vault.restored_from_backup = true;
                     Ok(vault)
                 }
                 other => other,
             },
             (None, Some(backup)) => {
-                let mut vault = self.unlock_bytes(backup, password)?;
+                let mut vault = self.unlock_bytes(backup, proof)?;
                 vault.restored_from_backup = true;
                 Ok(vault)
             }
@@ -299,30 +377,52 @@ impl LockedVault {
         }
     }
 
-    fn unlock_bytes(&self, bytes: &[u8], password: &str) -> Result<UnlockedVault> {
+    fn unlock_bytes(&self, bytes: &[u8], proof: Proof) -> Result<UnlockedVault> {
         let (aad, header, body) = parse(bytes)?;
+        let unwrap = |kek: &[u8; 32], slot_nonce: &[u8], wrapped: &[u8], slot_aad: &[u8]| -> Result<Option<DataKey>> {
+            match cipher(kek).decrypt(&nonce(slot_nonce)?, Payload { msg: wrapped, aad: slot_aad }) {
+                Ok(mut key) => {
+                    let array: [u8; 32] = key.as_slice().try_into().map_err(|_| VaultError::Corrupt)?;
+                    key.zeroize();
+                    Ok(Some(Zeroizing::new(array)))
+                }
+                Err(_) => Ok(None),
+            }
+        };
         let mut data_key = None;
         for slot in &header.slots {
-            let Slot::Password { kdf, salt, nonce: slot_nonce, wrapped_key } = slot;
-            let kek = derive_kek(password, salt, *kdf)?;
-            if let Ok(mut key) = cipher(&kek).decrypt(&nonce(slot_nonce)?, Payload { msg: wrapped_key, aad: SLOT_AAD })
-            {
-                let array: [u8; 32] = key.as_slice().try_into().map_err(|_| VaultError::Corrupt)?;
-                key.zeroize();
-                data_key = Some(Zeroizing::new(array));
+            data_key = match (slot, proof) {
+                (Slot::Password { kdf, salt, nonce: n, wrapped_key }, Proof::Password(password)) => {
+                    unwrap(&*derive_kek(password, salt, *kdf)?, n, wrapped_key, SLOT_AAD)?
+                }
+                (Slot::Hello { nonce: n, wrapped_key, .. }, Proof::HelloSignature(signature)) => {
+                    unwrap(&hello_kek(signature), n, wrapped_key, HELLO_AAD)?
+                }
+                _ => None,
+            };
+            if data_key.is_some() {
                 break;
             }
         }
-        let data_key = data_key.ok_or(VaultError::WrongPassword)?;
+        let data_key = match (data_key, proof) {
+            (Some(key), _) => key,
+            (None, Proof::Password(_)) => return Err(VaultError::WrongPassword),
+            (None, Proof::HelloSignature(_)) if hello_request(&header.slots).is_none() => {
+                return Err(VaultError::NoHello);
+            }
+            (None, Proof::HelloSignature(_)) => return Err(VaultError::HelloRejected),
+        };
         let plaintext = Zeroizing::new(
             cipher(&data_key)
                 .decrypt(&nonce(&header.body_nonce)?, Payload { msg: body, aad })
                 .map_err(|_| VaultError::Corrupt)?,
         );
-        let data: VaultData = serde_json::from_slice(&plaintext).map_err(|_| VaultError::Corrupt)?;
+        let mut data: VaultData = serde_json::from_slice(&plaintext).map_err(|_| VaultError::Corrupt)?;
         if data.schema > holonet_model::SCHEMA_VERSION {
             return Err(VaultError::NewerFormat(FORMAT_VERSION));
         }
+        // Older data is brought up to date in memory; the next save writes it.
+        data.migrate();
         Ok(UnlockedVault { path: self.path.clone(), slots: header.slots, data_key, data, restored_from_backup: false })
     }
 }
@@ -385,9 +485,10 @@ impl UnlockedVault {
         let body_nonce = random::<24>();
         let header = Header { slots: self.slots.clone(), body_nonce: body_nonce.to_vec() };
         let header_json = serde_json::to_vec(&header).map_err(|e| VaultError::Format(e.to_string()))?;
+        let version: u16 = if self.has_hello() { 2 } else { 1 };
         let mut out = Vec::with_capacity(header_json.len() + 1024);
         out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&version.to_le_bytes());
         out.extend_from_slice(&(header_json.len() as u32).to_le_bytes());
         out.extend_from_slice(&header_json);
         let plaintext = Zeroizing::new(serde_json::to_vec(&self.data).map_err(|e| VaultError::Format(e.to_string()))?);
@@ -410,15 +511,54 @@ impl UnlockedVault {
     pub fn change_password_with(&mut self, new_password: &str, kdf: KdfParams) -> Result<()> {
         check_password(new_password)?;
         let slot = password_slot(new_password, &self.data_key, kdf)?;
-        let old = std::mem::replace(&mut self.slots, vec![slot]);
+        let mut slots: Vec<Slot> = self.slots.iter().filter(|s| !matches!(s, Slot::Password { .. })).cloned().collect();
+        slots.insert(0, slot);
+        self.replace_slots(slots)
+    }
+
+    /// Save with new slots, twice, so the backup opens the same way as the
+    /// main file. Otherwise a damaged main file right after the change would
+    /// need the old way in to recover. On failure the old slots are kept.
+    fn replace_slots(&mut self, slots: Vec<Slot>) -> Result<()> {
+        let old = std::mem::replace(&mut self.slots, slots);
         if let Err(e) = self.save() {
             self.slots = old;
             return Err(e);
         }
-        // Save once more so the backup also opens with the new password.
-        // Otherwise a damaged main file right after the change would need the
-        // old password to recover.
         self.save()
+    }
+
+    pub fn has_hello(&self) -> bool {
+        hello_request(&self.slots).is_some()
+    }
+
+    /// The Hello credential and challenge, if there is a Hello slot.
+    pub fn hello(&self) -> Option<HelloRequest> {
+        hello_request(&self.slots)
+    }
+
+    /// Add a Windows Hello slot (replacing any earlier one). The app creates
+    /// the Hello credential, signs `challenge` (from [`new_hello_challenge`])
+    /// and passes the signature here. The password slot stays.
+    pub fn set_hello(&mut self, credential: &str, challenge: &[u8], signature: &[u8]) -> Result<()> {
+        let slot_nonce = random::<24>();
+        let wrapped_key = cipher(&hello_kek(signature))
+            .encrypt(&slot_nonce.into(), Payload { msg: self.data_key.as_ref(), aad: HELLO_AAD })
+            .map_err(|_| VaultError::Format("could not wrap the data key".into()))?;
+        let mut slots: Vec<Slot> = self.slots.iter().filter(|s| !matches!(s, Slot::Hello { .. })).cloned().collect();
+        slots.push(Slot::Hello {
+            credential: credential.to_string(),
+            challenge: challenge.to_vec(),
+            nonce: slot_nonce.to_vec(),
+            wrapped_key,
+        });
+        self.replace_slots(slots)
+    }
+
+    /// Remove the Windows Hello slot. The vault password still opens the vault.
+    pub fn remove_hello(&mut self) -> Result<()> {
+        let slots = self.slots.iter().filter(|s| !matches!(s, Slot::Hello { .. })).cloned().collect();
+        self.replace_slots(slots)
     }
 
     /// Lock: wipe the key and contents, keeping only the path.
@@ -616,7 +756,7 @@ mod tests {
         UnlockedVault::create_with(&path, "correct horse", custom).unwrap();
         let bytes = fs::read(&path).unwrap();
         let (_, header, _) = parse(&bytes).unwrap();
-        let Slot::Password { kdf, .. } = &header.slots[0];
+        let Slot::Password { kdf, .. } = &header.slots[0] else { panic!("password slot first") };
         assert_eq!(*kdf, custom);
         assert!(LockedVault::open(&path).unwrap().unlock("correct horse").is_ok());
     }
@@ -625,5 +765,76 @@ mod tests {
     fn missing_vault_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(LockedVault::open(&dir.path().join("none")), Err(VaultError::NotFound(_))));
+    }
+
+    /// Stands in for Windows Hello: the same "signature" for the same
+    /// challenge every time, different for another key.
+    fn fake_sign(device_secret: &[u8], challenge: &[u8]) -> Vec<u8> {
+        use sha2::Digest;
+        let mut sig = sha2::Sha256::digest([device_secret, challenge].concat()).to_vec();
+        sig.extend_from_slice(&sha2::Sha256::digest([challenge, device_secret].concat()));
+        sig
+    }
+
+    #[test]
+    fn hello_slot_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        vault.update(|d| d.hosts.push(Host::new("pi.local"))).unwrap();
+        assert!(!vault.has_hello());
+        let challenge = new_hello_challenge();
+        vault.set_hello("holonet-vault-test", &challenge, &fake_sign(b"this pc", &challenge)).unwrap();
+        let path = vault.lock();
+
+        let locked = LockedVault::open(&path).unwrap();
+        let request = locked.hello().expect("Hello slot");
+        assert_eq!(request, HelloRequest { credential: "holonet-vault-test".into(), challenge: challenge.clone() });
+        // The right signature opens it; the password still does too.
+        let opened = locked.unlock_with_hello(&fake_sign(b"this pc", &request.challenge)).unwrap();
+        assert_eq!(opened.data().hosts[0].address, "pi.local");
+        assert!(locked.unlock("correct horse").is_ok());
+        // Another device's signature does not.
+        assert!(matches!(
+            locked.unlock_with_hello(&fake_sign(b"other pc", &request.challenge)),
+            Err(VaultError::HelloRejected)
+        ));
+        // The backup opens with Hello as well (it was saved twice).
+        let backup = parse(&fs::read(backup_path(&path)).unwrap()).map(|(_, h, _)| hello_request(&h.slots)).unwrap();
+        assert_eq!(backup, Some(request));
+        // Written as format 2.
+        assert_eq!(u16::from_le_bytes(fs::read(&path).unwrap()[8..10].try_into().unwrap()), 2);
+    }
+
+    #[test]
+    fn password_change_keeps_hello_and_removing_hello_keeps_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        let challenge = new_hello_challenge();
+        let signature = fake_sign(b"this pc", &challenge);
+        vault.set_hello("c", &challenge, &signature).unwrap();
+        vault.change_password_with("new password", KdfParams::insecure_for_tests()).unwrap();
+        assert!(vault.has_hello());
+        let path = vault.path().to_path_buf();
+        let locked = LockedVault::open(&path).unwrap();
+        assert!(locked.unlock_with_hello(&signature).is_ok());
+        assert!(matches!(locked.unlock("correct horse"), Err(VaultError::WrongPassword)));
+        let mut vault = locked.unlock("new password").unwrap();
+        vault.remove_hello().unwrap();
+        let locked = LockedVault::open(&path).unwrap();
+        assert!(locked.hello().is_none());
+        assert!(matches!(locked.unlock_with_hello(&signature), Err(VaultError::NoHello)));
+        assert!(locked.unlock("new password").is_ok());
+        // Back to format 1 without a Hello slot.
+        assert_eq!(u16::from_le_bytes(fs::read(&path).unwrap()[8..10].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn schema_1_data_is_migrated_on_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = new_vault(dir.path());
+        vault.update(|d| d.schema = 1).unwrap();
+        let path = vault.lock();
+        let opened = LockedVault::open(&path).unwrap().unlock("correct horse").unwrap();
+        assert_eq!(opened.data().schema, holonet_model::SCHEMA_VERSION);
     }
 }

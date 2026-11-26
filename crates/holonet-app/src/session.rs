@@ -538,13 +538,13 @@ impl Pane {
             } else {
                 saved.clone().or_else(|| self.session_secret(true))
             }),
-            (Auth::Key { passphrase, .. }, Some(key)) => Credential::Key {
+            (Auth::Key { .. }, Some(key)) => Credential::Key {
                 name: key.name.clone(),
                 private_key: key.private_key.clone(),
                 passphrase: if self.ask_passphrase {
                     None
                 } else {
-                    passphrase.clone().or_else(|| self.session_secret(false))
+                    key.saved_passphrase.clone().or_else(|| self.session_secret(false))
                 },
             },
             (Auth::Key { .. }, None) => {
@@ -763,25 +763,28 @@ impl Pane {
                 self.host.last_connected_at = Some(Timestamp::now());
                 let save = self.pending_save.take();
                 if let Some((is_password, secret)) = &save {
-                    // Keep this tab's copy of the host in step with the vault.
-                    match &mut self.host.auth {
-                        Auth::Password { saved } if *is_password => *saved = Some(secret.clone()),
-                        Auth::Key { passphrase, .. } if !*is_password => *passphrase = Some(secret.clone()),
+                    // Keep this tab's copies of the host and key in step with the vault.
+                    match (&mut self.host.auth, &mut self.key) {
+                        (Auth::Password { saved }, _) if *is_password => *saved = Some(secret.clone()),
+                        (Auth::Key { .. }, Some(key)) if !*is_password => key.saved_passphrase = Some(secret.clone()),
                         _ => {}
                     }
                 }
+                let key_id = self.key.as_ref().map(|k| k.id);
                 if let Some(app) = self.app.upgrade() {
                     app.update(cx, |app, cx| {
                         app.update_vault(
                             move |d| {
                                 if let Some(h) = d.host_mut(id) {
                                     h.last_connected_at = Some(Timestamp::now());
-                                    if let Some((is_password, secret)) = save {
-                                        match &mut h.auth {
-                                            Auth::Password { saved } if is_password => *saved = Some(secret),
-                                            Auth::Key { passphrase, .. } if !is_password => *passphrase = Some(secret),
-                                            _ => {}
+                                    match (save, &mut h.auth) {
+                                        (Some((true, secret)), Auth::Password { saved }) => *saved = Some(secret),
+                                        (Some((false, secret)), Auth::Key { .. }) => {
+                                            if let Some(key) = key_id.and_then(|k| d.key_mut(k)) {
+                                                key.saved_passphrase = Some(secret);
+                                            }
                                         }
+                                        _ => {}
                                     }
                                 }
                             },
