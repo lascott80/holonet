@@ -1763,3 +1763,58 @@ Carried forward, not tested or not built:
 - **The host's selection bar** wraps onto two lines at this window width (the design's bar wraps too).
 - **An identity whose key was deleted** opens its form with the first key selected (from milestone 4).
 - **Dragging out of the app to Explorer**: GPUI 0.2.2 has no drag source on Windows.
+
+## Milestone 6, phase 0: spikes (26 Nov 2026)
+
+The plan is `docs/milestone-6-plan.md`. **Owner decisions:**
+- each host with active forwarding rules gets its own background connection
+- "Run on n hosts" opens panes in a new tab
+- SSH agent sign-in and agent forwarding are in, with the owner starting the `ssh-agent` service (now Manual and running)
+- broadcast reaches the panes of the current tab
+
+The three spikes are examples in `holonet-ssh`: `m6_forward`, `m6_agent` and `m6_broadcast`. They drive russh 0.65.4 directly, so the library is unchanged until phase 3. They stay until phase 9.
+
+**(a) Forwarding** (`m6_forward`, release build, WSL server on loopback). The host served a folder with Python's `http.server` on its own 127.0.0.1:18080:
+
+| Check | Result |
+| --- | --- |
+| Local: a listener on this PC, `channel_open_direct_tcpip` per connection, 500 MB download | 540–574 MB/s; SHA-256 matched the host's |
+| Local: 50 small downloads at once | 50/50 correct in 2.8 s. The same 50 requests made on the host itself take 2.1 s: Python's server has a listen backlog of 5. One at a time they take about 12 ms each |
+| Local: 50 `direct-tcpip` opens at once with no traffic | 50 in 1.0 s (also against that backlog) |
+| Local: binding the same port again | `AddrInUse`, "Only one usage of each socket address … is normally permitted" (os error 10048) |
+| Remote: `tcpip_forward("127.0.0.1", 19000)`, the handler's `server_channel_open_forwarded_tcpip` connecting to a server on this PC, the host's curl fetching 300 MB | 639 MB/s, every byte arrived |
+| Remote: 20 requests at once from the host | 20 answers |
+| Remote: port 80 (privileged), and a port already forwarded | `Err(RequestDenied)` for both |
+| Remote: port 0 | `Ok(43427)`: the host picks and russh returns it |
+| Remote: `cancel_tcpip_forward`, then the host's curl | Connection refused (http code 000) |
+| Dynamic: a SOCKS5 server (CONNECT, no authentication) opening `direct-tcpip`; Windows `curl.exe --socks5-hostname` to `localhost:18080` | Works. The host resolved `localhost`. 500 MB at 682 MB/s |
+| Dynamic: a closed port on the host | The open fails with `ConnectFailed`; the reply code 5 makes curl say "cannot complete SOCKS5 connection … (5)" |
+
+Lessons:
+- **Forwarded channels come to the client handler,** keyed by the bound port. The phase 3 handler needs a route table it shares with the rules.
+- **`tcpip_forward` returns 0** when a fixed port is granted, and the chosen port when asked for 0.
+- **Harness:** `pkill -f 'http.server 18080'` inside a `bash -c` kills the shell running it, because the pattern appears in its own command line (even as `http[.]server`, when the same command line also starts the server). The spike tracks the server by PID file instead.
+
+**(b) Windows' OpenSSH agent** (`m6_agent`, `\.\pipe\openssh-ssh-agent`):
+
+| Check | Result |
+| --- | --- |
+| Agent not running (the service was stopped, then a made-up pipe name) | `AgentClient::connect_named_pipe` fails with `NotFound` (os error 2): the "agent is not running" message can key on it |
+| Add the test server's Ed25519 key, then list | Listed. The Windows agent returns identities **without their comments**, so Holonet shows a key's type and fingerprint, not a name |
+| Sign in with `authenticate_publickey_with(user, public_key, None, &mut agent)` | Signed in; Holonet never held the private key during sign-in |
+| `channel.agent_forward(true)` on a session channel, then `ssh-add -l` on the host | `SSH_AUTH_SOCK` was set, and the host listed the key's SHA-256 fingerprint. The handler's `server_channel_open_agent_forward` bridged the channel to a new pipe connection per request (`ClientOptions::new().open(PIPE)` + `copy_bidirectional`) |
+| Remove the key | The agent holds 0 keys afterwards, and `ssh-add -l` says "The agent has no identities." |
+
+- **The first run's key check compared whole `PublicKey` values,** which include the comment. It failed before the cleanup step and left the key in the agent. The second run, comparing `key_data()`, removed it.
+- **OpenSSH on the host makes `~/.ssh/agent/`** for forwarded agent sockets. The empty folder was removed afterwards.
+
+**(c) Broadcast** (`m6_broadcast`): four shells, each on its own connection as panes have, running `stty raw -echo; exec cat`, so every byte typed comes straight back:
+
+| Check | Result |
+| --- | --- |
+| 400 keystrokes sent to all four, one every 15 ms, one input message per pane in one loop | Every pane got all 400 back in order. Echo median 3.1–3.2 ms, 95th percentile 5.0–6.6 ms, worst 10–16 ms |
+| A 64 KB paste sent to all four at once | Intact in every pane after 8 ms |
+
+Sending the same bytes to each pane's existing input channel is enough; broadcast needs no new transport. The keystroke loop took 8.2 s rather than 6 s because Windows' timer rounds the 15 ms sleep up.
+
+fmt and clippy `-D warnings` pass. The host's home has only its usual files.
