@@ -3006,6 +3006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonet-import"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "hmac 0.13.0",
+ "sha1",
+]
+
+[[package]]
 name = "holonet-model"
 version = "0.1.0"
 dependencies = [

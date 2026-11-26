@@ -2360,3 +2360,49 @@ Cleanup: the downloaded exe and its folder, and the throwaway vault folder, were
 - `decisions.md` records where logs live.
 
 fmt, clippy `-D warnings` and the unit tests pass. `holonet-model` has 27 and `holonet-vault` 22, with new tests for the milestone 6 vault, history ageing, closing open records, update timing, log chunks, a torn chunk, tampering, orphans, backup export and logs across a password change.
+
+## Milestone 7, phase 2: `holonet-import` (26 Nov 2026)
+
+A new crate with three readers. It takes text and returns plain data: reading files, following `Include` and finding key files belong to the caller. Its dependencies (`base64`, `hmac`, `sha1`) were already in the lockfile through russh, so nothing new was downloaded.
+
+**`config`, OpenSSH `config` into hosts:**
+
+- **Settings read:** `HostName` (with `%h` and `%%`), `Port`, `User`, `IdentityFile`, `ProxyJump` (a chain, or `none`), `ForwardAgent` and `Compression`.
+  - Lines may be written `Keyword value`, `Keyword=value` or `Keyword = value`.
+  - Double and single quotes group words, and an unquoted `#` starting a word ends the line.
+- **Which value wins:** values are found the way `ssh` finds them. For each host name, every block that applies is read in file order:
+  - lines before the first `Host`
+  - `Host` blocks whose patterns match, with `*`, `?` and `!` negation
+  - The first value of each setting wins.
+  - So `Host *` at the end fills in what hosts left unset, and `Host *` at the start overrides them, as in `ssh`.
+  - `IdentityFile` collects every value in order.
+  - This corrects the plan, which said `Host *` applies to "the hosts after it".
+- **What becomes a host:** every name on a `Host` line without wildcards, in the order it first appears. Pattern names are not hosts: each one except `*` is listed with "Its settings are used for the hosts it matches."
+- **`Include`:** the caller's callback gets each argument as written and returns the files it names. Their lines go in place, so an `Include` inside a `Host` block adds to that block until the included file's own `Host`. Nesting stops at 16 levels, as in `ssh`, so files that include each other end.
+- **What is not imported, and how it is reported:**
+  - **Notes on the host they apply to:** `ProxyCommand`, the three kinds of forward, `CertificateFile`, a bad port, a `ForwardAgent` socket path, and an unreadable `ProxyJump`.
+  - **Listed once for the whole file:** `Match` blocks (with the settings in them), an unclosed quote, and every other setting name in a single "Holonet does not use these settings" line.
+
+**`known_hosts`:**
+
+- **What it reads:** `host`, `[host]:port` and hashed `|1|salt|hash` names, comma-separated, then the key type and key.
+- **Hashed names:** matched with HMAC-SHA1 as `ssh` writes them. Two lines hashed by OpenSSH 10.2's `ssh-keygen -H` in WSL are the test vectors, and they match by host and port, without case. Hashed names are kept as they were read and written back the same way.
+- **What it skips, counting each with a reason:**
+  - `@revoked` and `@cert-authority` lines
+  - wildcard and negated names (the other names on the same line are kept)
+  - lines without a key, and keys that are not base64
+- **`write` for export:** writes lowercase names (`[host]:port` when the port is not 22) under an "Exported from Holonet" comment. The output reads back.
+
+**`command`, Quick fill:**
+
+- **An `ssh` command line:**
+  - **Options read:** `-p`, `-l`, `-i`, `-J`, `-A`, `-a` and `-C`, grouped (`-AC`) or with an attached value (`-p2222`).
+  - **`-o`:** `Port`, `User`, `IdentityFile`, `ProxyJump`, `ForwardAgent` and `Compression`.
+  - **Destination:** `user@host` or `ssh://user@host:port`.
+  - **Order:** like `ssh`, options after the destination are read too, so the drawn `ssh -J bastion-east deploy@10.30.0.9 -p 22` fills port 22. The first other word after the destination starts the remote command, which is listed as unused with everything after it.
+  - **Which value wins:** `user@` over `-l`, and a URI's port over `-p`, as in `ssh`.
+  - **Anything else** is listed as written (`-L 5432:db:5432`, `-v`, `-o StrictHostKeyChecking=no`).
+- **A `Host` block** reads as config does. The first host gives the label and fields. Further hosts, further key files and unused settings are listed.
+- **Errors, with their messages:** empty text, no address, an unclosed quote, and a block of patterns only.
+
+`holonet-import` has 18 unit tests, covering `Include`, `Host *` in both places, patterns and negation, jump chains, hashed and ported names, skipped lines, export, and command lines in their forms. fmt and clippy `-D warnings` pass.
