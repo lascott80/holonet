@@ -1,0 +1,18 @@
+[package]
+name = "holonet-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "holonet"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow = "1.0.105"
+gpui.workspace = true
+holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
