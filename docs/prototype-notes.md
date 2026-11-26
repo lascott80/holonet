@@ -700,3 +700,42 @@ The pane's states now follow `ConnectStates.dc.html`. Each has its log lines at 
 | Edit host back to `holotest`, Save and connect | Retried in the same pane and connected; still one tab |
 
 Not reached by hand: "the saved password" wording. That path depends only on whether the attempt used the vault's password, and the typed-password case above shows the shared code.
+
+## Milestone 3, phase 7: automatic reconnect (25 Nov 2026)
+
+**Behaviour** (decisions.md: on, 5 attempts, scrollback kept, the shell restarts so nothing is replayed).
+- The terminal now reports `TerminalEvent::Lost(reason)` separately from `Ended`. The pane keeps its `TerminalView`, so the scrollback stays.
+- The pane shows the "Reconnecting" banner from ConnectStates.dc.html above the old output, which is dimmed to 75%:
+  - the cause in bold, then "Reconnecting, attempt n of 5." or "Attempt n of 5 failed. Trying again in n s."
+  - the last attempt's error underneath
+  - **Reconnect now** (enabled while waiting) and **Close tab** / **Close pane**
+  - the design's footnote, "Scrollback is kept. The shell session itself restarts after reconnecting."
+- Attempts wait 1, 2, 4, 8 and 16 s. Only network failures retry: refused, unresolved, network error or timed out. A refused sign-in shows the usual failure.
+- **A changed host key during the outage stops reconnecting** with the changed-key view, as on any connection (decisions.md: always stop).
+- While the vault is locked, a key cannot be checked, so the attempt waits and says "Unlock the vault so Holonet can check the host key."
+- After five failures: "Holonet could not reconnect to <name>. It tried 5 times. <last reason>", with Retry, Edit host and Close.
+- On success the terminal gets a dim separator line, "-- Reconnected at HH:MM. The shell restarted; the output above is from the previous session. --", then the new shell.
+- **Typed secrets.** A password or passphrase typed at a prompt is kept in the pane's memory once it works, and used again when reconnecting. It is dropped with the pane, and saved to the vault only if "Save in the encrypted vault" was ticked.
+- **Cause.**
+  - `platform::watch_system` registers the three Win32 callbacks from phase 0 (`PowerRegisterSuspendResumeNotification`, `NotifyIpInterfaceChange`, `NotifyNetworkConnectivityHintChange`) and passes the events to every pane.
+  - A drop within five minutes of a sleep or wake reads "Connection lost when this PC went to sleep."; after a network change, "Connection lost after a network change."
+  - Otherwise the text comes from the lost reason: "The server stopped answering." or "The connection was lost."
+  - A wake or network change while waiting starts the next attempt at once.
+- **Settings, Connection:** "Reconnect after sleep or network change", on by default. Off, a drop ends the session as before.
+
+**Checked against WSL:**
+
+| Check | Result |
+| --- | --- |
+| `kill -9 $PPID` in a live shell (drops the TCP connection) | Banner, then reconnected after about 1 s; old output and the separator line in scrollback; `ps` shows a single new login shell |
+| `systemctl stop ssh.socket`, drop, `start` after about 5 s | Attempts 1 and 2 refused, with "The host refused the connection…" under the banner; attempt 3 reconnected |
+| Socket kept stopped | Five attempts (Windows takes about 2 s to report a refused localhost connection, so most of the time an attempt is in flight), then "could not reconnect… It tried 5 times." Retry after starting the socket reconnected |
+| Temporary sshd on 2223 with throwaway key A, trusted; restarted with key B; drop | Reconnect stopped at "The host key for blackhole has changed", showing key A as trusted and key B as presented; no credentials sent. The temporary sshd and both keys were removed afterwards |
+| Password typed at the prompt with Save unticked, then a drop | Reconnected without asking; the separator confirms it was a reconnect |
+| Reconnect switched off, then a drop | "Session ended" bar with Reconnect and Close, as before; switched back on afterwards |
+
+**Live sleep and Wi-Fi test** (the owner toggled Wi-Fi, then slept the PC for about 40 s, with the phase 0 logger and Holonet both running):
+- Wi-Fi off and on: interface parameter changes, and connectivity hints going from 3 to 2 and back to 3.
+- Sleep: `PBT_APMSUSPEND`, then on wake `PBT_APMRESUMEAUTOMATIC` and `PBT_APMRESUMESUSPEND` within 1 ms, followed by a burst of interface changes.
+- The monotonic clock (`Instant`, which uses QPC) counted through sleep: wall and monotonic both read 39.4 s. A clock-gap check could not detect sleep, so the power notification is the signal to use.
+- The open sessions are to WSL on this PC, so the connection survived sleep: typing after wake worked at once. **A drop after sleep from a remote server was not tested** (there is none in this setup). The code path is the same as the tests above, with the cause set by the power event.

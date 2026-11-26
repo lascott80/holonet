@@ -93,6 +93,17 @@ impl HolonetApp {
             let p = path.clone();
             Stage::Create(cx.new(|cx| CreateVault::new(app, p, window, cx)))
         };
+        // Sleep, wake and network changes, for reconnecting (phase 7).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::platform::watch_system(tx);
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.recv().await {
+                if this.update(cx, |app, cx| app.system_event(event, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             path,
             stage,
@@ -195,6 +206,23 @@ impl HolonetApp {
         let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
         for pane in panes {
             pane.update(cx, |p, cx| p.set_terminal_settings(settings, cx));
+        }
+    }
+
+    /// Settings, Connection, "Reconnect after sleep or network change".
+    /// While locked the vault cannot be read; reconnecting stays on.
+    pub fn reconnect_enabled(&self, cx: &App) -> bool {
+        self.vault_data(cx).is_none_or(|d| d.settings.connection.reconnect)
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        matches!(self.stage, Stage::Open(_))
+    }
+
+    fn system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
+        for pane in panes {
+            pane.update(cx, |p, cx| p.on_system_event(event, cx));
         }
     }
 

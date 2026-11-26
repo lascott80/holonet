@@ -88,10 +88,14 @@ pub struct TerminalView {
     measured: Rc<Cell<Option<GridSize>>>,
 }
 
-/// Emitted when the remote shell ends or the connection closes.
+/// Emitted when the remote shell ends or the connection under it is lost.
 #[derive(Clone, Debug)]
 pub enum TerminalEvent {
+    /// The shell exited or its channel closed: nothing to reconnect.
     Ended(String),
+    /// The connection was lost under a running shell (milestone 3 phase 7
+    /// reconnects). The terminal and its scrollback stay.
+    Lost(holonet_ssh::LostReason),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -232,9 +236,8 @@ impl TerminalView {
         let holonet_ssh::Shell { input, mut events } = shell;
         self.input = Some(input);
         self.sent_size = None;
-        if matches!(self.connection, Connection::Offline) {
-            self.connection = Connection::Connected(String::new());
-        }
+        // A new shell after a reconnect is connected again.
+        self.connection = Connection::Connected(String::new());
         cx.spawn(async move |this, cx| {
             while let Some(first) = events.recv().await {
                 // Take whatever else is already waiting, up to a budget.
@@ -275,10 +278,9 @@ impl TerminalView {
                     self.connection = Connection::Ended(format!("The shell exited with code {code}."))
                 }
                 ShellEvent::Lost(reason) => {
-                    // Reconnecting comes in milestone 3 phase 7.
                     self.connection = Connection::Ended(reason.to_string());
                     self.input = None;
-                    cx.emit(TerminalEvent::Ended(reason.to_string()));
+                    cx.emit(TerminalEvent::Lost(reason));
                 }
                 ShellEvent::Closed => {
                     if !matches!(self.connection, Connection::Ended(_)) {

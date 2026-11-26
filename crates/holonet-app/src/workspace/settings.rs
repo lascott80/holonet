@@ -279,7 +279,7 @@ impl Workspace {
             .child(page_block(div().child(div().text_title().text_color(theme::ink()).child("Settings")).child(chips)))
             .child(page_block(self.terminal_section(&settings, &installed, preview, cx)))
             .child(page_block(self.security_section(cx)))
-            .child(page_block(self.connection_section(&connection)))
+            .child(page_block(self.connection_section(&connection, cx)))
             .child(page_block(keyboard_section()))
             .child(page_block(self.about_section(cx)))
     }
@@ -565,9 +565,11 @@ impl Workspace {
         ]))
     }
 
-    fn connection_section(&self, _connection: &holonet_model::ConnectionSettings) -> impl IntoElement {
-        // "Reconnect after sleep or network change" joins this section with
-        // automatic reconnect (milestone 3 phase 7).
+    fn connection_section(
+        &self,
+        connection: &holonet_model::ConnectionSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         section("Connection").child(setting_card(vec![
             setting_row(
                 "Keep-alive interval",
@@ -575,6 +577,17 @@ impl Workspace {
                 div().w(px(200.)).child(self.settings_ui.keep_alive.clone()),
             )
             .into_any_element(),
+            check_row(
+                "reconnect",
+                "Reconnect after sleep or network change",
+                Some("Up to 5 attempts. Scrollback is kept; the shell itself restarts."),
+                connection.reconnect,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| d.settings.connection.reconnect = !d.settings.connection.reconnect, cx);
+                    cx.notify();
+                }),
+            ),
         ]))
     }
 

@@ -77,6 +77,8 @@ enum Failure {
     Passphrase,
     /// "Refuse to connect" stopped an unknown key.
     RefusedUnknown,
+    /// Five reconnect attempts failed.
+    GaveUp,
     Other,
 }
 
@@ -90,9 +92,23 @@ impl Failure {
             Failure::Password | Failure::KeyRefused => "Sign-in refused",
             Failure::Passphrase => "Wrong passphrase",
             Failure::RefusedUnknown => "Refused",
+            Failure::GaveUp => "Not reconnected",
             Failure::Other => "Not connected",
         }
     }
+}
+
+/// The design's spinner: a `line` ring with an accent arc turning on it
+/// every 0.9 s (ConnectStates.dc.html). GPUI borders take one color, so the
+/// arc is an SVG laid over the ring.
+fn ring_spinner(size: gpui::Pixels, border: gpui::Pixels) -> Div {
+    div().size(size).flex_none().relative().rounded_full().border(border).border_color(theme::line()).child(
+        div().absolute().top(-border).left(-border).child(icon("spinner-arc", size, theme::accent()).with_animation(
+            "spin",
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+        )),
+    )
 }
 
 /// Why a host may not have answered, from its address (ConnectStates.dc.html,
@@ -108,6 +124,29 @@ fn unanswered_reason(address: &str) -> String {
     } else {
         "The server may be down, or a firewall may be dropping the connection.".to_string()
     }
+}
+
+/// decisions.md: 5 attempts. Waits before each (seconds).
+const RECONNECT_BACKOFF: [u64; 5] = [1, 2, 4, 8, 16];
+
+/// A lost connection being re-established (ConnectStates.dc.html,
+/// "Reconnecting"). The terminal and its scrollback stay; the shell restarts.
+struct Reconnect {
+    /// Attempts started so far (1-based once the first one starts).
+    attempt: usize,
+    /// "Connection lost when this PC went to sleep." and the like.
+    cause: SharedString,
+    /// When the next attempt starts, while waiting.
+    next_at: Option<std::time::Instant>,
+    /// The reason the last attempt failed.
+    last_error: Option<SharedString>,
+}
+
+/// Why a connection most likely dropped, from recent system events.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Disturbance {
+    Sleep,
+    Network,
 }
 
 enum State {
@@ -173,6 +212,17 @@ pub struct Pane {
     /// The attempt used a password saved in the vault (for the wording of
     /// "The server refused the saved password").
     used_saved_password: bool,
+    /// While reconnecting after a lost connection.
+    reconnect: Option<Reconnect>,
+    /// Waits for and starts the next reconnect attempt.
+    reconnect_task: Option<gpui::Task<()>>,
+    /// A password (true) or passphrase typed during this attempt, and the one
+    /// that worked, kept in memory so reconnecting does not ask again. Never
+    /// saved unless "Save in the encrypted vault" was ticked.
+    typed_secret: Option<(bool, Secret)>,
+    session_secret: Option<(bool, Secret)>,
+    /// The last sleep, wake or network change, and when.
+    disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
@@ -214,9 +264,13 @@ impl Pane {
             t
         });
         let subscriptions = vec![cx.subscribe(&terminal, |this: &mut Self, _, event: &TerminalEvent, cx| {
-            let TerminalEvent::Ended(reason) = event;
-            this.state = State::Ended(reason.clone().into());
-            this.session = None;
+            match event {
+                TerminalEvent::Ended(reason) => {
+                    this.state = State::Ended(reason.clone().into());
+                    this.session = None;
+                }
+                TerminalEvent::Lost(reason) => this.on_lost(reason.clone(), cx),
+            }
             cx.notify();
         })];
         let mut tab = Self {
@@ -238,6 +292,11 @@ impl Pane {
             active: true,
             alone: true,
             used_saved_password: false,
+            reconnect: None,
+            reconnect_task: None,
+            typed_secret: None,
+            session_secret: None,
+            disturbance: None,
             _subscriptions: subscriptions,
         };
         tab.start(cx);
@@ -249,6 +308,9 @@ impl Pane {
     }
 
     pub fn tab_state(&self) -> TabState {
+        if self.reconnect.is_some() {
+            return TabState::Connecting;
+        }
         match self.state {
             State::Connected => TabState::Connected,
             State::Failed { .. } | State::Ended(_) | State::KeyChanged { .. } => TabState::Failed,
@@ -310,6 +372,128 @@ impl Pane {
         }
     }
 
+    fn session_secret(&self, password: bool) -> Option<Secret> {
+        self.session_secret.as_ref().filter(|(p, _)| *p == password).map(|(_, s)| s.clone())
+    }
+
+    /// Sleep, wake or a network change (from the app's system listener).
+    pub fn on_system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+        use crate::platform::SystemEvent;
+        let kind = match event {
+            SystemEvent::Suspend | SystemEvent::Resume => Disturbance::Sleep,
+            SystemEvent::NetworkChanged => Disturbance::Network,
+        };
+        // Sleep explains a drop better than the network changes that follow a wake.
+        let keep_sleep = matches!(self.disturbance, Some((Disturbance::Sleep, at)) if at.elapsed().as_secs() < 120)
+            && kind == Disturbance::Network;
+        if !keep_sleep {
+            self.disturbance = Some((kind, std::time::Instant::now()));
+        }
+        // Waiting to reconnect: the network may be back, so try now.
+        if event != SystemEvent::Suspend && self.reconnect.as_ref().is_some_and(|r| r.next_at.is_some()) {
+            self.reconnect_now(cx);
+        }
+    }
+
+    /// The connection dropped under a running shell.
+    fn on_lost(&mut self, reason: holonet_ssh::LostReason, cx: &mut Context<Self>) {
+        self.session = None;
+        let enabled = self.app.upgrade().map(|app| app.read(cx).reconnect_enabled(cx)).unwrap_or(true);
+        if !enabled {
+            self.state = State::Ended(reason.to_string().into());
+            return;
+        }
+        // A drop is noticed up to three missed keep-alives after it happens
+        // (about 90 s at the default), so recent means five minutes.
+        let recent = self.disturbance.filter(|(_, at)| at.elapsed().as_secs() < 300).map(|(d, _)| d);
+        let cause: SharedString = match (recent, &reason) {
+            (Some(Disturbance::Sleep), _) => "Connection lost when this PC went to sleep.".into(),
+            (Some(Disturbance::Network), _) => "Connection lost after a network change.".into(),
+            (None, holonet_ssh::LostReason::NoResponse) => "The server stopped answering.".into(),
+            (None, holonet_ssh::LostReason::ServerDisconnected(_)) => "The server closed the connection.".into(),
+            (None, _) => "The connection was lost.".into(),
+        };
+        self.reconnect = Some(Reconnect { attempt: 0, cause, next_at: None, last_error: None });
+        self.state = State::Connecting;
+        self.schedule_reconnect(cx);
+    }
+
+    /// Wait before the next attempt, or give up after the fifth.
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.reconnect.as_mut() else { return };
+        let Some(wait) = RECONNECT_BACKOFF.get(r.attempt).copied() else {
+            let last = r.last_error.clone().unwrap_or_else(|| r.cause.clone());
+            self.reconnect = None;
+            self.reconnect_task = None;
+            self.fail(
+                Failure::GaveUp,
+                format!("Holonet could not reconnect to {}", self.host.display_name()),
+                format!("It tried {} times. {last}", RECONNECT_BACKOFF.len()),
+            );
+            cx.notify();
+            return;
+        };
+        let at = std::time::Instant::now() + Duration::from_secs(wait);
+        r.next_at = Some(at);
+        // Tick once a second for the countdown, then start the attempt.
+        self.reconnect_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let done = this.update(cx, |pane, cx| {
+                    if std::time::Instant::now() >= at {
+                        pane.reconnect_now(cx);
+                        true
+                    } else {
+                        cx.notify();
+                        false
+                    }
+                });
+                if !matches!(done, Ok(false)) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// "Reconnect now", a wake or network change, or the wait ran out.
+    fn reconnect_now(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.reconnect.as_mut() else { return };
+        if r.next_at.is_none() {
+            return; // an attempt is already running
+        }
+        r.attempt += 1;
+        r.next_at = None;
+        self.reconnect_task = None;
+        self.start(cx);
+    }
+
+    /// A reconnect attempt failed. Network trouble waits and tries again;
+    /// anything else (a refused sign-in) ends reconnecting and shows the
+    /// usual failure. Returns true when handled here.
+    fn reconnect_failed(&mut self, e: &ConnectError, cx: &mut Context<Self>) -> bool {
+        let retry = matches!(
+            e,
+            ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) | ConnectError::TimedOut(_)
+        ) || (matches!(e, ConnectError::HostKeyRejected)
+            && self.app.upgrade().is_some_and(|a| !a.read(cx).is_unlocked()));
+        if !retry {
+            self.reconnect = None;
+            self.reconnect_task = None;
+            return false;
+        }
+        let message: SharedString = match e {
+            ConnectError::HostKeyRejected => "Unlock the vault so Holonet can check the host key.".into(),
+            other => describe_error(other).into(),
+        };
+        if let Some(r) = self.reconnect.as_mut() {
+            r.last_error = Some(message);
+        }
+        self.state = State::Connecting;
+        self.schedule_reconnect(cx);
+        true
+    }
+
     /// Whether the pane stopped without a working session (failed or ended).
     pub fn is_stopped(&self) -> bool {
         matches!(self.state, State::Failed { .. } | State::Ended(_))
@@ -332,6 +516,7 @@ impl Pane {
         self.attempt += 1;
         let attempt = self.attempt;
         self.pending_save = None;
+        self.typed_secret = None;
         self.state = State::Connecting;
         self.session = None;
         // Each attempt starts a fresh log (ConnectStates.dc.html).
@@ -344,11 +529,19 @@ impl Pane {
         self.used_saved_password = matches!(&self.host.auth, Auth::Password { saved: Some(_) }) && !self.ask_password;
 
         let credential = match (&self.host.auth, &self.key) {
-            (Auth::Password { saved }, _) => Credential::Password(if self.ask_password { None } else { saved.clone() }),
+            (Auth::Password { saved }, _) => Credential::Password(if self.ask_password {
+                None
+            } else {
+                saved.clone().or_else(|| self.session_secret(true))
+            }),
             (Auth::Key { passphrase, .. }, Some(key)) => Credential::Key {
                 name: key.name.clone(),
                 private_key: key.private_key.clone(),
-                passphrase: if self.ask_passphrase { None } else { passphrase.clone() },
+                passphrase: if self.ask_passphrase {
+                    None
+                } else {
+                    passphrase.clone().or_else(|| self.session_secret(false))
+                },
             },
             (Auth::Key { .. }, None) => {
                 self.fail(
@@ -520,6 +713,10 @@ impl Pane {
             return;
         }
         let secret = Secret::new(value);
+        let is_password = matches!(request, SecretRequest::Password { .. });
+        if !matches!(request, SecretRequest::Challenge { .. }) {
+            self.typed_secret = Some((is_password, secret.clone()));
+        }
         if *save {
             // Saved only once the server accepts it (see `finish`), so a
             // mistyped password never ends up in the vault.
@@ -536,6 +733,20 @@ impl Pane {
     fn finish(&mut self, result: Result<(Session, Shell), ConnectError>, cx: &mut Context<Self>) {
         match result {
             Ok((session, shell)) => {
+                if let Some(typed) = self.typed_secret.take() {
+                    self.session_secret = Some(typed);
+                }
+                if self.reconnect.take().is_some() {
+                    self.reconnect_task = None;
+                    let time = jiff::Timestamp::now()
+                        .to_zoned_datetime(jiff::tz::TimeZone::system())
+                        .strftime("%H:%M")
+                        .to_string();
+                    let line = format!(
+                        "\r\n\x1b[2m-- Reconnected at {time}. The shell restarted; the output above is from the previous session. --\x1b[0m\r\n"
+                    );
+                    self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
+                }
                 self.info = session.info().clone();
                 self.note(format!("Signed in ({})", self.info.auth_method), false);
                 self.session = Some(Arc::new(session));
@@ -576,8 +787,15 @@ impl Pane {
                 }
             }
             Err(e) => {
-                // A host key decision already set its own state.
+                // A host key decision already set its own state; a changed
+                // key ends reconnecting too (decisions.md: always stop).
                 if matches!(self.state, State::KeyChanged { .. } | State::Failed { .. }) {
+                    self.reconnect = None;
+                    self.reconnect_task = None;
+                    cx.notify();
+                    return;
+                }
+                if self.reconnect.is_some() && self.reconnect_failed(&e, cx) {
                     cx.notify();
                     return;
                 }
@@ -711,16 +929,7 @@ impl Pane {
 
     fn connecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let name = self.name();
-        // The design's spinner: a `line` ring with an accent arc turning on it.
-        let spinner = div().size(px(28.)).relative().rounded_full().border(px(3.)).border_color(theme::line()).child(
-            div().absolute().top(px(-3.)).left(px(-3.)).child(
-                icon("spinner-arc", px(28.), theme::accent()).with_animation(
-                    "spin",
-                    Animation::new(Duration::from_millis(900)).repeat(),
-                    |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-                ),
-            ),
-        );
+        let spinner = ring_spinner(px(28.), px(3.));
         self.center_card(
             div()
                 .flex()
@@ -746,6 +955,83 @@ impl Pane {
                 }))),
         )
         .into_any_element()
+    }
+
+    /// ConnectStates.dc.html, "Reconnecting": a banner over the old output.
+    fn reconnecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = &self.reconnect else { return div().into_any_element() };
+        let total = RECONNECT_BACKOFF.len();
+        let progress = match r.next_at {
+            Some(at) => {
+                let secs = at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
+                let tried =
+                    if r.attempt == 0 { String::new() } else { format!("Attempt {} of {total} failed. ", r.attempt) };
+                format!(" {tried}Trying again in {secs} s.")
+            }
+            None => format!(" Reconnecting, attempt {} of {total}.", r.attempt),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::SPACE_3)
+                    .px(theme::SPACE_4)
+                    .py(theme::SPACE_3)
+                    .bg(theme::card())
+                    .border_b_1()
+                    .border_color(theme::line())
+                    .child(ring_spinner(px(16.), px(2.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(240.))
+                            .text_body()
+                            .text_color(theme::ink_soft())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme::ink())
+                                            .child(r.cause.clone()),
+                                    )
+                                    .child(SharedString::from(progress)),
+                            )
+                            .children(
+                                r.last_error.clone().map(|e| div().text_meta().text_color(theme::ink_muted()).child(e)),
+                            ),
+                    )
+                    .child(
+                        Button::secondary("reconnect-now", "Reconnect now")
+                            .compact()
+                            .disabled(r.next_at.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.reconnect_now(cx))),
+                    )
+                    .child(
+                        Button::quiet("reconnect-close", self.close_label())
+                            .compact()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().opacity(0.75).child(self.terminal.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .px(theme::SPACE_4)
+                    .py(theme::SPACE_2)
+                    .text_meta()
+                    .text_color(theme::ink_muted())
+                    .child("Scrollback is kept. The shell session itself restarts after reconnecting."),
+            )
+            .into_any_element()
     }
 
     fn host_key_view(&self, key: &PresentedKey, cx: &mut Context<Self>) -> AnyElement {
@@ -1040,7 +1326,7 @@ impl Pane {
                 }),
             )),
             Failure::RefusedUnknown => buttons,
-            Failure::Network | Failure::TimedOut | Failure::KeyRefused | Failure::Other => {
+            Failure::Network | Failure::TimedOut | Failure::KeyRefused | Failure::GaveUp | Failure::Other => {
                 buttons.child(Button::primary("retry", "Retry").on_click(cx.listener(|this, _, _, cx| this.start(cx))))
             }
         };
@@ -1072,6 +1358,7 @@ impl Pane {
     /// The status bar the tab shows for its active pane.
     pub fn status_bar(&self) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
+            _ if self.reconnect.is_some() => ("Reconnecting", theme::ink_muted()),
             State::Connected => ("Connected", theme::group_mint()),
             State::Ended(_) => ("Ended", theme::warn()),
             State::Failed { kind, .. } => (kind.state_word(), theme::warn()),
@@ -1119,6 +1406,7 @@ impl Render for Pane {
         let color = theme::no_group();
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
+            _ if self.reconnect.is_some() => "Reconnecting".into(),
             State::Connected => format!("{} × {}", size.cols, size.rows).into(),
             State::Connecting | State::HostKey { .. } | State::Secret { .. } => "Connecting".into(),
             State::KeyChanged { .. } => "Host key changed".into(),
@@ -1128,6 +1416,7 @@ impl Render for Pane {
         let warn_word = matches!(self.state, State::KeyChanged { .. } | State::Failed { .. } | State::Ended(_));
 
         let content: AnyElement = match &self.state {
+            State::Connecting if self.reconnect.is_some() => self.reconnecting_view(cx),
             State::Connecting => self.connecting_view(cx),
             State::HostKey { key, .. } => {
                 let key = key.clone();
@@ -1249,6 +1538,7 @@ mod tests {
             Failure::KeyRefused,
             Failure::Passphrase,
             Failure::RefusedUnknown,
+            Failure::GaveUp,
             Failure::Other,
         ]
         .iter()
