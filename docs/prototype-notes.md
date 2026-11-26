@@ -1125,3 +1125,63 @@ An identity is a name, a username and a sign-in (a key, or a password that is sa
 **Noted, older behaviour:** a host whose key was deleted opens in the form with the first key in the vault selected, without saying its own key is gone. Saving would quietly switch it to that key. Recorded for the wrap-up.
 
 fmt, clippy, and the unit tests (32, 14, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 6: routes (25 Nov 2026)
+
+**Owner decisions:**
+1. Test the fallback through a **test relay**: `crates/holonet-net/examples/ts_relay.rs` listens on this PC's own Tailscale IPv4 address and forwards to the WSL server. No firewall prompt appeared.
+2. **A host's addresses share trust when the key matches.**
+   - With no Known hosts entry for the address connected to, the entry for the same host's other address on that port is used.
+   - The same key is trusted, and recorded for this address too. The log reads "Host key matches the one trusted for 127.0.0.1; trusted for this address too".
+   - A different key stops the connection as a changed key, with the mismatch recorded on the entry it was compared with.
+
+**Panes follow the route plan** (`holonet_net::plan` before each attempt and reconnect):
+- The connection task asks Tailscale for its status, checks whether the primary address has a route, plans, and tries each address in turn.
+- The fallback wait limits only the TCP connection, so a prompt can take as long as it needs.
+- An unreachable address moves on to the next one and logs why ("No answer from 192.0.2.1 after 3 s"). Any other failure, such as a refused sign-in, stops there.
+- **Connecting card**, as drawn:
+  - "Trying the primary address. Tailscale is next if it does not answer."
+  - "Trying 100.x over Tailscale."
+  - "… is not reachable from this network, so Holonet is using Tailscale (100.x)."
+  - "The primary address did not answer. Trying Tailscale (100.x)."
+- **Status bar:** "Connected over Tailscale". The session header shows the address actually used.
+- **Timed out**, as drawn:
+  - "… This host also has a Tailscale address." with **Try Tailscale (100.x)**, which overrides the route for this connection, and Retry.
+  - If Tailscale is off: "…, but Tailscale on this PC is switched off. Connect it, then try again.", with no Try Tailscale button.
+  - If both addresses failed: "Neither … nor its Tailscale address … answered."
+- **Tailscale off** (a new failure, "Tailscale off") for a host that must use Tailscale: "ts-route connects over Tailscale", "Tailscale on this PC is switched off. Connect it, then try again. Or edit the host to connect another way.", with Retry and Edit host.
+- **Reconnecting** says "over Tailscale" when the last route was Tailscale. A host that needs Tailscale while it is off **waits instead of using up attempts**: "Waiting for Tailscale on this PC." It checks every 16 s, and Tailscale's own network change starts the next attempt at once.
+
+**Screens:**
+- **Host form:** "Tailscale address (optional)", checked like the primary address. Below it, "Connect using" (Automatic, Primary, Tailscale) with the drawn help text, which names the Settings fallback wait. Without a Tailscale address only the help line shows ("Add a Tailscale address…"). The summary gains Tailscale address and Connect using, and the equivalent command uses the Tailscale address under the Tailscale route.
+- **Hosts:**
+  - Cards carry the TAILSCALE tag.
+  - The detail panel shows "Connect using" (saved per host as soon as it changes) and the Tailscale address row.
+  - Its Host key section finds trust under either address.
+- **Settings, Connection:** "Tailscale fallback wait" (2, 3, 5 or 10 seconds).
+
+**Checked live** (the phase 4 test vault, four seeded hosts from `examples/m4_routes_seed.rs`, relay running):
+
+| Host | Setup | Result |
+| --- | --- | --- |
+| ts-route | Primary 127.0.0.1 (trusted), route Tailscale | Connected over Tailscale with no key prompt; trust carried over from 127.0.0.1 |
+| ts-fallback | Primary 192.0.2.1 (public, never answers), Automatic | "Trying the primary address. Tailscale is next…", then connected over Tailscale after the 3 s wait |
+| ts-skip | Primary 10.255.255.1 (private, no route), Automatic | Connected over Tailscale in under 1.2 s, with no wait |
+| ts-primary | Primary 192.0.2.1, route Primary | Timed out after 10 s with "Try Tailscale (100.x)", which connected over Tailscale |
+| Tailscale off (the owner switched it off), new ts-route tab | | "Tailscale off" state, as above |
+| Tailscale off, new ts-fallback tab | | Timed out on the primary; the message says Tailscale is switched off |
+| Tailscale off under four open Tailscale sessions | First build | **They used up all 5 attempts within seconds and gave up**: Tailscale switching off is itself a network change, which starts attempts at once. Fixed by waiting for Tailscale |
+| Tailscale off and on again with the fix | | ts-route showed "Waiting for Tailscale on this PC." and reconnected by itself when Tailscale came back. ts-fallback, under Automatic, spent attempts on its unreachable primary, then reconnected over Tailscale within its 5 |
+
+**Fixed on the way:**
+- The session header showed the primary address between attempts. It now shows the address the route starts with.
+- The reconnect banner lost "over Tailscale" between attempts.
+
+**Not checked:**
+- The Settings "Tailscale fallback wait" row was not screenshotted. Its select saves like the keep-alive select next to it.
+- Once, Ctrl Shift T from a pane in the "Tailscale off" state did not open the host picker; "+" did. Not reproduced or investigated yet; recorded for the wrap-up.
+- An Automatic host whose primary address is truly down while Tailscale is off still uses its attempts. That is reasonable, since the primary address may come back, but it differs from a Tailscale-only host.
+
+The relay and seeder stay in the tree with the other milestone 4 test programs until the wrap-up.
+
+fmt, clippy, and the unit tests (32, 15, 12, 7, 13 and 16) pass.

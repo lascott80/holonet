@@ -47,6 +47,11 @@ pub struct HostForm {
     label: Entity<TextField>,
     address: Entity<TextField>,
     port: Entity<TextField>,
+    tailscale: Entity<TextField>,
+    /// Index into [`ROUTES`].
+    route: usize,
+    /// Settings, Connection: for the Automatic help line.
+    fallback_secs: u64,
     tags: Entity<TextField>,
     username: Entity<TextField>,
     password: Entity<TextField>,
@@ -78,6 +83,32 @@ pub struct HostForm {
 
 impl EventEmitter<HostFormEvent> for HostForm {}
 
+/// The help line under "Connect using" (NewHost.dc.html).
+pub fn route_help(route: holonet_model::Route, has_tailscale: bool, wait_secs: u64) -> String {
+    use holonet_model::Route;
+    if !has_tailscale {
+        return "Add a Tailscale address to reach this host when you are away from its network.".into();
+    }
+    match route {
+        Route::Automatic => format!(
+            "Tries the primary address first. If it does not answer within {wait_secs} seconds, connects over Tailscale."
+        ),
+        Route::Primary => "Always uses the primary address.".into(),
+        Route::Tailscale => "Always connects over Tailscale, which must be running on this PC.".into(),
+    }
+}
+
+pub const ROUTES: [holonet_model::Route; 3] =
+    [holonet_model::Route::Automatic, holonet_model::Route::Primary, holonet_model::Route::Tailscale];
+
+pub fn route_label(route: holonet_model::Route) -> &'static str {
+    match route {
+        holonet_model::Route::Automatic => "Automatic",
+        holonet_model::Route::Primary => "Primary",
+        holonet_model::Route::Tailscale => "Tailscale",
+    }
+}
+
 fn key_option(key: &StoredKey) -> SharedString {
     format!("{} ({})", key.name, algorithm_label(&key.algorithm)).into()
 }
@@ -107,6 +138,8 @@ impl HostForm {
         let label = text(cx, "Defaults to the address", h.label.clone(), false);
         let address = text(cx, "Hostname or IP address", h.address.clone(), true);
         let port = text(cx, "22", h.port.to_string(), true);
+        let tailscale =
+            text(cx, "100.x.y.z or name.tailnet.ts.net", h.tailscale_address.clone().unwrap_or_default(), true);
         let tags = text(cx, "Comma separated, e.g. api, arm64", h.tags.join(", "), false);
         let username = text(cx, "e.g. root", h.username.clone(), true);
         let (auth, saved_password, key_id, saved_passphrase) = match &h.auth {
@@ -141,7 +174,7 @@ impl HostForm {
         let key_select = cx.new(|cx| Select::new(cx, keys.iter().map(key_option).collect(), selected).mono());
 
         let mut subscriptions = Vec::new();
-        for f in [&label, &address, &port, &tags, &username, &password, &passphrase] {
+        for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase] {
             subscriptions.push(cx.subscribe_in(f, window, |this: &mut Self, _, e: &TextFieldEvent, window, cx| {
                 match e {
                     TextFieldEvent::Changed => {
@@ -173,6 +206,9 @@ impl HostForm {
             label,
             address,
             port,
+            tailscale,
+            route: ROUTES.iter().position(|r| *r == h.route).unwrap_or(0),
+            fallback_secs: data.settings.connection.fallback_wait.duration().as_secs(),
             tags,
             username,
             password,
@@ -220,6 +256,9 @@ impl HostForm {
         host.label = self.text(&self.label, cx);
         host.address = self.text(&self.address, cx);
         host.port = self.port(cx).unwrap_or(0);
+        let tailscale = self.text(&self.tailscale, cx);
+        host.tailscale_address = (!tailscale.is_empty()).then_some(tailscale);
+        host.route = ROUTES[self.route.min(2)];
         host.username = self.text(&self.username, cx);
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
@@ -485,6 +524,37 @@ impl Render for HostForm {
                     )))
                     .child(div().w(px(110.)).child(field("Port", self.port.clone(), None))),
             )
+            .child(field(
+                "Tailscale address (optional)",
+                self.tailscale.clone(),
+                host.problems()
+                    .contains(&holonet_model::HostProblem::TailscaleAddressInvalid)
+                    .then(|| (holonet_model::HostProblem::TailscaleAddressInvalid.message().into(), true)),
+            ))
+            .child({
+                let has_tailscale = host.tailscale().is_some();
+                let entity = cx.entity();
+                let control = Segmented::new(
+                    "route",
+                    ROUTES.iter().map(|r| SharedString::from(route_label(*r))).collect(),
+                    if has_tailscale { self.route } else { 1 },
+                )
+                .on_change(move |i, _, cx| {
+                    entity.update(cx, |f, cx| {
+                        f.route = i;
+                        cx.notify()
+                    })
+                });
+                let help = route_help(host.effective_route(), has_tailscale, self.fallback_secs);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::SPACE_2)
+                    .child(crate::ui::field_label("Connect using"))
+                    // Without a Tailscale address the route is Primary (NewHost.dc.html).
+                    .when(has_tailscale, |d| d.child(control))
+                    .child(crate::ui::field_help(help, false))
+            })
             .child(field("Tags", self.tags.clone(), None));
 
         let entity = cx.entity();
@@ -647,6 +717,11 @@ impl Render for HostForm {
             )
             .child(key_values(vec![
                 ("Authentication".into(), self.auth_summary(cx).into_any_element()),
+                (
+                    "Tailscale address".into(),
+                    SharedString::from(host.tailscale().unwrap_or("Not set").to_string()).into_any_element(),
+                ),
+                ("Connect using".into(), route_label(host.effective_route()).into_any_element()),
                 ("Keep alive".into(), (if self.keep_alive { "On" } else { "Off" }).into_any_element()),
             ]));
         for problem in &problems {

@@ -70,6 +70,7 @@ pub(crate) struct SettingsUi {
     line_height: Entity<Slider>,
     scrollback: Entity<Select>,
     keep_alive: Entity<Select>,
+    fallback_wait: Entity<Select>,
     /// Created at the first render (it needs a window).
     preview: Option<Entity<TerminalView>>,
     scroll: ScrollHandle,
@@ -90,6 +91,14 @@ fn scrollback_index(s: Scrollback) -> usize {
         Scrollback::Unlimited => 2,
     }
 }
+
+/// Settings, Connection, "Tailscale fallback wait" options in order.
+const FALLBACK_WAITS: [holonet_model::FallbackWait; 4] = [
+    holonet_model::FallbackWait::Secs2,
+    holonet_model::FallbackWait::Secs3,
+    holonet_model::FallbackWait::Secs5,
+    holonet_model::FallbackWait::Secs10,
+];
 
 fn keep_alive_index(k: KeepAlive) -> usize {
     match k {
@@ -133,8 +142,16 @@ impl SettingsUi {
                 keep_alive_index(settings.connection.keep_alive),
             )
         });
+        let fallback_wait = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["2 seconds".into(), "3 seconds".into(), "5 seconds".into(), "10 seconds".into()],
+                FALLBACK_WAITS.iter().position(|w| *w == settings.connection.fallback_wait).unwrap_or(1),
+            )
+        });
         Self {
             unknown_keys,
+            fallback_wait,
             font_size,
             line_height,
             scrollback,
@@ -167,6 +184,11 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let s = [Scrollback::Lines10k, Scrollback::Lines50k, Scrollback::Unlimited][i.min(2)];
                 this.set_terminal(|t| t.scrollback = s, cx);
+            }),
+            cx.subscribe(&self.fallback_wait, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let w = FALLBACK_WAITS[i.min(3)];
+                this.save(|d| d.settings.connection.fallback_wait = w, cx);
             }),
             cx.subscribe(&self.keep_alive, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -576,6 +598,15 @@ impl Workspace {
                 "Keep-alive interval",
                 Some("Applies to new connections. Three unanswered keep-alives end a connection.".into()),
                 div().w(px(200.)).child(self.settings_ui.keep_alive.clone()),
+            )
+            .into_any_element(),
+            setting_row(
+                "Tailscale fallback wait",
+                Some(
+                    "How long Automatic waits for a host's primary address before trying its Tailscale address. Skipped when the primary address is private and unreachable from this network."
+                        .into(),
+                ),
+                div().w(px(200.)).child(self.settings_ui.fallback_wait.clone()),
             )
             .into_any_element(),
             check_row(

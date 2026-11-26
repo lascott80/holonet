@@ -161,19 +161,34 @@ impl HolonetApp {
     }
 
     /// Compare a presented key with Known hosts; `None` while locked.
-    pub fn check_host_key(&mut self, key: &PresentedKey, cx: &mut Context<Self>) -> Option<KeyCheck> {
+    /// Check a presented key. `aliases` are the same host's other addresses:
+    /// with no entry for this address, a key trusted for one of them is
+    /// trusted here too when it matches (and recorded for this address), and
+    /// a different one stops the connection as a changed key.
+    pub fn check_host_key(
+        &mut self,
+        key: &PresentedKey,
+        aliases: &[String],
+        cx: &mut Context<Self>,
+    ) -> Option<KeyCheck> {
         let data = self.vault_data(cx)?;
-        let known = data.known_host(&key.host, key.port);
+        let found = data.known_host_or_alias(&key.host, key.port, aliases);
+        let known = found.map(|(k, _)| k);
+        let from_alias = found.is_some_and(|(_, alias)| alias);
         let check = KeyCheck {
             status: classify(known, key),
             policy: data.settings.unknown_host_keys,
             trusted_at: known.map(|k| k.trusted_at),
+            from_alias: from_alias.then(|| known.map(|k| k.host.clone())).flatten(),
         };
         if matches!(check.status, holonet_ssh::KeyStatus::Trusted) {
-            let (host, port) = (key.host.clone(), key.port);
+            let (host, port, public) = (key.host.clone(), key.port, key.public_key.clone());
             self.update_vault(
                 move |d| {
-                    if let Some(k) = d.known_host_mut(&host, port) {
+                    if from_alias {
+                        // The same key, now also trusted under this address.
+                        d.trust_host_key(&host, port, &public, KnownHostSource::FirstConnection);
+                    } else if let Some(k) = d.known_host_mut(&host, port) {
                         k.last_matched_at = Some(Timestamp::now());
                     }
                 },
@@ -189,9 +204,12 @@ impl HolonetApp {
         self.update_vault(move |d| d.trust_host_key(&host, port, &public, KnownHostSource::FirstConnection), cx);
     }
 
-    /// A changed key was refused: keep it for Known hosts' "Mismatch seen".
-    pub fn record_mismatch(&mut self, key: &PresentedKey, cx: &mut Context<Self>) {
-        let (host, port, public) = (key.host.clone(), key.port, key.public_key.clone());
+    /// A changed key was refused: keep it for Known hosts' "Mismatch seen",
+    /// on the entry it was compared with (this address, or the host's other
+    /// address when this one has none).
+    pub fn record_mismatch(&mut self, key: &PresentedKey, entry: Option<&str>, cx: &mut Context<Self>) {
+        let host = entry.map(str::to_string).unwrap_or_else(|| key.host.clone());
+        let (port, public) = (key.port, key.public_key.clone());
         self.update_vault(
             move |d| {
                 if let Some(k) = d.known_host_mut(&host, port) {
@@ -258,6 +276,7 @@ impl HolonetApp {
             connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
             keep_alive: data.settings.connection.keep_alive_for(&host),
             terminal: data.settings.terminal.clone(),
+            fallback_wait: data.settings.connection.fallback_wait.duration(),
         };
         let pane = cx.new(|cx| Pane::new(app, host, key, runtime, limits, size, window, cx));
         cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
@@ -303,6 +322,7 @@ impl HolonetApp {
                 connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
                 keep_alive: data.settings.connection.keep_alive_for(&host),
                 terminal: data.settings.terminal.clone(),
+                fallback_wait: data.settings.connection.fallback_wait.duration(),
             };
             pane.update(cx, |p, cx| p.retry_with(host, key, limits, cx));
             self.select(Some(index), window, cx);

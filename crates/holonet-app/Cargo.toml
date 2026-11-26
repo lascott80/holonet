@@ -16,6 +16,7 @@ alacritty_terminal = "0.26"
 anyhow = "1.0.105"
 gpui.workspace = true
 holonet-model = { version = "0.1.0", path = "../holonet-model" }
+holonet-net = { version = "0.1.0", path = "../holonet-net" }
 holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
 holonet-vault = { version = "0.1.0", path = "../holonet-vault" }
 jiff = "1.0.3"

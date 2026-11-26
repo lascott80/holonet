@@ -15,7 +15,8 @@ use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render,
     SharedString, Subscription, Transformation, WeakEntity, Window, div, percentage, prelude::*, px,
 };
-use holonet_model::{Auth, Host, Secret, StoredKey, Timestamp, UnknownHostKeys};
+use holonet_model::{Auth, Host, Route, Secret, StoredKey, Timestamp, UnknownHostKeys};
+use holonet_net::{PlanNote, PlanProblem, Via};
 use holonet_ssh::{
     BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KeyStatus, PresentedKey, Prompts, PtySize,
     SecretRequest, Session, SessionInfo, Shell,
@@ -35,6 +36,46 @@ use crate::ui::{Button, ButtonKind, Checkbox, TextField, TextFieldEvent, icon};
 enum UiRequest {
     HostKey(PresentedKey, oneshot::Sender<HostKeyDecision>),
     Secret(SecretRequest, oneshot::Sender<Option<Secret>>),
+    /// The route plan for this attempt: how many addresses, and its notes.
+    Plan {
+        attempts: usize,
+        notes: Vec<PlanNote>,
+    },
+    /// Starting on an address.
+    Attempt {
+        via: Via,
+        address: String,
+    },
+    /// A line for the connecting log.
+    Note(String, bool),
+}
+
+/// How a connection attempt ended, from the connection task.
+enum Done {
+    /// The route plan allowed no attempt (Tailscale is needed but off).
+    Plan(PlanProblem),
+    Connect(Box<Result<(Session, Shell), ConnectError>>),
+}
+
+/// A sentence continued after "but": its first letter lowered, except
+/// when it starts with a name ("Tailscale …").
+fn lower_first(text: &str) -> String {
+    match text.split_once(' ') {
+        Some(("Tailscale", _)) => text.to_string(),
+        _ => {
+            let mut chars = text.chars();
+            chars.next().map(|c| c.to_lowercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+        }
+    }
+}
+
+/// The address could not be reached at all, so the next address in the
+/// route plan is worth trying.
+fn unreachable(e: &ConnectError) -> bool {
+    matches!(
+        e,
+        ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) | ConnectError::TimedOut(_)
+    )
 }
 
 /// [`Prompts`] that forwards each question to the session tab.
@@ -61,6 +102,8 @@ pub struct KeyCheck {
     pub status: KeyStatus,
     pub policy: UnknownHostKeys,
     pub trusted_at: Option<Timestamp>,
+    /// The trusted entry is the host's other address (this one has none).
+    pub from_alias: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +122,8 @@ enum Failure {
     RefusedUnknown,
     /// Five reconnect attempts failed.
     GaveUp,
+    /// The host connects over Tailscale, which cannot be used now.
+    TailscaleOff,
     Other,
 }
 
@@ -93,6 +138,7 @@ impl Failure {
             Failure::Passphrase => "Wrong passphrase",
             Failure::RefusedUnknown => "Refused",
             Failure::GaveUp => "Not reconnected",
+            Failure::TailscaleOff => "Tailscale off",
             Failure::Other => "Not connected",
         }
     }
@@ -140,6 +186,9 @@ struct Reconnect {
     next_at: Option<std::time::Instant>,
     /// The reason the last attempt failed.
     last_error: Option<SharedString>,
+    /// The host needs Tailscale, which is off: waiting for it does not use
+    /// up attempts. Its network change starts the next one at once.
+    waiting_for_tailscale: bool,
 }
 
 /// Why a connection most likely dropped, from recent system events.
@@ -188,7 +237,18 @@ pub enum SessionEvent {
 
 pub struct Pane {
     app: WeakEntity<HolonetApp>,
+    /// With its identity applied (`VaultData::resolved`).
     pub host: Host,
+    /// A per-connection route ("Try Tailscale"); `None` uses the host's.
+    route_override: Option<Route>,
+    /// The address being tried or connected to, and how.
+    via: Option<Via>,
+    address: String,
+    /// This attempt's route plan: how many addresses, its notes, and the
+    /// addresses tried so far.
+    plan_len: usize,
+    plan_notes: Vec<PlanNote>,
+    tried: Vec<(Via, String)>,
     key: Option<StoredKey>,
     runtime: tokio::runtime::Handle,
     limits: Limits,
@@ -237,6 +297,8 @@ pub struct Limits {
     /// Already combined with the host's own keep-alive switch.
     pub keep_alive: Option<Duration>,
     pub terminal: holonet_model::TerminalSettings,
+    /// How long Automatic waits on the primary address (Settings, Connection).
+    pub fallback_wait: Duration,
 }
 
 impl Pane {
@@ -273,9 +335,19 @@ impl Pane {
             }
             cx.notify();
         })];
+        let address = match host.effective_route() {
+            Route::Tailscale => host.tailscale().unwrap_or(host.address.trim()).to_string(),
+            _ => host.address.trim().to_string(),
+        };
         let mut tab = Self {
             app,
             host,
+            route_override: None,
+            via: None,
+            address,
+            plan_len: 0,
+            plan_notes: Vec::new(),
+            tried: Vec::new(),
             key,
             runtime,
             limits,
@@ -343,8 +415,18 @@ impl Pane {
         self.note(line, false);
     }
 
+    /// The address a connection starts with: the Tailscale address when the
+    /// route (or "Try Tailscale") is Tailscale, otherwise the primary one.
+    fn initial_address(&self) -> String {
+        match self.route_override.unwrap_or(self.host.effective_route()) {
+            Route::Tailscale => self.host.tailscale().unwrap_or(self.host.address.trim()).to_string(),
+            _ => self.host.address.trim().to_string(),
+        }
+    }
+
+    /// The address being used (primary or Tailscale) and port.
     fn target(&self) -> String {
-        format!("{}:{}", self.host.address.trim(), self.host.port)
+        format!("{}:{}", self.address, self.host.port)
     }
 
     /// Where the pane sits in its tab (set by [`crate::tab::Tab`]).
@@ -417,7 +499,8 @@ impl Pane {
             (None, holonet_ssh::LostReason::ServerDisconnected(_)) => "The server closed the connection.".into(),
             (None, _) => "The connection was lost.".into(),
         };
-        self.reconnect = Some(Reconnect { attempt: 0, cause, next_at: None, last_error: None });
+        self.reconnect =
+            Some(Reconnect { attempt: 0, cause, next_at: None, last_error: None, waiting_for_tailscale: false });
         self.state = State::Connecting;
         self.schedule_reconnect(cx);
     }
@@ -437,6 +520,9 @@ impl Pane {
             cx.notify();
             return;
         };
+        // Waiting for Tailscale: its network change starts the next attempt,
+        // so only check now and then.
+        let wait = if r.waiting_for_tailscale { 16 } else { wait };
         let at = std::time::Instant::now() + Duration::from_secs(wait);
         r.next_at = Some(at);
         // Tick once a second for the countdown, then start the attempt.
@@ -468,6 +554,7 @@ impl Pane {
         }
         r.attempt += 1;
         r.next_at = None;
+        r.waiting_for_tailscale = false;
         self.reconnect_task = None;
         self.start(cx);
     }
@@ -507,6 +594,7 @@ impl Pane {
     /// and connect"): try again here with the new details.
     pub fn retry_with(&mut self, host: Host, key: Option<StoredKey>, limits: Limits, cx: &mut Context<Self>) {
         self.host = host;
+        self.route_override = None;
         self.key = key;
         self.limits = limits;
         self.ask_password = false;
@@ -525,11 +613,13 @@ impl Pane {
         self.session = None;
         // Each attempt starts a fresh log (ConnectStates.dc.html).
         self.log.clear();
-        let address = self.host.address.trim().to_string();
-        if address.parse::<std::net::IpAddr>().is_err() {
-            self.note(format!("Resolving {address} …"), false);
-        }
-        self.note(format!("Opening TCP connection to {}", self.target()), false);
+        self.tried.clear();
+        self.plan_notes.clear();
+        self.plan_len = 0;
+        // Until the plan names one: the address this route starts with.
+        // `via` keeps the last attempt's, so a reconnect over Tailscale still
+        // says so.
+        self.address = self.initial_address();
         self.used_saved_password = matches!(&self.host.auth, Auth::Password { saved: Some(_) }) && !self.ask_password;
 
         let credential = match (&self.host.auth, &self.key) {
@@ -566,23 +656,62 @@ impl Pane {
             credential,
             connect_timeout: limits.0,
             keep_alive: limits.1,
-            prompts: Arc::new(UiPrompts(tx)),
+            prompts: Arc::new(UiPrompts(tx.clone())),
             // Jump hosts join panes in milestone 4 phase 7.
             jump: None,
         };
+        let ui_tx = tx;
         let size = self.terminal.read(cx).grid_size();
-        let (done_tx, done_rx) = oneshot::channel::<Result<(Session, Shell), ConnectError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Done>();
+        let (host, route_override, fallback_wait) = (self.host.clone(), self.route_override, self.limits.fallback_wait);
+        let ui = ui_tx;
         self.runtime.spawn(async move {
-            let result = async {
-                let session = Session::connect(opts).await?;
-                let shell = session
-                    .open_shell(PtySize::cells(size.cols as u16, size.rows as u16))
-                    .await
-                    .map_err(|e| ConnectError::Protocol(format!("{e:#}")))?;
-                Ok((session, shell))
+            // The route plan (decisions.md, Connection and Tailscale): which
+            // addresses to try, and how long to wait on each.
+            let tailscale = holonet_net::tailscale::status().await;
+            let skip = holonet_net::primary_unreachable(&host.address, tailscale.is_running());
+            let plan = match holonet_net::plan(&host, route_override, &tailscale, skip, fallback_wait) {
+                Ok(plan) => plan,
+                Err(problem) => {
+                    let _ = done_tx.send(Done::Plan(problem));
+                    return;
+                }
+            };
+            let _ = ui.send(UiRequest::Plan { attempts: plan.attempts.len(), notes: plan.notes.clone() });
+            let count = plan.attempts.len();
+            for (i, attempt) in plan.attempts.into_iter().enumerate() {
+                let last = i + 1 == count;
+                let _ = ui.send(UiRequest::Attempt { via: attempt.via, address: attempt.address.clone() });
+                let mut opts = opts.clone();
+                opts.host = attempt.address.clone();
+                if let Some(wait) = attempt.give_up_after {
+                    // Only the TCP connection is limited: prompts can take as
+                    // long as the person needs.
+                    opts.connect_timeout = wait;
+                }
+                let result = async {
+                    let session = Session::connect(opts).await?;
+                    let shell = session
+                        .open_shell(PtySize::cells(size.cols as u16, size.rows as u16))
+                        .await
+                        .map_err(|e| ConnectError::Protocol(format!("{e:#}")))?;
+                    Ok((session, shell))
+                }
+                .await;
+                match result {
+                    Err(e) if !last && unreachable(&e) => {
+                        let why = match &e {
+                            ConnectError::TimedOut(s) => format!("No answer from {} after {s} s", attempt.address),
+                            other => format!("{}: {}", attempt.address, describe_error(other)),
+                        };
+                        let _ = ui.send(UiRequest::Note(why, true));
+                    }
+                    result => {
+                        let _ = done_tx.send(Done::Connect(Box::new(result)));
+                        return;
+                    }
+                }
             }
-            .await;
-            let _ = done_tx.send(result);
         });
 
         // Questions from the connection while it runs.
@@ -597,11 +726,15 @@ impl Pane {
 
         // The outcome.
         cx.spawn(async move |this, cx| {
-            let result =
-                done_rx.await.unwrap_or_else(|_| Err(ConnectError::Protocol("connection task stopped".into())));
+            let done = done_rx.await.unwrap_or_else(|_| {
+                Done::Connect(Box::new(Err(ConnectError::Protocol("connection task stopped".into()))))
+            });
             let _ = this.update(cx, |tab, cx| {
                 if tab.attempt == attempt {
-                    tab.finish(result, cx);
+                    match done {
+                        Done::Plan(problem) => tab.plan_failed(problem, cx),
+                        Done::Connect(result) => tab.finish(*result, cx),
+                    }
                 }
             });
         })
@@ -611,8 +744,31 @@ impl Pane {
 
     fn on_request(&mut self, request: UiRequest, cx: &mut Context<Self>) {
         match request {
+            UiRequest::Plan { attempts, notes } => {
+                self.plan_len = attempts;
+                if notes.contains(&PlanNote::PrimarySkipped) {
+                    self.note(
+                        format!("{} is a private address with no route from this network", self.host.address.trim()),
+                        false,
+                    );
+                }
+                self.plan_notes = notes;
+            }
+            UiRequest::Attempt { via, address } => {
+                self.via = Some(via);
+                self.address = address.clone();
+                self.tried.push((via, address.clone()));
+                if address.parse::<std::net::IpAddr>().is_err() {
+                    self.note(format!("Resolving {address} …"), false);
+                }
+                let over = if via == Via::Tailscale { " over Tailscale" } else { "" };
+                self.note(format!("Opening TCP connection to {}{over}", self.target()), false);
+            }
+            UiRequest::Note(line, warn) => self.note(line, warn),
             UiRequest::HostKey(key, reply) => {
-                let check = self.app.upgrade().and_then(|app| app.update(cx, |app, cx| app.check_host_key(&key, cx)));
+                let aliases = holonet_model::VaultData::other_addresses(&self.host, &key.host);
+                let check =
+                    self.app.upgrade().and_then(|app| app.update(cx, |app, cx| app.check_host_key(&key, &aliases, cx)));
                 let Some(check) = check else {
                     // Vault locked mid-connect: refuse rather than guess.
                     let _ = reply.send(HostKeyDecision::Stop);
@@ -624,7 +780,13 @@ impl Pane {
                 );
                 match check.status {
                     KeyStatus::Trusted => {
-                        self.note("Host key verified against Known hosts", false);
+                        match &check.from_alias {
+                            Some(other) => self.note(
+                                format!("Host key matches the one trusted for {other}; trusted for this address too"),
+                                false,
+                            ),
+                            None => self.note("Host key verified against Known hosts", false),
+                        }
                         self.note_offer();
                         let _ = reply.send(HostKeyDecision::Continue);
                     }
@@ -645,7 +807,8 @@ impl Pane {
                         let _ = reply.send(HostKeyDecision::Stop);
                         self.note("Stopped: the host key has changed", true);
                         if let Some(app) = self.app.upgrade() {
-                            app.update(cx, |app, cx| app.record_mismatch(&key, cx));
+                            let entry = check.from_alias.clone();
+                            app.update(cx, |app, cx| app.record_mismatch(&key, entry.as_deref(), cx));
                         }
                         self.state = State::KeyChanged {
                             presented: key,
@@ -823,7 +986,7 @@ impl Pane {
                     }
                     ConnectError::TimedOut(s) => {
                         self.note(format!("No response after {s} seconds"), true);
-                        let body = unanswered_reason(self.host.address.trim());
+                        let body = self.unanswered_body();
                         self.fail(Failure::TimedOut, format!("{name} did not answer"), body)
                     }
                     ConnectError::SignInRefused { method, remaining } => {
@@ -868,6 +1031,87 @@ impl Pane {
                         self.fail(Failure::Other, "The connection failed", other.to_string())
                     }
                 }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Why the host did not answer, with what its routes mean
+    /// (ConnectStates.dc.html, "Timed out").
+    fn unanswered_body(&self) -> String {
+        let tailscale = self.host.tailscale().map(str::to_string);
+        let tried_tailscale = self.tried.iter().any(|(v, _)| *v == Via::Tailscale);
+        let tried_primary = self.tried.iter().any(|(v, _)| *v == Via::Primary);
+        let offline = self.plan_notes.contains(&PlanNote::PeerOffline);
+        let no_fallback = self.plan_notes.iter().find_map(|n| match n {
+            PlanNote::NoFallback(why) => Some(*why),
+            _ => None,
+        });
+        match (tried_primary, tried_tailscale, tailscale) {
+            (true, true, Some(ts)) => format!(
+                "Neither {} nor its Tailscale address {ts} answered. The server may be down.",
+                self.host.address.trim()
+            ),
+            (_, true, Some(ts)) => {
+                let mut text = format!("{ts} did not answer over Tailscale. The device may be offline or asleep.");
+                if offline {
+                    text.push_str(" Tailscale lists it as offline.");
+                }
+                text
+            }
+            (_, _, Some(_)) => {
+                let mut text = unanswered_reason(self.host.address.trim());
+                match no_fallback {
+                    Some(why) => {
+                        text.push_str(&format!(" This host also has a Tailscale address, but {}", lower_first(why)))
+                    }
+                    None => text.push_str(" This host also has a Tailscale address."),
+                }
+                text
+            }
+            _ => unanswered_reason(self.host.address.trim()),
+        }
+    }
+
+    /// "Try Tailscale" applies: the host has a Tailscale address this
+    /// attempt did not use.
+    fn can_try_tailscale(&self) -> Option<String> {
+        let ts = self.host.tailscale()?;
+        // Not when Tailscale is known to be off: the failure already says so.
+        let off = self.plan_notes.iter().any(|n| matches!(n, PlanNote::NoFallback(_)));
+        (!off && !self.tried.iter().any(|(v, _)| *v == Via::Tailscale)).then(|| ts.to_string())
+    }
+
+    /// The route plan allowed no attempt.
+    fn plan_failed(&mut self, problem: PlanProblem, cx: &mut Context<Self>) {
+        let name = self.host.display_name().to_string();
+        let reason = match &problem {
+            PlanProblem::TailscaleUnavailable(why) => why.to_string(),
+            PlanProblem::NoTailscaleAddress => "This host has no Tailscale address.".to_string(),
+        };
+        self.note(reason.clone(), true);
+        // Tailscale may come back (after a wake, say): reconnecting keeps trying.
+        if self.reconnect.is_some() && matches!(problem, PlanProblem::TailscaleUnavailable(_)) {
+            if let Some(r) = self.reconnect.as_mut() {
+                r.last_error = Some(reason.into());
+                // Waiting for Tailscale is not a failed attempt.
+                r.attempt = r.attempt.saturating_sub(1);
+                r.waiting_for_tailscale = true;
+            }
+            self.state = State::Connecting;
+            self.schedule_reconnect(cx);
+            return;
+        }
+        self.reconnect = None;
+        self.reconnect_task = None;
+        match problem {
+            PlanProblem::TailscaleUnavailable(_) => self.fail(
+                Failure::TailscaleOff,
+                format!("{name} connects over Tailscale"),
+                format!("{reason} Or edit the host to connect another way."),
+            ),
+            PlanProblem::NoTailscaleAddress => {
+                self.fail(Failure::Other, "No Tailscale address", "Edit the host to add its Tailscale address.")
             }
         }
         cx.notify();
@@ -957,12 +1201,7 @@ impl Pane {
                         .text_color(theme::ink())
                         .child(SharedString::from(format!("Connecting to {name}"))),
                 )
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(theme::ink_muted())
-                        .child(SharedString::from(format!("Trying {}.", self.host.address.trim()))),
-                )
+                .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(self.trying_text())))
                 .child(Button::secondary("connect-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| {
                     this.attempt += 1;
                     cx.emit(SessionEvent::Close)
@@ -971,16 +1210,39 @@ impl Pane {
         .into_any_element()
     }
 
+    /// The connecting card's line (ConnectStates.dc.html).
+    fn trying_text(&self) -> String {
+        let ts = self.host.tailscale().unwrap_or_default();
+        match self.via {
+            Some(Via::Tailscale) if self.plan_notes.contains(&PlanNote::PrimarySkipped) => format!(
+                "{} is not reachable from this network, so Holonet is using Tailscale ({ts}).",
+                self.host.address.trim()
+            ),
+            Some(Via::Tailscale) if self.tried.len() > 1 => {
+                format!("The primary address did not answer. Trying Tailscale ({ts}).")
+            }
+            Some(Via::Tailscale) => format!("Trying {ts} over Tailscale."),
+            Some(Via::Primary) if self.plan_len > 1 => {
+                "Trying the primary address. Tailscale is next if it does not answer.".to_string()
+            }
+            _ => format!("Trying {}.", self.address),
+        }
+    }
+
     /// ConnectStates.dc.html, "Reconnecting": a banner over the old output.
     fn reconnecting_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(r) = &self.reconnect else { return div().into_any_element() };
         let total = RECONNECT_BACKOFF.len();
         let progress = match r.next_at {
+            Some(_) if r.waiting_for_tailscale => " Waiting for Tailscale on this PC.".to_string(),
             Some(at) => {
                 let secs = at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
                 let tried =
                     if r.attempt == 0 { String::new() } else { format!("Attempt {} of {total} failed. ", r.attempt) };
                 format!(" {tried}Trying again in {secs} s.")
+            }
+            None if self.via == Some(Via::Tailscale) => {
+                format!(" Reconnecting over Tailscale, attempt {} of {total}.", r.attempt)
             }
             None => format!(" Reconnecting, attempt {} of {total}.", r.attempt),
         };
@@ -1340,7 +1602,26 @@ impl Pane {
                 }),
             )),
             Failure::RefusedUnknown => buttons,
-            Failure::Network | Failure::TimedOut | Failure::KeyRefused | Failure::GaveUp | Failure::Other => {
+            Failure::Network | Failure::TimedOut if self.can_try_tailscale().is_some() => {
+                let ts = self.can_try_tailscale().unwrap_or_default();
+                buttons
+                    .child(Button::primary("try-tailscale", format!("Try Tailscale ({ts})")).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.route_override = Some(Route::Tailscale);
+                            this.start(cx)
+                        },
+                    )))
+                    .child(Button::secondary("retry", "Retry").on_click(cx.listener(|this, _, _, cx| {
+                        this.route_override = None;
+                        this.start(cx)
+                    })))
+            }
+            Failure::Network
+            | Failure::TimedOut
+            | Failure::KeyRefused
+            | Failure::GaveUp
+            | Failure::TailscaleOff
+            | Failure::Other => {
                 buttons.child(Button::primary("retry", "Retry").on_click(cx.listener(|this, _, _, cx| this.start(cx))))
             }
         };
@@ -1373,6 +1654,7 @@ impl Pane {
     pub fn status_bar(&self) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
             _ if self.reconnect.is_some() => ("Reconnecting", theme::ink_muted()),
+            State::Connected if self.via == Some(Via::Tailscale) => ("Connected over Tailscale", theme::group_mint()),
             State::Connected => ("Connected", theme::group_mint()),
             State::Ended(_) => ("Ended", theme::warn()),
             State::Failed { kind, .. } => (kind.state_word(), theme::warn()),

@@ -874,6 +874,28 @@ impl VaultData {
         self.known_hosts.iter().find(|k| k.matches(host, port))
     }
 
+    /// The trusted key for `host:port`, or else for one of the same saved
+    /// host's other addresses on that port (owner decision, milestone 4
+    /// phase 6: a host's primary and Tailscale addresses share trust when
+    /// the key matches). The flag says it came from another address.
+    pub fn known_host_or_alias(&self, host: &str, port: u16, aliases: &[String]) -> Option<(&KnownHost, bool)> {
+        if let Some(known) = self.known_host(host, port) {
+            return Some((known, false));
+        }
+        aliases.iter().find_map(|a| self.known_host(a.trim(), port)).map(|k| (k, true))
+    }
+
+    /// A host's addresses other than `connected`: its primary and
+    /// Tailscale addresses, trimmed.
+    pub fn other_addresses(host: &Host, connected: &str) -> Vec<String> {
+        [Some(host.address.trim()), host.tailscale()]
+            .into_iter()
+            .flatten()
+            .filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(connected.trim()))
+            .map(str::to_string)
+            .collect()
+    }
+
     pub fn known_host_mut(&mut self, host: &str, port: u16) -> Option<&mut KnownHost> {
         self.known_hosts.iter_mut().find(|k| k.matches(host, port))
     }
@@ -1186,6 +1208,23 @@ mod tests {
         let a_after = d.host(a.id).unwrap();
         assert_eq!((a_after.identity, a_after.username.as_str()), (None, "deploy"));
         assert!(matches!(a_after.auth, Auth::Password { saved: Some(_) }));
+    }
+
+    #[test]
+    fn a_hosts_addresses_share_trust() {
+        let mut d = VaultData::default();
+        let mut h = Host::new("192.168.1.51");
+        h.tailscale_address = Some("100.64.0.21".into());
+        d.trust_host_key("192.168.1.51", 22, "ssh-ed25519 K", KnownHostSource::FirstConnection);
+        let aliases = VaultData::other_addresses(&h, "100.64.0.21");
+        assert_eq!(aliases, ["192.168.1.51"]);
+        let (known, alias) = d.known_host_or_alias("100.64.0.21", 22, &aliases).unwrap();
+        assert!(alias && known.public_key == "ssh-ed25519 K");
+        // Its own entry wins once there is one.
+        d.trust_host_key("100.64.0.21", 22, "ssh-ed25519 K", KnownHostSource::FirstConnection);
+        assert!(!d.known_host_or_alias("100.64.0.21", 22, &aliases).unwrap().1);
+        // Another port is another server.
+        assert!(d.known_host_or_alias("100.64.0.21", 2222, &aliases).is_none());
     }
 
     #[test]
