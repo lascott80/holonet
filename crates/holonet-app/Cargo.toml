@@ -24,7 +24,3 @@ unicode-segmentation = "1.13.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
-
-[dev-dependencies]
-# Milestone 3 phase 0 spike (examples/power_spike.rs).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_UI_WindowsAndMessaging"] }

@@ -443,8 +443,8 @@ The spike also logs whenever the wall clock and the monotonic clock jump apart, 
 **Decision:** embed them with `include_bytes!`, as Inter and Space Grotesk already are. The cost is download size only, and a single-file exe is simpler to run unsigned. If size ever matters, the fallback is a `fonts/` folder beside the exe, loaded at start.
 
 ### Left in the tree for later phases
-- `holonet --font-spike` (`src/font_spike.rs`) stays as a regression check until phase 2 embeds the fonts. It is removed in phase 9.
-- `examples/power_spike.rs` and its `windows-sys` dev-dependency stay for phase 7's live test.
+- `holonet --font-spike` (`src/font_spike.rs`) stayed as a regression check until phase 2 embedded the fonts. Removed in phase 9.
+- `examples/power_spike.rs` and its `windows-sys` dev-dependency stayed for phase 7's live test. Removed in phase 9.
 
 ## Milestone 3, phase 1: settings model and lost connections (25 Nov 2026)
 
@@ -782,3 +782,21 @@ Every keystroke's search plus a frame stays under 16 ms. The time is spent readi
 | `Row (2\d00)$` | "10 lines match"; the view jumped from the bottom to Row 2900 |
 | Esc | Bar closed, highlights gone |
 | Split right, "Row 2999" in the new pane | "No matches"; clicking the first pane gave "1 line matches" with Row 2999 highlighted |
+
+## Milestone 3, phase 9: wrap-up (25 Nov 2026)
+
+**Removed.** The phase 0 spikes are gone: `holonet --font-spike` (`src/font_spike.rs`), `examples/power_spike.rs`, and the `windows-sys` dev-dependency. The live code from them is `assets.rs` (embedded fonts) and `platform::watch_system`.
+
+**Done check from a clean profile**: release build, a new vault file in an empty folder (the vault holds every setting, so this is a clean profile), the WSL test server.
+
+| Done means | Result |
+| --- | --- |
+| Several tabs from the new-tab host picker | Created the vault, added hosts `wsl-a` and `wsl-b`. "+" opened the picker with both; `wsl-a` showed the first-connection key prompt, Trust and connect. Ctrl Shift T, "wsl-b", Enter opened a second tab with no prompt (same server key) |
+| Nested panes with a second host, resized by dragging | In the `wsl-b` tab, the Split right menu picked `wsl-a`, then Split down nested a third pane. Dragging the divider changed the panes from 72 to 96 and 49 columns |
+| Find in a pane's scrollback | `seq 1 500`, Ctrl Shift F, "42": "15 lines match" (42, 142, 242, 342, 420–429, 442); Enter moved to the older match |
+| Font, size and scheme apply to every open terminal at once | Settings: Cascadia Mono, 17 px, Light. All four terminals in both tabs changed at once |
+| A dropped connection reconnects, keeps its scrollback and says what happened | `kill -9 $PPID`: "The connection was lost. Reconnecting, attempt 1 of 5." over the dimmed output, then connected. Find for "before-drop" found it above "-- Reconnected at 19:18. The shell restarted; …" |
+
+fmt, clippy `-D warnings`, the unit tests and the WSL integration tests pass.
+
+**Milestone 3 is done.** Carried forward, not tested here: a drop after sleep from a remote server (phase 7).

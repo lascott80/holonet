@@ -115,7 +115,7 @@ Each phase ends with a commit and a check.
 | 6 | **Connection states** *(done)*: connecting, timed out, sign-in refused, key refused, as drawn, inside panes | Each state reached on purpose against WSL (stopped sshd, wrong password, wrong passphrase, blocked port) |
 | 7 | **Reconnect** *(done; the sleep and Wi-Fi events were checked live, but a drop from a remote server after sleep was not, since the test server is on this PC)*: drop detection, 5 attempts with backoff, banner, Reconnect now, Close tab, scrollback kept with a separator, typed secrets reused, changed key still stops | Kill the connection, sleep the PC, toggle Wi-Fi: each reconnects; a key swapped during the outage stops |
 | 8 | **Find** *(done; benchmarked with `--find-bench`, which fills the same 10,000-line history without a window)*: bar, Match case, Regex, highlights, current match, previous and next, count text as drawn, Ctrl Shift F, Enter, Shift Enter, Esc | Find in 10,000 lines of `--stream-bench` output stays under one frame per keystroke |
-| 9 | **Wrap-up**: notes, `CLAUDE.md`, the done check above from a clean profile, PR | Done check passes |
+| 9 | **Wrap-up** *(done)*: notes, `CLAUDE.md`, the done check above from a clean profile, PR | Done check passes |
 
 ## Undrawn states I will draw in the design system's style
 
