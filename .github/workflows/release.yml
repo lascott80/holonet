@@ -1,27 +1,30 @@
 name: Release
 
-# Builds holonet.exe for Windows ARM64 and x64.
-# Milestone 7 phase 0: runs when this file changes on milestone-7 and keeps
-# the exe as a workflow artifact. Phase 9 adds `v*` tags and the release.
+# A `v*` tag builds holonet.exe for Windows ARM64 and x64, packages each as
+# a zip (scripts/package.py), and attaches both to a draft GitHub release.
+# The owner reads the draft and publishes it; nothing is published here.
+# A tag with a suffix (v0.1.0-rc1) makes a pre-release, which Holonet's
+# new-release check never reports.
 on:
   push:
-    branches: [milestone-7]
-    paths: [.github/workflows/release.yml]
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.arch }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
-          - name: windows-arm64
+          - arch: arm64
             runner: windows-11-arm
-          - name: windows-x64
+            target: aarch64-pc-windows-msvc
+          - arch: x64
             runner: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -38,15 +41,55 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustc -vV
 
+      - name: Check the tag matches the version
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).packages |
+            Where-Object name -eq holonet-app | ForEach-Object version
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith("v$version")) { throw "tag $tag does not match holonet-app $version" }
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
 
       - name: Build
+        env:
+          # The icon and version details are required in a release.
+          HOLONET_REQUIRE_RC: "1"
         run: cargo build -p holonet-app --release --locked
+
+      - name: Package
+        run: python scripts/package.py --target ${{ matrix.target }} --arch ${{ matrix.arch }} --exe target/release/holonet.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: holonet-${{ matrix.name }}
-          path: target/release/holonet.exe
+          name: holonet-windows-${{ matrix.arch }}
+          path: dist/*.zip
           retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
+          cd dist
+          sha256sum *.zip > SHA256SUMS.txt
+          gh release create "$TAG" *.zip SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --draft $pre \
+            --title "Holonet ${TAG#v}" \
+            --notes "Unsigned builds for Windows on ARM (arm64) and x64. Extract the zip and run holonet.exe; see README.txt inside. Windows may warn that the app is unrecognised: choose More info, then Run anyway."

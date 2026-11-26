@@ -616,7 +616,7 @@ mod tests {
     fn short_paths_keep_drive_and_tail() {
         let normal = r"C:\Users\me\AppData\Roaming\Holonet\vault.holonet";
         assert_eq!(short_path(normal, 100), normal);
-        let long = r"C:\Users\LAWREN~1\AppData\Local\Temp\claude\scratchpad\vaulttest-2d2587\vault.holonet";
+        let long = r"C:\Users\someone\AppData\Local\Temp\holonet\scratchpad\vaulttest-2d2587\vault.holonet";
         let short = short_path(long, 40);
         assert!(short.starts_with(r"C:\…\") && short.ends_with(r"vaulttest-2d2587\vault.holonet"), "{short}");
         assert!(short.chars().count() <= 40, "{short}");
