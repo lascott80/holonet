@@ -1,0 +1,52 @@
+name: Release
+
+# Builds holonet.exe for Windows ARM64 and x64.
+# Milestone 7 phase 0: runs when this file changes on milestone-7 and keeps
+# the exe as a workflow artifact. Phase 9 adds `v*` tags and the release.
+on:
+  push:
+    branches: [milestone-7]
+    paths: [.github/workflows/release.yml]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-arm64
+            runner: windows-11-arm
+          - name: windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (rust-toolchain.toml)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe -OutFile rustup-init.exe
+            .\rustup-init.exe -y --default-toolchain none --profile minimal
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append $env:GITHUB_PATH
+            $env:Path += ";$env:USERPROFILE\.cargo\bin"
+          }
+          rustup show active-toolchain || rustup toolchain install
+          rustc -vV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build
+        run: cargo build -p holonet-app --release --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holonet-${{ matrix.name }}
+          path: target/release/holonet.exe
+          retention-days: 7

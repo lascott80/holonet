@@ -10,6 +10,12 @@
 //!   holonet --parse-bench   time parsing 10 MB of colored output, no window
 //!   holonet --find-bench    time find over a full 10,000-line history, no window
 //!   holonet --stream-bench  feed 10 MB through parser and renderer, then quit
+//!
+//! Release builds are Windows apps, so no console opens with them. The modes
+//! above attach to the console of the terminal they were started from.
+
+// No console window for the release app; debug builds keep theirs for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
 mod assets;
@@ -143,8 +149,27 @@ fn find_bench() {
     }
 }
 
+/// Print to the terminal a release build was started from, when there is one.
+/// Output that is piped or redirected already has its handles and is left
+/// alone.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: plain Win32 calls with no pointers.
+    unsafe {
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if out.is_null() || out == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() {
     let arg = std::env::args().nth(1);
+    #[cfg(windows)]
+    if arg.is_some() {
+        attach_console();
+    }
     if arg.as_deref() == Some("--find-bench") {
         find_bench();
         return;
