@@ -2672,3 +2672,47 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 **Hosts header:** the chip sits inside the search field, as drawn. The field is 300px wide and the title's basis 110px, so it all fits on one line at 150% scale. The long placeholder is clipped under the chip ("Find a host, or type ssh us…").
 
 **Cleanup and checks:** the test vault copy was removed, and port 18190 is closed. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 49.
+
+## Milestone 7, phase 7: the new-release check (26 Nov 2026)
+
+**`updates.rs`:**
+
+- **The request:** WinHTTP from spike (b), with a generic "Holonet" user agent, to `api.github.com/repos/lascott80/holonet/releases/latest`. Nothing else is sent or read.
+- **Reading the answer:**
+  - **200:** the tag and `published_at`. The release counts as newer when its version beats `CARGO_PKG_VERSION`. Versions are compared as numbers: `v0.2.0`, `0.2`, and `-rc1` ignored.
+  - **404:** up to date. That is what a repository with no releases, or a private one, answers.
+  - **403 or 429:** "GitHub is limiting requests right now."
+  - **Anything else, or no connection:** "Holonet could not reach GitHub."
+- **Testing without a release:** `HOLONET_UPDATE_REPO` (`owner/name`) and `HOLONET_UPDATE_HOST` let a check ask a stand-in repository, or an unreachable host.
+
+**When it runs:**
+- **At the first unlock of each start**, when "Look for new releases" says so. For "Once a day", it runs then only if a day has passed.
+- **Once a day:** the workspace looks every hour, and checks when a day has passed since the last check.
+- **Check now.**
+- **Recording the result:** a successful check records `last_checked` and the release found (or none). A failed one records nothing, so a daily check tries again.
+
+**Settings (`Settings.dc.html`):**
+
+- **The notice** at the top of the page, while the newest release found is newer than this build and not hidden with Later:
+  - "Holonet 0.2.0 is available", then "You have 0.1.0. Released on GitHub on …"
+  - **View release on GitHub** opens the release page.
+  - **Later** stores that tag as dismissed, so a different, newer release shows again.
+- **The dot** on the Settings entry while the notice would show.
+- **"About and updates"** (the chip reads Updates, as drawn):
+  - **Version:** "0.1.0 · Windows ARM64" (x64 on x64 builds).
+  - **Look for new releases:** When Holonet starts, Once a day, Never.
+  - **Last checked:** "Today at 15:53. A newer release was found.", "… Holonet is up to date.", "Checking…" or "Holonet could not reach GitHub.", with Check now.
+  - **Bundled fonts.**
+  - **The note:** "Holonet only reads the public releases page of github.com/lascott80/holonet. …"
+
+**Live check** (a copy of the test vault):
+
+1. **First stand-in:** with `HOLONET_UPDATE_REPO=zed-industries/zed`, the start-up check showed "Holonet 1.30.2 is available" and the dot.
+2. **Later:** hid both.
+3. **Second stand-in:** after a restart with `microsoft/terminal`, that release's notice showed again, since a different release is not the one dismissed.
+4. **Offline:** with `HOLONET_UPDATE_HOST=nonexistent.invalid`, Check now said "Holonet could not reach GitHub." The last release found stayed.
+5. **No overrides:** this private repository answered 404, so "Today at 15:54. Holonet is up to date.", and the notice and dot cleared.
+
+**Not clicked:** "View release on GitHub", which would open the browser.
+
+The spike program `m7_update.rs` is gone, replaced by `updates.rs`. `serde_json` (already in the lockfile) reads the answer. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 52.

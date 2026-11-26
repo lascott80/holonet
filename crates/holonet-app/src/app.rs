@@ -212,6 +212,11 @@ impl HolonetApp {
             }
             if clean {
                 w.save(move |d| clean_history(d, &logs), cx);
+                // Once per start: the new-release check, when Settings asks
+                // for it then (or a day has passed).
+                if w.vault_data().is_some_and(|d| d.settings.updates.due(Timestamp::now(), true)) {
+                    w.check_updates(cx);
+                }
             }
         });
         self.stage = Stage::Open(workspace);

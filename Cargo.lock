@@ -2985,6 +2985,7 @@ dependencies = [
  "holonet-vault",
  "jiff",
  "regex",
+ "serde_json",
  "tempfile",
  "tokio",
  "unicode-segmentation",

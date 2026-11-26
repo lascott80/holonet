@@ -138,6 +138,22 @@ impl Workspace {
     ) -> Self {
         let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
         let settings_subs = settings_ui.subscribe(cx);
+        // "Once a day": checked hourly whether a day has passed.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60 * 60)).await;
+                let Ok(()) = this.update(cx, |w: &mut Workspace, cx| {
+                    let due =
+                        w.vault_data().is_some_and(|d| d.settings.updates.due(holonet_model::Timestamp::now(), false));
+                    if due {
+                        w.check_updates(cx);
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
         let search = cx.new(|cx| TextField::new(cx, "Find a host, or type ssh user@address"));
         let quick = cx.new(|cx| TextField::new(cx, "user@address").mono());
         let kh_search = cx.new(|cx| TextField::new(cx, "Filter by host, address or fingerprint"));
@@ -535,6 +551,9 @@ impl Render for Workspace {
             .flex()
             .child(
                 SideNav::new(Some(active), PAGES.to_vec())
+                    .update_available(
+                        self.vault_data().and_then(|d| crate::updates::notice(&d.settings.updates)).is_some(),
+                    )
                     .hello(self.vault.as_ref().is_some_and(|v| v.has_hello()))
                     .on_select({
                         move |entry, _, cx| {

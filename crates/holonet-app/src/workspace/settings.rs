@@ -67,7 +67,7 @@ const LICENCES: &[(&str, &str)] = &[
 
 /// Sections, in page order: (chip label, child index in the scroll container).
 const SECTIONS: &[(&str, usize)] =
-    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("SFTP", 4), ("Keyboard", 5), ("About", 6)];
+    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("SFTP", 4), ("Keyboard", 5), ("Updates", 6)];
 
 /// Settings, SFTP, "When a file already exists" and "Transfers at once"
 /// options in order.
@@ -90,6 +90,11 @@ pub(crate) struct SettingsUi {
     at_once: Entity<Select>,
     /// "Lock vault after": 15 minutes, 1 hour, Never.
     lock_after: Entity<Select>,
+    /// "Look for new releases": when Holonet starts, once a day, never.
+    update_check: Entity<Select>,
+    /// A check running now, and why the last one failed (until the next).
+    pub(super) update_checking: bool,
+    pub(super) update_failed: Option<SharedString>,
     /// Whether Windows Hello is set up on this PC; `None` while checking.
     hello_available: Option<bool>,
     /// "Turn on Windows Hello", asking for the vault password first.
@@ -134,6 +139,9 @@ const FALLBACK_WAITS: [holonet_model::FallbackWait; 4] = [
     holonet_model::FallbackWait::Secs5,
     holonet_model::FallbackWait::Secs10,
 ];
+
+const UPDATE_CHECKS: [holonet_model::UpdateCheck; 3] =
+    [holonet_model::UpdateCheck::Start, holonet_model::UpdateCheck::Daily, holonet_model::UpdateCheck::Never];
 
 const LOG_KEEP: [holonet_model::LogKeep; 4] = [
     holonet_model::LogKeep::Days7,
@@ -198,6 +206,13 @@ impl SettingsUi {
                 LOG_KEEP.iter().position(|k| *k == settings.connection.log_keep).unwrap_or(1),
             )
         });
+        let update_check = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["When Holonet starts".into(), "Once a day".into(), "Never".into()],
+                UPDATE_CHECKS.iter().position(|c| *c == settings.updates.check).unwrap_or(0),
+            )
+        });
         let lock_after = cx.new(|cx| {
             Select::new(
                 cx,
@@ -229,6 +244,9 @@ impl SettingsUi {
         })
         .detach();
         Self {
+            update_check,
+            update_checking: false,
+            update_failed: None,
             unknown_keys,
             fallback_wait,
             log_keep,
@@ -289,6 +307,11 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let w = FALLBACK_WAITS[i.min(3)];
                 this.save(|d| d.settings.connection.fallback_wait = w, cx);
+            }),
+            cx.subscribe(&self.update_check, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let check = UPDATE_CHECKS[i.min(2)];
+                this.save(|d| d.settings.updates.check = check, cx);
             }),
             cx.subscribe(&self.log_keep, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -419,7 +442,10 @@ impl Workspace {
             .gap(theme::SPACE_5)
             .child(page_block(
                 width,
-                div().child(div().text_title().text_color(theme::ink()).child("Settings")).child(chips),
+                div()
+                    .child(div().text_title().text_color(theme::ink()).child("Settings"))
+                    .child(chips)
+                    .children(self.update_notice(cx)),
             ))
             .child(page_block(width, self.terminal_section(&settings, &installed, preview, cx)))
             .child(page_block(width, self.security_section(cx)))
@@ -840,12 +866,107 @@ impl Workspace {
         ]))
     }
 
+    /// Settings.dc.html's notice: a newer release, with View release on
+    /// GitHub and Later.
+    fn update_notice(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (tag, published) = crate::updates::notice(&self.vault_data()?.settings.updates)?;
+        let version = tag.trim_start_matches(['v', 'V']).to_string();
+        let url = crate::updates::release_page(&tag);
+        let released = super::hosts::format_date(published);
+        Some(
+            div()
+                .mt(theme::SPACE_5)
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(theme::SPACE_4)
+                .gap_y(theme::SPACE_3)
+                .px(px(18.))
+                .py(theme::SPACE_4)
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::accent())
+                .rounded(theme::RADIUS_XL)
+                .child(crate::ui::icon("download", px(20.), theme::accent()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(280.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_family(theme::DISPLAY)
+                                .text_size(px(16.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::ink())
+                                .child(SharedString::from(format!("Holonet {version} is available"))),
+                        )
+                        .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(format!(
+                            "You have {}. Released on GitHub on {released}.",
+                            crate::updates::CURRENT
+                        )))),
+                )
+                .child(
+                    Button::primary("update-view", "View release on GitHub")
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+                .child(Button::secondary("update-later", "Later").on_click(cx.listener(move |this, _, _, cx| {
+                    let tag = tag.clone();
+                    this.save(move |d| d.settings.updates.dismissed = Some(tag), cx);
+                }))),
+        )
+    }
+
+    /// "Last checked": when, and what it found.
+    fn last_checked(&self) -> SharedString {
+        if self.settings_ui.update_checking {
+            return "Checking…".into();
+        }
+        if let Some(why) = &self.settings_ui.update_failed {
+            return why.clone();
+        }
+        let Some(u) = self.vault_data().map(|d| &d.settings.updates) else { return "".into() };
+        match u.last_checked {
+            None => "Not yet.".into(),
+            Some(t) => {
+                let found = match &u.latest {
+                    Some((tag, _)) if crate::updates::is_newer(tag, crate::updates::CURRENT) => {
+                        "A newer release was found."
+                    }
+                    _ => "Holonet is up to date.",
+                };
+                format!("{}. {found}", crate::updates::when(t)).into()
+            }
+        }
+    }
+
     fn about_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        section("About").child(setting_card(vec![
+        let arch = if cfg!(target_arch = "aarch64") { "Windows ARM64" } else { "Windows x64" };
+        section("About and updates")
+            .child(setting_card(vec![
             setting_row(
-                "Holonet",
-                Some(format!("Version {}", env!("CARGO_PKG_VERSION")).into()),
-                div(),
+                "Version",
+                None,
+                div()
+                    .text_mono_small()
+                    .text_color(theme::ink())
+                    .child(SharedString::from(format!("{} · {arch}", crate::updates::CURRENT))),
+            )
+            .into_any_element(),
+            setting_row(
+                "Look for new releases",
+                None,
+                div().w(px(200.)).child(self.settings_ui.update_check.clone()),
+            )
+            .into_any_element(),
+            setting_row(
+                "Last checked",
+                Some(self.last_checked()),
+                Button::secondary("update-check-now", "Check now")
+                    .disabled(self.settings_ui.update_checking)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
             )
             .into_any_element(),
             setting_row(
@@ -861,6 +982,47 @@ impl Workspace {
             )
             .into_any_element(),
         ]))
+            .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(format!(
+                "Holonet only reads the public releases page of {}. Nothing is installed automatically: download the new build and replace the old one. Builds are unsigned, so Windows warns the first time each one runs.",
+                crate::updates::repo_label()
+            ))))
+    }
+
+    /// Ask GitHub for a newer release now (Check now, at start, daily).
+    pub(crate) fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.settings_ui.update_checking {
+            return;
+        }
+        self.settings_ui.update_checking = true;
+        self.settings_ui.update_failed = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async { crate::updates::check() }).await;
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                w.settings_ui.update_checking = false;
+                let now = holonet_model::Timestamp::now();
+                match result {
+                    crate::updates::CheckResult::Newer { tag, published } => w.save(
+                        move |d| {
+                            d.settings.updates.last_checked = Some(now);
+                            d.settings.updates.latest = Some((tag, published));
+                        },
+                        cx,
+                    ),
+                    crate::updates::CheckResult::UpToDate => w.save(
+                        move |d| {
+                            d.settings.updates.last_checked = Some(now);
+                            d.settings.updates.latest = None;
+                        },
+                        cx,
+                    ),
+                    // A failed check is not counted, so a daily one tries again.
+                    crate::updates::CheckResult::Failed(why) => w.settings_ui.update_failed = Some(why.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The Settings switch: on asks for the vault password, off removes the

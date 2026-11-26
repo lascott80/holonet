@@ -38,6 +38,7 @@ mod sample;
 mod session;
 mod snippet_run;
 mod tab;
+mod updates;
 // Design-system modules: parts are used by later phases of milestone 2.
 #[allow(dead_code)]
 mod shell;
