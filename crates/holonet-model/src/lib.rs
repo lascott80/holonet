@@ -471,9 +471,36 @@ impl KnownHost {
         key_type_label(self.key_type())
     }
 
+    /// Whether `host:port` is this entry. A hashed entry (imported from a
+    /// `known_hosts` file with `HashKnownHosts`) matches by its hash, and by
+    /// its own text and port 0 for lookups from the Known hosts page.
     pub fn matches(&self, host: &str, port: u16) -> bool {
-        self.port == port && self.host.eq_ignore_ascii_case(host)
+        if self.port == port && self.host.eq_ignore_ascii_case(host) {
+            return true;
+        }
+        self.is_hashed() && hashed_name_matches(&self.host, host, port)
     }
+
+    /// The name was imported hashed (`|1|salt|hash`): it can be matched
+    /// against an address but not shown.
+    pub fn is_hashed(&self) -> bool {
+        self.host.starts_with("|1|")
+    }
+}
+
+/// Whether `|1|salt|hash` is the HMAC-SHA1 of `host` (or `[host]:port`
+/// when the port is not 22), as OpenSSH hashes `known_hosts` names.
+pub fn hashed_name_matches(hashed: &str, host: &str, port: u16) -> bool {
+    use base64::Engine;
+    use hmac::{KeyInit, Mac};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let Some((salt, hash)) = hashed.strip_prefix("|1|").and_then(|r| r.split_once('|')) else { return false };
+    let (Ok(salt), Ok(hash)) = (b64.decode(salt), b64.decode(hash)) else { return false };
+    let host = host.to_ascii_lowercase();
+    let name = if port == 22 { host } else { format!("[{host}]:{port}") };
+    let Ok(mut mac) = hmac::Hmac::<sha1::Sha1>::new_from_slice(&salt) else { return false };
+    mac.update(name.as_bytes());
+    mac.verify_slice(&hash).is_ok()
 }
 
 pub fn key_type_label(key_type: &str) -> &'static str {
@@ -1950,5 +1977,31 @@ mod tests {
         assert!(u.due(Timestamp(1000 + 24 * 3600), false));
         u.check = UpdateCheck::Never;
         assert!(!u.due(Timestamp(1 << 40), true));
+    }
+
+    #[test]
+    fn hashed_known_hosts_match_by_hash() {
+        // Hashed by OpenSSH 10.2's `ssh-keygen -H` from "localhost" and
+        // "[nas-01]:2200".
+        let entry = |host: &str| KnownHost {
+            host: host.into(),
+            port: 0,
+            public_key: "ssh-ed25519 AAAA".into(),
+            trusted_at: Timestamp(0),
+            last_matched_at: None,
+            source: KnownHostSource::ImportedKnownHosts,
+            mismatch: None,
+        };
+        let a = entry("|1|+kWW2e027W0ntGRif7cTkehL3qQ=|e7w2aLcIgIutyBL2seoXohL+9LU=");
+        let b = entry("|1|ZhDEZpjNLM0u56bewQHxmOP7LPM=|4+YOBUvXqr/xPCbxDEg28LBRnvQ=");
+        assert!(a.is_hashed() && a.matches("localhost", 22) && a.matches("LOCALHOST", 22));
+        assert!(!a.matches("localhost", 2200) && !a.matches("otherhost", 22));
+        assert!(b.matches("nas-01", 2200) && !b.matches("nas-01", 22));
+        // The Known hosts page finds it by its own text.
+        assert!(a.matches(&a.host.clone(), 0));
+        let mut d = VaultData::default();
+        d.known_hosts.push(a.clone());
+        assert_eq!(d.known_host("localhost", 22).map(|k| k.host.as_str()), Some(a.host.as_str()));
+        assert!(!entry("|1|bad").matches("localhost", 22));
     }
 }

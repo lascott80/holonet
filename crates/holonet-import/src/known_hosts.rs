@@ -57,8 +57,12 @@ impl Name {
     }
 }
 
-/// `host`, or `[host]:port` when the port is not 22.
+/// `host`, or `[host]:port` when the port is not 22. A hashed name
+/// (`|1|salt|hash`) already holds its port and is written as it is.
 fn written_name(host: &str, port: u16) -> String {
+    if host.starts_with("|1|") {
+        return host.to_string();
+    }
     let host = host.to_ascii_lowercase();
     if port == 22 { host } else { format!("[{host}]:{port}") }
 }

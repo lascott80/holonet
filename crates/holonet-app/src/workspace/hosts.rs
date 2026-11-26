@@ -121,8 +121,8 @@ impl Workspace {
                 div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_w(px(200.))
+                    .flex_grow()
+                    .flex_basis(px(160.))
                     .child(div().text_title().text_color(theme::ink()).child("Hosts"))
                     .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(
                         match data.groups.len() {
@@ -132,12 +132,22 @@ impl Workspace {
                         },
                     ))),
             )
-            .child(div().w(px(320.)).child(self.search.clone()))
+            // Narrower than drawn, so Import fits on the line with New host.
+            .child(div().w(px(260.)).child(self.search.clone()))
             .child(
-                Button::primary("new-host", "New host")
-                    .header()
-                    .icon("plus")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_form(None, window, cx))),
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(theme::SPACE_2)
+                    .child(Button::secondary("import-hosts", "Import").header().on_click(
+                        cx.listener(|this, _, _, cx| this.open_import(super::import::ImportKind::Config, cx)),
+                    ))
+                    .child(
+                        Button::primary("new-host", "New host")
+                            .header()
+                            .icon("plus")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_form(None, window, cx))),
+                    ),
             );
 
         let toggle = div().w(px(180.)).child(

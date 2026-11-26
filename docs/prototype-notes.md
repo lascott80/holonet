@@ -2501,3 +2501,79 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 - fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 42 tests, including the stripper and the writer thread.
 
 **Left for wrap-up:** the History table row and log viewer in `--gallery`.
+
+## Milestone 7, phase 4: import (26 Nov 2026)
+
+**Config import (`import.rs`, `workspace/import.rs`):**
+
+- **Opening it:** the Hosts page has an Import button. The dialog offers FirstRun's three cards: the Windows profile, WSL, and another file.
+  - **WSL:** lists distributions through `wsl_ssh_dirs` (as the Keychain does), and asks which one when there are several.
+  - **Another file:** opens Windows' file dialog.
+- **Paths:**
+  - **What `~` and `%d` mean:**
+    - the profile, for the Windows source
+    - the distribution's home, for WSL
+    - for a chosen file inside a `.ssh` folder, that folder's parent, so `\wsl.localhost\Ubuntu-26.04\home\holotest\.ssh\config` behaves like WSL
+  - Linux absolute paths (`/etc/...`) map into the distribution, and resolve nowhere on Windows itself.
+  - Relative `Include` paths are relative to `~/.ssh`, and a wildcard in the last part matches files in that folder.
+  - Files over 1 MB are not read.
+- **Planning, on a background thread:**
+  - **Key files:** each `IdentityFile` is read with `key_import::read_file`.
+    - A key already in the Keychain (same public key) is reused.
+    - A new one becomes one `StoredKey` per file, however many hosts name it.
+    - A missing file or a PuTTY key with a passphrase is a note on the host.
+  - **Host names:** the `Host` name becomes the label when it differs from `HostName`. A name already in the vault reads "Already in the vault" and starts unticked.
+- **The preview:** a ticked row per host shows user@address:port, the key (new or existing), "Through" the jump hosts, and the host's notes. "Show what is not imported (n)" lists the file's skipped entries with their line numbers. "Import n hosts" applies the ticked ones.
+- **Applying:**
+  - **Keys:** new keys are added once, by public key.
+  - **Jump hosts:** found by name, else by address and port, among all hosts now in the vault.
+    - A chain `a,b` sets the host's jump host to b and, when b came in with this import and has none, b's to a. Own values are marked as not following a group.
+    - A hop that cannot be found leaves the jump host empty, and the notice says to set it on the host form.
+  - **The notice:** "Imported 2 hosts and 1 key. 2 entries were not imported."
+
+**known_hosts:**
+
+- **Hashed names in the model:** `KnownHost::matches` now matches hashed names (`|1|salt|hash`) by HMAC-SHA1, so `holonet-model` gains `hmac`, `sha1` and `base64` (all already in the lockfile).
+  - A hashed entry is stored as its text with port 0, so the page can find it by its own text, and `forget` works.
+  - The OpenSSH 10.2 vectors from phase 2 are the test.
+- **Import:** the Known hosts page's "Import known_hosts" offers the same three sources. It imports at once and reports:
+  - how many it imported
+  - how many were already trusted
+  - how many differ from a trusted key (never imported, per `decisions.md`)
+  - how many lines were skipped
+- **On the page:** hashed entries read "Hashed name", or the saved host whose address matches the hash, "(hashed in known_hosts)".
+- **Export known_hosts:** writes every trusted key to a file you choose, with hashed names as they were (`holonet-import`'s writer now leaves `|1|` names alone).
+
+**Quick fill:**
+
+- **Where:** above General on New host, as drawn: a mono field, Enter or "Fill in".
+- **What it fills:** label, address, user, port, jump host, agent forwarding, compression and key.
+  - **Jump host:** the last hop, matched by name or address among the saved hosts. Earlier hops are named as belonging on that host's own form.
+  - **Key:** a key file is matched by file name among the Keychain's keys.
+- **The note:** "Filled the address, user, port, jump host, agent forwarding and key. Not used: -L 5432:db:5432, uptime."
+- **One-line paste:** the text field turns a pasted block's line breaks into spaces, so `holonet-import` now splits a one-line `Host ...` text back into lines at known setting names (54 of OpenSSH's). A new test covers it.
+
+**Live check** (copy of the test vault, the WSL server):
+
+- **Setup:** a throwaway `m7_key` in the test account (its public key added to `authorized_keys`), a config with m7-jump, m7-target (`ProxyJump m7-jump`, a `LocalForward`, `ServerAliveInterval`), `Host m7-*` and `Host * Compression yes`, and a `known_hosts` with a plain, a hashed (by `ssh-keygen -H`) and a `@revoked` line.
+- **Reading it from Windows:** `\wsl.localhost` reads as the default WSL user, so for the test the test account's home got `o+x`, `.ssh` 755 and the four files 644.
+- **The Windows profile card:** with no `%USERPROFILE%\.ssh\config` (only its existence was checked), it says "%USERPROFILE%\.ssh\config: There is no file here."
+- **Another config file** on the WSL path:
+  - **The preview:** both hosts, one new key, "Through m7-jump", the forward note, and two skipped entries (`Host m7-*` and `ServerAliveInterval`).
+  - **After import:** "Imported 2 hosts and 1 key. 2 entries were not imported."
+- **m7-target connected:** "Key m7_key · Through m7-jump · Compressed", where Compressed came from `Host *`.
+- **known_hosts import:** "Imported 2 trusted keys. 1 line was skipped." The hashed entry shows as "Hashed name".
+- **Export:** WSL's `ssh-keygen -F` found both `[m7-hashed.test]:2222` (hashed) and `[m7-plain.test]:2222` in the exported file, and not a name that is not there.
+- **Quick fill:**
+  - **A command:** `ssh -A -J m7-jump -i ~/.ssh/m7_key -L 5432:db:5432 holotest@localhost -p 2222 uptime` filled everything but the forward and the command, which it named.
+  - **A pasted block:** filled the label, address, user, port and compression, and named `ServerAliveInterval`.
+- **Not tried live:** the WSL card, which reads the owner's own WSL user's `~/.ssh` (the same path logic as the WSL file, covered by unit tests).
+
+**Fixed along the way:**
+- The Hosts header wrapped New host under Import. The two buttons now stay together, and the search field is 260px.
+- An export notice's long path ran past its strip. Export notices now shorten the path.
+
+**Cleanup and checks:**
+- The test account's key, config and `known_hosts` were removed, `authorized_keys` restored (3 lines), and the home, `.ssh` and `authorized_keys` permissions put back to 750, 700 and 600. The test vault copy and exports were removed.
+- The paste test used the Windows clipboard, so whatever was on it before is gone.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-app` 45, `holonet-model` 28, `holonet-import` 18.

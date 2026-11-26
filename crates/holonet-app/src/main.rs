@@ -29,6 +29,7 @@ mod history;
 mod hops;
 mod host_form;
 mod host_picker;
+mod import;
 mod input;
 mod key_import;
 mod platform;

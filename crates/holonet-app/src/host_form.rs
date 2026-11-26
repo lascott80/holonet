@@ -49,6 +49,10 @@ enum TestState {
 
 pub struct HostForm {
     original: Option<Host>,
+    /// "Quick fill: paste an ssh command or a ~/.ssh/config entry" (new
+    /// hosts), and what it filled or could not use.
+    quick_fill: Entity<TextField>,
+    quick_note: Option<(SharedString, bool)>,
     label: Entity<TextField>,
     address: Entity<TextField>,
     port: Entity<TextField>,
@@ -183,6 +187,7 @@ impl HostForm {
                 if mono { f.mono() } else { f }
             })
         };
+        let quick_fill = text(cx, "ssh -J bastion-east deploy@10.30.0.9 -p 22", String::new(), true);
         let label = text(cx, "Defaults to the address", h.label.clone(), false);
         let address = text(cx, "Hostname or IP address", h.address.clone(), true);
         let port = text(cx, "22", h.port.to_string(), true);
@@ -292,6 +297,15 @@ impl HostForm {
                 }
             }));
         }
+        subscriptions.push(cx.subscribe_in(
+            &quick_fill,
+            window,
+            |this: &mut Self, _, e: &TextFieldEvent, _, cx| match e {
+                TextFieldEvent::Submitted => this.quick_fill(cx),
+                TextFieldEvent::Cancelled => cx.emit(HostFormEvent::Cancelled),
+                TextFieldEvent::Changed => cx.notify(),
+            },
+        ));
         subscriptions.push(cx.observe(&identity_select, |_: &mut Self, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&jump_select, |this: &mut Self, _, cx| {
             // Showing the group's jump host is following it; anything else
@@ -347,6 +361,8 @@ impl HostForm {
             all_hosts: data.hosts.clone(),
             test_via: None,
             original: host,
+            quick_fill,
+            quick_note: None,
             label,
             address,
             port,
@@ -471,6 +487,96 @@ impl HostForm {
 
     fn text(&self, field: &Entity<TextField>, cx: &Context<Self>) -> String {
         field.read(cx).text().trim().to_string()
+    }
+
+    /// Fill the form from an `ssh` command or a `Host` entry, and say what
+    /// was filled and what was not used.
+    fn quick_fill(&mut self, cx: &mut Context<Self>) {
+        let text = self.quick_fill.read(cx).text().to_string();
+        let q = match holonet_import::command::parse(&text) {
+            Ok(q) => q,
+            Err(e) => {
+                self.quick_note = Some((e.message().into(), true));
+                cx.notify();
+                return;
+            }
+        };
+        let mut filled: Vec<&str> = Vec::new();
+        let mut unused: Vec<String> = q.unused.clone();
+        if let Some(label) = &q.label {
+            self.label.update(cx, |f, cx| f.set_text(label.clone(), cx));
+            filled.push("label");
+        }
+        self.address.update(cx, |f, cx| f.set_text(q.address.clone(), cx));
+        filled.push("address");
+        if let Some(user) = &q.user {
+            self.username.update(cx, |f, cx| f.set_text(user.clone(), cx));
+            filled.push("user");
+        }
+        if let Some(port) = q.port {
+            self.port.update(cx, |f, cx| f.set_text(port.to_string(), cx));
+            filled.push("port");
+        }
+        // The hop in front of this host, by its name or address among the
+        // saved hosts. Earlier hops are that host's own jump hosts.
+        if let Some(last) = q.jump.last() {
+            let found = self
+                .jump_options
+                .iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(&last.host))
+                .map(|(id, _)| *id)
+                .or_else(|| {
+                    self.all_hosts
+                        .iter()
+                        .find(|h| h.address.trim().eq_ignore_ascii_case(&last.host))
+                        .map(|h| h.id)
+                        .filter(|id| self.jump_options.iter().any(|(j, _)| j == id))
+                });
+            match found {
+                Some(id) => {
+                    self.own_jump = Some(id);
+                    self.from_group.jump_host = false;
+                    self.show_jump(cx);
+                    filled.push("jump host");
+                    if q.jump.len() > 1 {
+                        unused.push(format!(
+                            "the earlier jump hosts ({}), which belong on {}'s own form",
+                            q.jump[..q.jump.len() - 1].iter().map(|j| j.host.as_str()).collect::<Vec<_>>().join(", "),
+                            last.host
+                        ));
+                    }
+                }
+                None => unused.push(format!("jump host {}, which is not saved yet", last.host)),
+            }
+        }
+        if let Some(v) = q.forward_agent {
+            self.agent_forwarding = v;
+            filled.push("agent forwarding");
+        }
+        if let Some(v) = q.compression {
+            self.compression = v;
+            filled.push("compression");
+        }
+        // A key file, by its name among the Keychain's keys.
+        if let Some(file) = &q.identity_file {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            match self.keys.iter().position(|k| k.name.eq_ignore_ascii_case(name)) {
+                Some(i) => {
+                    self.auth = 0;
+                    let index = i + usize::from(self.key_missing);
+                    self.key_select.update(cx, |s, cx| s.set_selected(index, cx));
+                    filled.push("key");
+                }
+                None => unused.push(format!("key file {file}: import it in the Keychain, then choose it")),
+            }
+        }
+        let mut note = format!("Filled the {}.", join_words(&filled));
+        if !unused.is_empty() {
+            note.push_str(&format!(" Not used: {}.", unused.join(", ")));
+        }
+        self.quick_note = Some((note.into(), false));
+        self.test = TestState::Idle;
+        cx.notify();
     }
 
     fn selected_key(&self, cx: &Context<Self>) -> Option<&StoredKey> {
@@ -838,6 +944,33 @@ impl Render for HostForm {
         let narrow = window.viewport_size().width < px(1100.);
 
         // ------------------------------------------------------ fieldsets --
+        // NewHost.dc.html: Quick fill above General, for new hosts.
+        let quick_fill = (!editing).then(|| {
+            let has_text = !self.quick_fill.read(cx).text().trim().is_empty();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_meta()
+                        .text_color(theme::ink_muted())
+                        .child("Quick fill: paste an ssh command or a ~/.ssh/config entry"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(div().flex_1().min_w_0().child(self.quick_fill.clone()))
+                        .child(
+                            Button::secondary("quick-fill", "Fill in")
+                                .disabled(!has_text)
+                                .on_click(cx.listener(|this, _, _, cx| this.quick_fill(cx))),
+                        ),
+                )
+                .children(self.quick_note.clone().map(|(text, problem)| crate::ui::field_help(text, problem)))
+        });
         let general = fieldset("General")
             .child(field("Label", self.label.clone(), None))
             .child(div().w_full().max_w(px(360.)).child(field("Group", self.group_select.clone(), None)))
@@ -1312,6 +1445,7 @@ impl Render for HostForm {
             .child(div().flex().flex_col().gap(theme::SPACE_1).child(breadcrumb).child(
                 div().text_title().text_color(theme::ink()).child(if editing { "Edit host" } else { "New host" }),
             ))
+            .children(quick_fill)
             .child(general)
             .child(credentials)
             .child(connection);
@@ -1389,4 +1523,13 @@ enum FollowField {
     Route,
     Jump,
     Key,
+}
+
+/// "label, address and port".
+fn join_words(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }

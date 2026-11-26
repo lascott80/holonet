@@ -63,8 +63,85 @@ pub fn parse(text: &str) -> Result<QuickFill, QuickFillError> {
     from_command(text)
 }
 
+/// OpenSSH settings, to find where each one starts in a block pasted into
+/// a one-line field (line breaks become spaces there).
+const KEYWORDS: &[&str] = &[
+    "addkeystoagent",
+    "addressfamily",
+    "batchmode",
+    "bindaddress",
+    "canonicalizehostname",
+    "certificatefile",
+    "checkhostip",
+    "ciphers",
+    "clearallforwardings",
+    "compression",
+    "connectionattempts",
+    "connecttimeout",
+    "controlmaster",
+    "controlpath",
+    "controlpersist",
+    "dynamicforward",
+    "forwardagent",
+    "forwardx11",
+    "forwardx11trusted",
+    "gatewayports",
+    "hostkeyalgorithms",
+    "hostkeyalias",
+    "hostname",
+    "identitiesonly",
+    "identityagent",
+    "identityfile",
+    "include",
+    "kexalgorithms",
+    "localcommand",
+    "localforward",
+    "loglevel",
+    "macs",
+    "passwordauthentication",
+    "permitlocalcommand",
+    "port",
+    "preferredauthentications",
+    "proxycommand",
+    "proxyjump",
+    "pubkeyacceptedalgorithms",
+    "pubkeyauthentication",
+    "remotecommand",
+    "remoteforward",
+    "requesttty",
+    "sendenv",
+    "serveralivecountmax",
+    "serveraliveinterval",
+    "setenv",
+    "stricthostkeychecking",
+    "tcpkeepalive",
+    "updatehostkeys",
+    "user",
+    "userknownhostsfile",
+    "usekeychain",
+    "visualhostkey",
+];
+
+/// A block flattened onto one line, back into lines: a new line starts at
+/// each known setting name.
+fn unflatten(text: &str) -> String {
+    if text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for word in text.split_whitespace() {
+        let key = word.split('=').next().unwrap_or(word).to_ascii_lowercase();
+        if !out.is_empty() {
+            out.push(if KEYWORDS.contains(&key.as_str()) { '\n' } else { ' ' });
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 fn from_block(text: &str) -> Result<QuickFill, QuickFillError> {
-    let c = config::parse("Quick fill", text, &mut |_| Vec::new());
+    let text = unflatten(text);
+    let c = config::parse("Quick fill", &text, &mut |_| Vec::new());
     let mut hosts = c.hosts.into_iter();
     let Some(h) = hosts.next() else { return Err(QuickFillError::NoHost) };
     let ConfigHost { name, address, port, user, identity_files, jump, forward_agent, compression, notes, .. } = h;
@@ -267,5 +344,10 @@ Host other",
         assert_eq!(q.unused, ["Host other", "IdentityFile ~/.ssh/old", "ServerAliveInterval"]);
         // Host= works too, and the address is the name without HostName.
         assert_eq!(parse("host=pi\n user pi").unwrap().address, "pi");
+        // Pasted into a one-line field, where line breaks became spaces.
+        let q = parse("Host staging-api HostName 10.30.0.4 User deploy Port=2022 ProxyJump bastion-east").unwrap();
+        assert_eq!(q.label.as_deref(), Some("staging-api"));
+        assert_eq!((q.address.as_str(), q.user.as_deref(), q.port), ("10.30.0.4", Some("deploy"), Some(2022)));
+        assert_eq!(q.jump, [jump("bastion-east")]);
     }
 }

@@ -514,7 +514,10 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |w: &mut Workspace, cx| {
                 match result {
-                    Ok(path) => w.notice = Some(format!("Saved the log to {}.", path.display()).into()),
+                    Ok(path) => {
+                        let path = super::short_path(&path.display().to_string(), 80);
+                        w.notice = Some(format!("Saved the log to {path}.").into())
+                    }
                     Err(e) => w.save_error = Some(format!("Holonet could not export the log: {e}").into()),
                 }
                 cx.notify();

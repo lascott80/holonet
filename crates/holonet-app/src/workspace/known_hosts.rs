@@ -1,6 +1,6 @@
 //! Known hosts (KnownHosts.dc.html): trusted server keys with search,
 //! filters, a detail panel, copy, forget, and review of a recorded mismatch.
-//! Import and export of `known_hosts` files arrive with milestone 7.
+//! Import and export of `known_hosts` files (milestone 7) are in the toolbar.
 
 use gpui::{
     AnyElement, ClipboardItem, Context, Div, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
@@ -24,11 +24,20 @@ struct Row<'a> {
 
 impl Row<'_> {
     fn name(&self) -> String {
-        self.host.map(|h| h.display_name().to_string()).unwrap_or_else(|| self.known.host.clone())
+        match self.host {
+            Some(h) => h.display_name().to_string(),
+            // An imported hashed name can be matched but not read.
+            None if self.known.is_hashed() => "Hashed name".into(),
+            None => self.known.host.clone(),
+        }
     }
 
     fn address(&self) -> String {
-        format!("{}:{}", self.known.host, self.known.port)
+        match (self.known.is_hashed(), self.host) {
+            (true, Some(h)) => format!("{}:{} (hashed in known_hosts)", h.address.trim(), h.port),
+            (true, None) => "Hashed in known_hosts; no saved host matches it".into(),
+            _ => format!("{}:{}", self.known.host, self.known.port),
+        }
     }
 
     fn status(&self) -> (&'static str, gpui::Rgba) {
@@ -67,7 +76,14 @@ fn rows(data: &VaultData) -> Vec<Row<'_>> {
         .iter()
         .map(|k| Row {
             known: k,
-            host: data.hosts_for(&k.host, k.port).next(),
+            host: if k.is_hashed() {
+                // A hashed name is found by trying each saved host's addresses.
+                data.hosts.iter().find(|h| {
+                    k.matches(h.address.trim(), h.port) || h.tailscale().is_some_and(|t| k.matches(t, h.port))
+                })
+            } else {
+                data.hosts_for(&k.host, k.port).next()
+            },
             fingerprint: holonet_ssh::fingerprint(&k.public_key).unwrap_or_default(),
         })
         .collect();
@@ -118,13 +134,24 @@ impl Workspace {
                     cx.notify();
                 }))
         });
-        let toolbar = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(theme::SPACE_2)
-            .child(div().w(px(340.)).child(self.kh_search.clone()))
-            .children(pills);
+        let toolbar =
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(theme::SPACE_2)
+                .child(div().w(px(340.)).child(self.kh_search.clone()))
+                .children(pills)
+                .child(div().flex_1())
+                .child(Button::secondary("kh-import", "Import known_hosts").on_click(
+                    cx.listener(|this, _, _, cx| this.open_import(super::import::ImportKind::KnownHosts, cx)),
+                ))
+                .when(!data.known_hosts.is_empty(), |d| {
+                    d.child(
+                        Button::secondary("kh-export", "Export known_hosts")
+                            .on_click(cx.listener(|this, _, _, cx| this.export_known_hosts(cx))),
+                    )
+                });
 
         let body: AnyElement = if data.known_hosts.is_empty() {
             div()

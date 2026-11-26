@@ -5,6 +5,7 @@ mod forwarding;
 mod groups;
 mod history;
 mod hosts;
+mod import;
 mod keychain;
 mod known_hosts;
 mod settings;
@@ -104,6 +105,8 @@ pub struct Workspace {
     fw: forwarding::ForwardingUi,
     sn: snippets::SnippetsUi,
     hist: history::HistoryUi,
+    /// The OpenSSH import dialog, while open.
+    imp: Option<import::ImportDialog>,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -171,6 +174,7 @@ impl Workspace {
             fw,
             sn,
             hist,
+            imp: None,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -420,7 +424,7 @@ impl Render for Workspace {
                         .items_center()
                         .justify_between()
                         .gap(theme::SPACE_3)
-                        .child(div().flex_1().child(text))
+                        .child(div().flex_1().min_w_0().child(text))
                         .child(Button::quiet(id, "Dismiss").compact().on_click(cx.listener(move |this, _, _, cx| {
                             match id {
                                 "restored" => this.restored_from_backup = false,
@@ -455,7 +459,10 @@ impl Render for Workspace {
             Page::History => self.history_page(window, cx),
         };
         let app = self.app.clone();
-        let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
+        let dialog = self
+            .change_password_dialog(cx)
+            .or_else(|| self.settings_dialog(cx))
+            .or_else(|| self.import_dialog_layer(cx));
 
         div()
             .size_full()
