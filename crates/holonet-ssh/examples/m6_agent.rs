@@ -93,7 +93,10 @@ async fn main() -> Result<()> {
     for id in &listed {
         println!("  {} {}", id.public_key().algorithm(), id.comment());
     }
-    ensure!(listed.iter().any(|id| id.public_key().key_data() == public.key_data()), "the agent does not list the test key");
+    ensure!(
+        listed.iter().any(|id| id.public_key().key_data() == public.key_data()),
+        "the agent does not list the test key"
+    );
 
     let result = async {
         let host = env["HOLONET_TEST_HOST"].clone();

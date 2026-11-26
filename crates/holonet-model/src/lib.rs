@@ -1,10 +1,11 @@
-//! Holonet's data: hosts, stored keys, known hosts and settings.
+//! Holonet's data: hosts, groups, stored keys, known hosts, snippets,
+//! forwarding rules and settings.
 //!
 //! Plain data with serde, no I/O. The vault (`holonet-vault`) encrypts and
 //! stores a [`VaultData`]; everything else reads and edits it.
 //!
-//! Fields for later milestones (groups, snippets, logging) are added when
-//! their milestone lands. `#[serde(default)]` on every
+//! Fields for later milestones (logging, history) are added when their
+//! milestone lands. `#[serde(default)]` on every
 //! collection and optional field keeps older vault files readable.
 
 use std::fmt;
@@ -17,7 +18,11 @@ use zeroize::Zeroizing;
 ///
 /// 2 (milestone 4): key passphrases are saved on the key, not on each host.
 /// [`VaultData::migrate`] moves them.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// 3 (milestone 6): hosts can take their route, jump host and key from a
+/// group ([`FromGroup`]). The migration marks a host's route and jump host
+/// as following the group where they hold the defaults.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Seconds since the Unix epoch, UTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -83,6 +88,17 @@ macro_rules! id_type {
 id_type!(HostId);
 id_type!(KeyId);
 id_type!(IdentityId);
+id_type!(GroupId);
+id_type!(SnippetId);
+id_type!(ForwardRuleId);
+
+mod forward;
+mod group;
+pub mod snippet;
+
+pub use forward::{ForwardKind, ForwardProblem, ForwardRule, LOOPBACK};
+pub use group::{FromGroup, Group, GroupColor, GroupKey};
+pub use snippet::Snippet;
 
 /// Icon shown for a host. Chosen by the person; defaults to a server.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +190,19 @@ pub struct Host {
     /// A saved host to connect through.
     #[serde(default)]
     pub jump_host: Option<HostId>,
+    #[serde(default)]
+    pub group: Option<GroupId>,
+    /// Which of route, jump host and key come from the group. The fields
+    /// above keep the host's own values either way.
+    #[serde(default)]
+    pub from_group: FromGroup,
+    /// Run once after the shell first opens (`decisions.md`: from the library).
+    #[serde(default)]
+    pub startup_snippet: Option<SnippetId>,
+    #[serde(default)]
+    pub agent_forwarding: bool,
+    #[serde(default)]
+    pub compression: bool,
     #[serde(default = "yes")]
     pub keep_alive: bool,
     /// Where the host's side of an SFTP tab starts; `None` is the sign-in's
@@ -236,6 +265,11 @@ impl Host {
             tailscale_address: None,
             route: Route::default(),
             jump_host: None,
+            group: None,
+            from_group: FromGroup::default(),
+            startup_snippet: None,
+            agent_forwarding: false,
+            compression: false,
             keep_alive: true,
             sftp_folder: None,
             sftp_local_folder: None,
@@ -775,6 +809,12 @@ pub struct VaultData {
     #[serde(default)]
     pub known_hosts: Vec<KnownHost>,
     #[serde(default)]
+    pub groups: Vec<Group>,
+    #[serde(default)]
+    pub snippets: Vec<Snippet>,
+    #[serde(default)]
+    pub forward_rules: Vec<ForwardRule>,
+    #[serde(default)]
     pub settings: Settings,
 }
 
@@ -786,6 +826,9 @@ impl Default for VaultData {
             keys: Vec::new(),
             identities: Vec::new(),
             known_hosts: Vec::new(),
+            groups: Vec::new(),
+            snippets: Vec::new(),
+            forward_rules: Vec::new(),
             settings: Settings::default(),
         }
     }
@@ -842,12 +885,113 @@ impl VaultData {
     /// A copy of `host` with its identity's username and sign-in in place
     /// of its own, for connecting and for showing. `identity` stays set, so
     /// callers can still say where the sign-in comes from.
+    ///
+    /// The fields the host takes from its group ([`FromGroup`]) hold the
+    /// group's values: route, jump host, and the key when the host has no
+    /// identity. A host is never its own jump host this way.
     pub fn resolved(&self, host: &Host) -> Host {
         let mut resolved = host.clone();
         let (user, auth) = self.sign_in(host);
         resolved.username = user.to_string();
         resolved.auth = auth.clone();
+        if let Some(group) = self.host_group(host) {
+            if host.from_group.route {
+                resolved.route = group.route;
+            }
+            resolved.jump_host = self.effective_jump(host);
+            let has_identity = host.identity.and_then(|id| self.identity(id)).is_some();
+            if host.from_group.key && !has_identity {
+                resolved.auth = match group.key {
+                    GroupKey::Key(key_id) => Auth::key(key_id),
+                    GroupKey::AskEachTime => Auth::Password { saved: None },
+                };
+            }
+        }
         resolved
+    }
+
+    pub fn group(&self, id: GroupId) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    pub fn group_mut(&mut self, id: GroupId) -> Option<&mut Group> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// The host's group, if it has one that still exists.
+    pub fn host_group(&self, host: &Host) -> Option<&Group> {
+        host.group.and_then(|id| self.group(id))
+    }
+
+    /// Hosts in a group.
+    pub fn group_hosts(&self, group: GroupId) -> Vec<HostId> {
+        self.hosts.iter().filter(|h| h.group == Some(group)).map(|h| h.id).collect()
+    }
+
+    /// The jump host a host connects through: its group's when it follows
+    /// the group (unless that is the host itself), otherwise its own.
+    pub fn effective_jump(&self, host: &Host) -> Option<HostId> {
+        match self.host_group(host) {
+            Some(group) if host.from_group.jump_host => group.jump_host.filter(|j| *j != host.id),
+            _ => host.jump_host,
+        }
+    }
+
+    /// Delete a group. Its hosts become ungrouped, or with `delete_hosts`
+    /// are deleted too, keeping their server keys (Groups.dc.html). Returns
+    /// the group and the hosts deleted.
+    pub fn delete_group(&mut self, id: GroupId, delete_hosts: bool) -> Option<(Group, Vec<Host>)> {
+        let index = self.groups.iter().position(|g| g.id == id)?;
+        let group = self.groups.remove(index);
+        let mut deleted = Vec::new();
+        if delete_hosts {
+            for host_id in self.group_hosts(id) {
+                deleted.extend(self.delete_host(host_id, false));
+            }
+        } else {
+            for host in self.hosts.iter_mut().filter(|h| h.group == Some(id)) {
+                host.group = None;
+            }
+        }
+        Some((group, deleted))
+    }
+
+    pub fn snippet(&self, id: SnippetId) -> Option<&Snippet> {
+        self.snippets.iter().find(|s| s.id == id)
+    }
+
+    pub fn snippet_mut(&mut self, id: SnippetId) -> Option<&mut Snippet> {
+        self.snippets.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Hosts that run a snippet when they connect.
+    pub fn startup_users(&self, snippet: SnippetId) -> Vec<HostId> {
+        self.hosts.iter().filter(|h| h.startup_snippet == Some(snippet)).map(|h| h.id).collect()
+    }
+
+    /// Delete a snippet, clearing it from hosts that used it as their
+    /// startup snippet. Returns it and those hosts.
+    pub fn delete_snippet(&mut self, id: SnippetId) -> Option<(Snippet, Vec<HostId>)> {
+        let index = self.snippets.iter().position(|s| s.id == id)?;
+        let snippet = self.snippets.remove(index);
+        let users = self.startup_users(id);
+        for host in self.hosts.iter_mut().filter(|h| h.startup_snippet == Some(id)) {
+            host.startup_snippet = None;
+        }
+        Some((snippet, users))
+    }
+
+    pub fn forward_rule(&self, id: ForwardRuleId) -> Option<&ForwardRule> {
+        self.forward_rules.iter().find(|r| r.id == id)
+    }
+
+    pub fn forward_rule_mut(&mut self, id: ForwardRuleId) -> Option<&mut ForwardRule> {
+        self.forward_rules.iter_mut().find(|r| r.id == id)
+    }
+
+    /// The forwarding rules that run through a host.
+    pub fn host_rules(&self, host: HostId) -> impl Iterator<Item = &ForwardRule> {
+        self.forward_rules.iter().filter(move |r| r.host == host)
     }
 
     /// Where a host's sign-in is stored: its identity's when it has one that
@@ -882,7 +1026,8 @@ impl VaultData {
     /// Hosts and identities that sign in with a key. A host counts when it
     /// uses the key itself or through its identity.
     pub fn key_users(&self, key_id: KeyId) -> (Vec<HostId>, Vec<IdentityId>) {
-        let hosts = self.hosts.iter().filter(|h| self.sign_in(h).1.key_id() == Some(key_id)).map(|h| h.id).collect();
+        let hosts =
+            self.hosts.iter().filter(|h| self.resolved(h).auth.key_id() == Some(key_id)).map(|h| h.id).collect();
         let identities = self.identities.iter().filter(|i| i.auth.key_id() == Some(key_id)).map(|i| i.id).collect();
         (hosts, identities)
     }
@@ -892,14 +1037,14 @@ impl VaultData {
     /// saving), so its own id counts as a loop.
     pub fn jump_chain(&self, host: &Host) -> Result<Vec<HostId>, JumpProblem> {
         let mut chain = Vec::new();
-        let mut next = host.jump_host;
+        let mut next = self.effective_jump(host);
         while let Some(id) = next {
             if id == host.id || chain.contains(&id) {
                 return Err(JumpProblem::Loop);
             }
             let hop = self.host(id).ok_or(JumpProblem::Missing)?;
             chain.push(id);
-            next = hop.jump_host;
+            next = self.effective_jump(hop);
         }
         chain.reverse();
         Ok(chain)
@@ -909,7 +1054,21 @@ impl VaultData {
     ///
     /// Schema 1 to 2: a key passphrase saved on a host (or identity) moves to
     /// the key, unless the key already has one.
+    ///
+    /// Schema 2 to 3: a host's route and jump host follow its group where
+    /// they hold the defaults (Automatic, none); other values stay its own.
+    /// Keys stay the host's own. Runs once, by schema number, so a default
+    /// chosen on purpose later is not turned back into "from group".
     pub fn migrate(&mut self) {
+        if self.schema < 3 {
+            for host in &mut self.hosts {
+                host.from_group = FromGroup {
+                    route: host.route == Route::Automatic,
+                    jump_host: host.jump_host.is_none(),
+                    key: false,
+                };
+            }
+        }
         let mut moved: Vec<(KeyId, Secret)> = Vec::new();
         let auths = self.hosts.iter_mut().map(|h| &mut h.auth).chain(self.identities.iter_mut().map(|i| &mut i.auth));
         for auth in auths {
@@ -988,11 +1147,14 @@ impl VaultData {
         self.known_hosts.len() != before
     }
 
-    /// Delete a host. Its server key is kept unless `forget_key` is set and
-    /// no other saved host uses the same address and port (decisions.md).
+    /// Delete a host and the forwarding rules through it. Its server key is
+    /// kept unless `forget_key` is set and no other saved host uses the same
+    /// address and port (decisions.md).
     pub fn delete_host(&mut self, id: HostId, forget_key: bool) -> Option<Host> {
         let index = self.hosts.iter().position(|h| h.id == id)?;
         let host = self.hosts.remove(index);
+        // Its forwarding rules have nothing to run through.
+        self.forward_rules.retain(|r| r.host != id);
         if forget_key && self.hosts_for(host.address.trim(), host.port).next().is_none() {
             self.forget_host_key(host.address.trim(), host.port);
         }
@@ -1330,5 +1492,235 @@ mod tests {
         d.identities.clear();
         assert_eq!(d.sign_in(&a).0, "root");
         assert_eq!(d.key_users(key.id), (vec![b.id], vec![]));
+    }
+
+    #[test]
+    fn milestone_5_vault_migrates_to_group_inheritance() {
+        // Two hosts as a milestone 5 vault wrote them: one at the defaults,
+        // one with its own route and jump host.
+        let old = r#"{"schema":2,
+            "hosts":[{"id":"00000000-0000-0000-0000-000000000001","address":"a","created_at":0},
+                {"id":"00000000-0000-0000-0000-000000000002","address":"b","created_at":0,
+                "tailscale_address":"100.64.0.9","route":"primary",
+                "jump_host":"00000000-0000-0000-0000-000000000001","sftp_folder":"/srv"}],
+            "settings":{"lock_after_idle_mins":15}}"#;
+        let mut d: VaultData = serde_json::from_str(old).unwrap();
+        d.migrate();
+        assert_eq!(d.schema, 3);
+        assert_eq!(d.hosts[0].from_group, FromGroup { route: true, jump_host: true, key: false });
+        assert_eq!(d.hosts[1].from_group, FromGroup { route: false, jump_host: false, key: false });
+        // New fields and lists take their defaults; old values are kept.
+        let b = &d.hosts[1];
+        assert_eq!((b.group, b.startup_snippet, b.agent_forwarding, b.compression), (None, None, false, false));
+        assert_eq!((b.route, b.sftp_folder.as_deref()), (Route::Primary, Some("/srv")));
+        assert!(d.groups.is_empty() && d.snippets.is_empty() && d.forward_rules.is_empty());
+        // Without a group, nothing changes how a host connects.
+        assert_eq!(d.resolved(b).jump_host, Some(d.hosts[0].id));
+        assert_eq!(d.resolved(&d.hosts[0]).route, Route::Automatic);
+        // The step runs once: a default chosen on purpose stays the host's own.
+        d.hosts[0].from_group.route = false;
+        d.migrate();
+        assert!(!d.hosts[0].from_group.route);
+        // Round trip.
+        let again: VaultData = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(again, d);
+    }
+
+    #[test]
+    fn hosts_take_group_defaults_unless_they_override() {
+        let mut d = VaultData::default();
+        let key = stored_key("work-ed25519");
+        let key_id = key.id;
+        d.keys.push(key);
+        let bastion = Host::new("203.0.113.20");
+        let mut group = Group::new("Production");
+        group.route = Route::Primary;
+        group.jump_host = Some(bastion.id);
+        group.key = GroupKey::Key(key_id);
+        let gid = group.id;
+        d.groups.push(group);
+
+        let mut web = Host::new("10.20.0.11");
+        web.group = Some(gid);
+        web.tailscale_address = Some("100.64.0.11".into());
+        web.route = Route::Tailscale;
+        web.from_group.key = true;
+        // The bastion is in the group too: the group's jump host is never its own.
+        let mut bastion = bastion;
+        bastion.group = Some(gid);
+        d.hosts.extend([bastion.clone(), web.clone()]);
+
+        let r = d.resolved(&web);
+        assert_eq!((r.route, r.jump_host, r.auth.key_id()), (Route::Primary, Some(bastion.id), Some(key_id)));
+        assert_eq!(d.jump_chain(&web), Ok(vec![bastion.id]));
+        assert_eq!(d.resolved(&bastion).jump_host, None);
+        assert_eq!(d.jump_chain(&bastion), Ok(vec![]));
+        assert_eq!(d.key_users(key_id).0, vec![web.id]);
+
+        // Overriding: the host's own values come back.
+        let mut own = web.clone();
+        own.from_group = FromGroup { route: false, jump_host: false, key: false };
+        let r = d.resolved(&own);
+        assert_eq!((r.route, r.jump_host, r.auth.key_id()), (Route::Tailscale, None, None));
+
+        // An identity's sign-in beats the group's key.
+        let identity = Identity {
+            id: IdentityId::new(),
+            name: "deploy".into(),
+            username: "deploy".into(),
+            auth: Auth::Password { saved: None },
+        };
+        let mut with_identity = web.clone();
+        with_identity.identity = Some(identity.id);
+        d.identities.push(identity);
+        let r = d.resolved(&with_identity);
+        assert_eq!((r.username.as_str(), r.auth.key_id()), ("deploy", None));
+
+        // "Ask each time" signs in with a password asked on connect.
+        d.group_mut(gid).unwrap().key = GroupKey::AskEachTime;
+        assert_eq!(d.resolved(&web).auth, Auth::Password { saved: None });
+
+        // A group's jump host can still close a loop through its hosts.
+        d.host_mut(bastion.id).unwrap().from_group.jump_host = false;
+        d.host_mut(bastion.id).unwrap().jump_host = Some(web.id);
+        assert_eq!(d.jump_chain(&web), Err(JumpProblem::Loop));
+    }
+
+    #[test]
+    fn deleting_groups_snippets_and_hosts() {
+        let mut d = VaultData::default();
+        let group = Group::new("Home lab");
+        let gid = group.id;
+        d.groups.push(group);
+        let mut a = Host::new("nas-01");
+        a.group = Some(gid);
+        let mut b = Host::new("pi-cluster-1");
+        b.group = Some(gid);
+        let snippet = Snippet::new("Disk usage", "df -h");
+        a.startup_snippet = Some(snippet.id);
+        let sid = snippet.id;
+        d.snippets.push(snippet);
+        let rule = ForwardRule::new(ForwardKind::Dynamic, a.id);
+        d.forward_rules.push(rule);
+        d.hosts.extend([a.clone(), b.clone()]);
+        d.trust_host_key("nas-01", 22, "ssh-ed25519 K", KnownHostSource::FirstConnection);
+
+        assert_eq!(d.group_hosts(gid).len(), 2);
+        assert_eq!(d.startup_users(sid), vec![a.id]);
+        let (_, cleared) = d.delete_snippet(sid).unwrap();
+        assert_eq!(cleared, vec![a.id]);
+        assert_eq!(d.host(a.id).unwrap().startup_snippet, None);
+
+        // Deleting the group keeps its hosts, ungrouped.
+        let mut keep = d.clone();
+        let (_, deleted) = keep.delete_group(gid, false).unwrap();
+        assert!(deleted.is_empty());
+        assert!(keep.hosts.iter().all(|h| h.group.is_none()));
+        // With "Also delete its hosts", they go, with their rules; the
+        // server keys stay in Known hosts.
+        let (_, deleted) = d.delete_group(gid, true).unwrap();
+        assert_eq!(deleted.len(), 2);
+        assert!(d.hosts.is_empty() && d.forward_rules.is_empty());
+        assert!(d.known_host("nas-01", 22).is_some());
+    }
+
+    #[test]
+    fn snippet_variables_and_input() {
+        let s = Snippet::new("Restart service", "sudo systemctl restart ${service} && echo ${service} ${unit_2}");
+        assert_eq!(s.variables(), vec!["service".to_string(), "unit_2".to_string()]);
+        let values: std::collections::HashMap<String, String> =
+            [("service".to_string(), "nginx".to_string())].into_iter().collect();
+        assert_eq!(s.fill(&values), "sudo systemctl restart nginx && echo nginx ");
+        assert_eq!(s.input(&values), "sudo systemctl restart nginx && echo nginx \r");
+        assert_eq!(s.run_note(), "Runs immediately");
+
+        // `$${x}` is a literal `${x}`; partial or odd forms are text.
+        let s = Snippet::new("", "echo $${HOME} ${} ${a b} $x ${ok}${ok} $");
+        assert_eq!(s.variables(), vec!["ok".to_string()]);
+        assert_eq!(
+            s.fill(&[("ok".to_string(), "1".to_string())].into_iter().collect()),
+            "echo ${HOME} ${} ${a b} $x 11 $"
+        );
+        assert_eq!(s.display_name(), "Untitled snippet");
+
+        // Lines become Enter; "Press Enter after inserting" off adds none.
+        let mut s = Snippet::new("Deploy main", "cd /srv/app\r\n./deploy.sh\n");
+        s.press_enter = false;
+        assert_eq!(s.input(&Default::default()), "cd /srv/app\r./deploy.sh");
+        assert_eq!(s.run_note(), "Inserts without running");
+        s.confirm = true;
+        assert_eq!(s.run_note(), "Asks before running");
+    }
+
+    #[test]
+    fn forward_rules_commands_and_problems() {
+        let host = HostId::new();
+        let mut local = ForwardRule::new(ForwardKind::Local, host);
+        local.port = 8080;
+        local.destination_host = "localhost".into();
+        local.destination_port = 80;
+        assert_eq!(local.ssh_command("staging-api"), "ssh -N -L 8080:localhost:80 staging-api");
+        assert_eq!(local.status_text(), "Forward L 8080 → localhost:80");
+        assert_eq!(local.display_name(), "Local 8080");
+        assert!(local.is_loopback() && local.problems().is_empty());
+        local.bind_address = "0.0.0.0".into();
+        assert!(!local.is_loopback());
+        assert_eq!(local.ssh_flag(), "-L 0.0.0.0:8080:localhost:80");
+
+        let mut remote = ForwardRule::new(ForwardKind::Remote, host);
+        remote.port = 9000;
+        remote.destination_host = "127.0.0.1".into();
+        remote.destination_port = 3000;
+        assert_eq!(remote.ssh_flag(), "-R 9000:127.0.0.1:3000");
+
+        let mut dynamic = ForwardRule::new(ForwardKind::Dynamic, host);
+        dynamic.name = "Browse via bastion".into();
+        dynamic.port = 1080;
+        assert_eq!(dynamic.ssh_command("bastion-east"), "ssh -N -D 1080 bastion-east");
+        assert_eq!(dynamic.status_text(), "Forward D 1080 (SOCKS5)");
+        assert_eq!(dynamic.display_name(), "Browse via bastion");
+        assert!(dynamic.problems().is_empty());
+
+        let mut bad = ForwardRule::new(ForwardKind::Local, host);
+        bad.bind_address = "not an ip".into();
+        bad.destination_host = "db primary".into();
+        assert_eq!(
+            bad.problems(),
+            vec![
+                ForwardProblem::BindAddressInvalid,
+                ForwardProblem::PortZero,
+                ForwardProblem::DestinationInvalid,
+                ForwardProblem::DestinationPortZero
+            ]
+        );
+        bad.destination_host = " ".into();
+        assert!(bad.problems().contains(&ForwardProblem::DestinationMissing));
+        // A rule without a bind address in the file binds to loopback.
+        let json = format!(r#"{{"id":"{}","host":"{}","port":5432}}"#, ForwardRuleId::new().0, host.0);
+        let read: ForwardRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            (read.kind, read.bind_address.as_str(), read.start_with_host),
+            (ForwardKind::Local, LOOPBACK, false)
+        );
+    }
+
+    #[test]
+    fn groups_round_trip() {
+        let mut d = VaultData::default();
+        let mut g = Group::new("Clients");
+        g.color = GroupColor::Rose;
+        g.warn = true;
+        g.key = GroupKey::Key(KeyId::new());
+        d.groups.push(g);
+        d.snippets.push(Snippet::new("Tail app log", "journalctl -u app -f"));
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<VaultData>(&json).unwrap(), d);
+        // A group with only an id and name reads with the drawn defaults.
+        let read: Group = serde_json::from_str(&format!(r#"{{"id":"{}","name":"x"}}"#, GroupId::new().0)).unwrap();
+        assert_eq!(
+            (read.color, read.key, read.route, read.warn),
+            (GroupColor::Cyan, GroupKey::AskEachTime, Route::Automatic, false)
+        );
+        assert_eq!(GroupColor::ALL.map(GroupColor::label), ["Cyan", "Violet", "Mint", "Gray", "Rose", "Lime"]);
     }
 }

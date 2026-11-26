@@ -1818,3 +1818,56 @@ Lessons:
 Sending the same bytes to each pane's existing input channel is enough; broadcast needs no new transport. The keystroke loop took 8.2 s rather than 6 s because Windows' timer rounds the 15 ms sleep up.
 
 fmt and clippy `-D warnings` pass. The host's home has only its usual files.
+
+## Milestone 6, phase 1: model (26 Nov 2026)
+
+**`holonet-model`, schema 3:**
+- **New ids:** `GroupId`, `SnippetId` and `ForwardRuleId`. `VaultData` gains `groups`, `snippets` and `forward_rules`, each read as empty from older files.
+- **`Group`** (`group.rs`):
+  - name, `GroupColor` (the drawn Cyan, Violet, Mint, Gray, Rose and Lime)
+  - `GroupKey` (`AskEachTime` or a key)
+  - jump host, route, and `warn`
+- **`Host` gains:**
+  - `group`, `startup_snippet`, `agent_forwarding` and `compression`
+  - `from_group: FromGroup { route, jump_host, key }`, which says which fields follow the group. The host's own route, jump host and sign-in stay in their fields, so turning "from group" off brings them back.
+  - New hosts follow the group for route and jump host, not for the key.
+- **`Snippet`** (`snippet.rs`):
+  - `press_enter` (default on) and `confirm`
+  - `parse()` splits a command into text and `${name}` variables. A name is letters, digits and `_`; `$${x}` is a literal `${x}`; anything else is text.
+  - `variables()` lists each name once, in order. `fill()` substitutes values.
+  - `input()` gives what to type: line breaks become `\r`, plus a final `\r` when "Press Enter after inserting" is on.
+  - `run_note()` gives the card's text.
+- **`ForwardRule`** (`forward.rs`):
+  - `ForwardKind` Local, Remote or Dynamic, a host, a bind address (127.0.0.1 by default), a port, the destination, and `start_with_host`
+  - `ssh_flag()` and `ssh_command()` as drawn (`ssh -N -L 8080:localhost:80 staging-api`), with a bind address other than loopback written in front
+  - `status_text()` for the status bar ("Forward L 5432 → db-primary:5432")
+  - `is_loopback()`, and `problems()` with interface text
+- **Inheritance lives in the existing `VaultData::resolved(host)`,** which the app already calls before connecting and showing a host. It applies the group's route, jump host and key for the fields that follow it.
+  - An identity's sign-in beats the group's key.
+  - "Ask each time" signs in with a password asked on connect.
+  - A host is never its own jump host through its group, so a bastion can sit in the group whose hosts it fronts.
+  - `effective_jump()` gives the jump host alone. `jump_chain()` follows it hop by hop, so a loop through a group's jump host is still caught.
+  - `key_users()` counts hosts that use a key through their group.
+- **Removing things:**
+  - `delete_group(id, delete_hosts)` leaves its hosts ungrouped, or removes them too; their server keys stay either way.
+  - `delete_snippet()` clears it from hosts that ran it at startup, and returns them.
+  - `delete_host()` now also removes the forwarding rules through that host.
+- **Migration 2 → 3:**
+  - A host's route follows the group if it is Automatic, and its jump host if it has none. Other values stay its own, and keys are never marked.
+  - The step runs once, by schema number, so a default chosen on purpose later is not turned back into "from group".
+  - A milestone 5 build refuses a schema 3 vault as newer, as before.
+- **`Auth::Agent` waits for phase 8,** where it gets its sign-in path; added now it would only be a variant nothing can use.
+
+**`holonet-app`:** no changes were needed. With no groups, `resolved()` and `jump_chain()` give what they gave before. The host form starts from the saved host, so it keeps the new fields when it saves.
+
+**Check:**
+- The six new unit tests pass:
+  - migration of a milestone 5 vault
+  - inheritance, overrides, identities, "Ask each time", the bastion case and loops
+  - removing groups, snippets and hosts
+  - snippet parsing and input
+  - rule commands and problems
+  - round trips
+- A copy of the milestone 5 test vault (8 hosts) opened in this build. `behind-a` connected through its jump host ("Through jump-a"). The copy was then removed.
+
+fmt, clippy `-D warnings` and all workspace tests pass (`holonet-model`: 22).

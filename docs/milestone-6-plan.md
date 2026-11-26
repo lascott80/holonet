@@ -108,8 +108,8 @@ No control is shown before its milestone lands.
 - **`Group { id, name, color, key, jump_host, route, warn }`.** The key is `Option<KeyId>`, where `None` means "Ask each time".
 - **`Host` gains:**
   - `group: Option<GroupId>`, `startup_snippet: Option<SnippetId>`, `agent_forwarding: bool` and `compression: bool`
-  - `Auth::Agent`
-- **Inheritable host fields:** route, jump host and key become "own value or from group". The resolved values come from one function, `VaultData::effective(host)`, which the connection code and the host form both use.
+  - `Auth::Agent` (added in phase 8 with the agent sign-in, so no unreachable sign-in path exists before then)
+- **Inheritable host fields:** route, jump host and key become "own value or from group". The host keeps its own values, and `from_group` marks which ones follow the group. The resolved values come from one function, the existing `VaultData::resolved(host)`, which the connection code and the host form both use.
 - **`Snippet { id, name, command, press_enter, confirm }`**, with `variables()` parsing `${name}` (word characters only; `$${x}` writes `${x}` literally).
 - **`ForwardRule { id, name, kind: Local | Remote | Dynamic, host, bind_address, port, destination_host, destination_port, start_with_host }`.**
 - **Schema 3.** The migration marks route and jump host as "from group" where they hold the defaults (Automatic, none). Keys stay explicit, since a host without a group has no default key. A test decodes a milestone 5 vault.
@@ -151,7 +151,7 @@ Each phase ends with a commit and a check.
 | # | Phase | Exit check |
 | --- | --- | --- |
 | 0 | **Spikes** *(done; all three kinds of forward, agent sign-in and forwarding, and broadcast work)*: (a) local, remote and dynamic forwards against the WSL server, with throughput and 50 parallel connections, and `curl --socks5-hostname` through the SOCKS server; (b) sign-in through Windows' OpenSSH agent and agent forwarding (`ssh-add -l` on the host); (c) broadcast to four panes: typing latency and order | Notes record each result |
-| 1 | **Model:** groups, snippets, rules, the new host fields, `effective()`, schema 3 and its migration | A milestone 5 vault opens; unit tests for inheritance and `${name}` parsing |
+| 1 | **Model** *(done)*: groups, snippets, rules, the new host fields, inheritance in `resolved()`, schema 3 and its migration | A milestone 5 vault opens; unit tests for inheritance and `${name}` parsing |
 | 2 | **Groups:** the Groups page, the Hosts page's group list and colours, the host form's Group and "from group" values, colours on tabs and panes | Two groups with different keys and jump hosts; hosts inherit, override and return to the default, and connect with what they show |
 | 3 | **Forwarding engine** in `holonet-ssh`: local, remote, dynamic, status and errors | WSL tests for each kind, a port already in use, and a refused remote forward |
 | 4 | **Port forwarding page and background connections:** cards, the form, switches, start with host, reconnect, the status bar | One rule of each kind used from this PC (a browser through SOCKS); a killed connection comes back with the rule still active |
@@ -192,7 +192,7 @@ The drawings show the populated pages. These are not drawn:
 - **Remote forwards and `GatewayPorts`.** OpenSSH binds remote forwards to the host's loopback unless `GatewayPorts` allows more. The form says so when the bind address is not loopback.
 - **Many connections through one session.** Each forwarded connection is a channel. Spike (a) measures 50 at once.
 - **Broadcast and focus.** Input today goes to the focused pane's terminal. Broadcast copies the encoded bytes to the others, so keys that the terminal maps (arrows, Ctrl keys) must be encoded once per pane's mode.
-- **Inherited values that the host form shows** must match what connecting uses. A single `effective()` used by both avoids drift.
+- **Inherited values that the host form shows** must match what connecting uses. A single `resolved()` used by both avoids drift.
 
 ## Owner decisions (26 November 2026)
 
