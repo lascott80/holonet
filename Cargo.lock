@@ -2973,6 +2973,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonet-net"
+version = "0.1.0"
+dependencies = [
+ "holonet-model",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "holonet-ssh"
 version = "0.1.0"
 dependencies = [

@@ -956,3 +956,57 @@ A TCP connection to this PC's own Tailscale IPv4 address on port 2222 was refuse
 **sshd's per-source penalties.** OpenSSH 10 drops new connections from an address for a while after failed sign-ins (the log shows "srclimit_penalise … penalty: failed authentication"). My first version of the key test also tried each key before installing it. Those deliberate failures, together with the wrong-password tests running in parallel, got 127.0.0.1 penalised for 18 s, and the next connection was dropped ("Disconnected"). A freshly generated key cannot already be authorized, so that check was removed. Signing in with it proves the install.
 
 fmt, clippy, and the unit tests (28, 13, 7, 13 and 16) pass. The WSL tests (13) pass.
+
+## Milestone 4, phase 3: `holonet-net` (25 Nov 2026)
+
+A new crate with no window, so it tests without one.
+
+**Tailscale status** (`tailscale::status()`):
+- Asks the LocalAPI over its named pipe with Tokio's client and reads the HTTP answer, including chunked bodies.
+- If the pipe answers badly, it runs `tailscale.exe status --json` with no console window. It never waits more than 3 s.
+- **Result:**
+  - `NotInstalled`
+  - `NotRunning`: no pipe, though the client is installed
+  - `NotConnected { state }`: for example "Stopped" when switched off, or "NeedsLogin"
+  - `Running(status)`: this PC's own addresses, the MagicDNS suffix, and peers with their names, addresses and whether they are online
+- `problem()` gives the sentence a pane shows when Tailscale cannot be used: "Tailscale on this PC is switched off. Connect it, then try again."
+- `TailscaleStatus::peer(address)` finds the device a Tailscale address names: a 100.x address, the full MagicDNS name, or the short name.
+
+**Route check** (`route::route_to`, `primary_unreachable`):
+- `GetBestRoute2` says which route Windows would use: a specific route (with its prefix length), only the default route, or none.
+- `primary_unreachable(address, tailscale_running)` is true when the primary address is a private IP and only the default route (or none) leads to it. That is the `decisions.md` case for skipping the fallback wait.
+- **Private** means RFC 1918, link-local, IPv6 unique-local and link-local, plus Tailscale's 100.64.0.0/10 only while Tailscale is not running.
+- Hostnames are never skipped: resolving them could itself take time, and many resolve to public addresses.
+
+**Planning** (`plan()`), a pure function:
+
+| Route | Tailscale | Attempts |
+| --- | --- | --- |
+| Automatic, with a Tailscale address | Running | Primary for the fallback wait, then Tailscale |
+| Automatic, primary private and unroutable | Running | Tailscale only, with the note `PrimarySkipped` |
+| Automatic | Not usable | Primary only, with the note `NoFallback(reason)` |
+| Primary, or no Tailscale address | Any | Primary only |
+| Tailscale | Running | Tailscale only; `PeerOffline` if Tailscale lists that device as offline (still tried) |
+| Tailscale | Not usable | Error `TailscaleUnavailable(reason)`, so the pane says why instead of timing out |
+| Override "Try Tailscale" on a Primary host | Running | Tailscale only. With no Tailscale address: `NoTailscaleAddress` |
+
+The last attempt has no `give_up_after`; it uses the connect timeout (10 s).
+
+**Live check** (`examples/net_check.rs`, release build). The owner switched Tailscale off and then on again from its tray icon.
+
+| Address | Tailscale on | Tailscale off |
+| --- | --- | --- |
+| Status | Running, 15 peers, in 0.6–1.2 ms | `NotConnected { "Stopped" }`, in 0.5 ms, "…switched off. Connect it, then try again." |
+| 127.0.0.1 | Specific /32, waits | Same |
+| A private address on this PC's own network | Specific /24, waits | Same |
+| 10.255.255.1, 172.31.255.1 (private, not local) | Default route only, **skips** | Same |
+| fd00::1 | No route, **skips** | Same |
+| 100.100.100.100 (Tailscale's service address) | Specific /32, waits | Default route only, **skips** |
+| 100.127.255.254 (tailnet range, no device) | Default route only, waits: not private while Tailscale runs | **Skips** |
+| 192.0.2.1, 8.8.8.8 (public) | Default route only, waits | Same |
+| This PC's own Tailscale address | Specific /32 | Not listed: no status while off |
+
+- Each route check took under 0.15 ms, so it can run before every connect.
+- Tailscale installs a /32 route per device, not one for the whole 100.64.0.0/10. So a 100.x address with no device behind it has only the default route even while Tailscale runs. The plan still tries it under the Tailscale route, and `peer()` can say no such device is known.
+
+fmt, clippy, and the unit tests (28, 13, 12, 7, 13 and 16) pass.
