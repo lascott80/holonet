@@ -77,7 +77,7 @@ Complete these in order:
 
 `sshd` in WSL (Ubuntu-26.04), reachable from Windows at `127.0.0.1:2222` through WSL's localhost forwarding.
 
-- Only the `holotest` user may sign in. Password, public key and keyboard-interactive sign-in are on.
+- Only `holotest` and `holotest-kbd` may sign in. `holotest` can use a password, a public key or keyboard-interactive; `holotest-kbd` (same password) is limited to keyboard-interactive by a `Match User` block, to test the fallback.
 - Config: `/etc/ssh/sshd_config.d/10-holonet-test.conf` and the socket override `/etc/systemd/system/ssh.socket.d/port.conf`.
 - Credentials live in `.dev/` (gitignored): `test-server.env` holds the password and key passphrase, plus three keys: `holotest_ed25519` (no passphrase), `holotest_rsa` (no passphrase, 3072-bit) and `holotest_ed25519_pass` (passphrase). `.dev/known_hosts` holds the server's key.
 - The server runs only while the WSL distribution is running. If a connection is refused, start it with `wsl -d Ubuntu-26.04 -u root -- systemctl start ssh.socket`.

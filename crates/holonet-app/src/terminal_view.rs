@@ -1,5 +1,5 @@
-//! GPUI view that paints a `TerminalModel` snapshot cell by cell, and (spike 4)
-//! drives it from an SSH shell.
+//! GPUI view that paints a `TerminalModel` snapshot cell by cell, and drives
+//! it from an attached SSH shell.
 //!
 //! Each styled run is shaped on its own and placed at its column, with glyph
 //! advances forced to the cell width, so the grid stays aligned whatever the
@@ -16,14 +16,12 @@ use std::time::Instant;
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::CursorShape;
-use anyhow::anyhow;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, Font, FontStyle, FontWeight, Hsla, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent,
-    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb,
-    size,
+    StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
-use holonet_ssh::{ConnectOptions, PtySize, Session, ShellEvent, ShellInput};
+use holonet_ssh::{PtySize, ShellEvent, ShellInput};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input;
@@ -47,9 +45,7 @@ const WARN: u32 = 0xF2A65A;
 enum Connection {
     /// Canned output only (spike 3).
     Offline,
-    Connecting(String),
     Connected(String),
-    Failed(String),
     Ended(String),
 }
 
@@ -67,7 +63,6 @@ pub struct TerminalView {
     stream: Option<StreamBench>,
 
     connection: Connection,
-    session: Option<Session>,
     input: Option<UnboundedSender<ShellInput>>,
     sent_size: Option<GridSize>,
     /// When the last keystroke was sent, until the first output after it.
@@ -75,7 +70,19 @@ pub struct TerminalView {
     last_echo_ms: Option<f64>,
     selecting: bool,
     dragged: bool,
+    /// Inside a session pane: no status bar, pane padding (Terminal.dc.html).
+    embedded: bool,
+    /// Grid size measured from the canvas at paint time; applied next render.
+    measured: Rc<Cell<Option<GridSize>>>,
 }
+
+/// Emitted when the remote shell ends or the connection closes.
+#[derive(Clone, Debug)]
+pub enum TerminalEvent {
+    Ended(String),
+}
+
+impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
 
 /// Feeds a large buffer a slice per frame, the way output from `cat` of a
 /// big file arrives, and times the whole run including rendering.
@@ -101,10 +108,7 @@ impl TerminalView {
         let family = crate::pick_font(&text.all_font_names());
         let font = font(family);
         let font_id = text.resolve_font(&font);
-        let cell_width = text
-            .advance(font_id, px(FONT_SIZE), 'M')
-            .map(|s| s.width)
-            .unwrap_or(px(FONT_SIZE * 0.6));
+        let cell_width = text.advance(font_id, px(FONT_SIZE), 'M').map(|s| s.width).unwrap_or(px(FONT_SIZE * 0.6));
         let focus = cx.focus_handle();
         window.focus(&focus);
         let mut view = Self {
@@ -119,13 +123,14 @@ impl TerminalView {
             paint_us: Rc::new(Cell::new(0)),
             stream: None,
             connection: Connection::Offline,
-            session: None,
             input: None,
             sent_size: None,
             echo_pending: None,
             last_echo_ms: None,
             selecting: false,
             dragged: false,
+            embedded: false,
+            measured: Rc::new(Cell::new(None)),
         };
         // Size the grid to the window now, so the PTY opens at the right size.
         let grid = view.grid_for(window.viewport_size());
@@ -133,52 +138,34 @@ impl TerminalView {
         view
     }
 
+    /// Draw inside a session pane instead of as the whole window.
+    pub fn set_embedded(&mut self, size: GridSize) {
+        self.embedded = true;
+        self.model.resize(size);
+    }
+
+    pub fn grid_size(&self) -> GridSize {
+        self.model.size()
+    }
+
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus);
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         self.model.advance(bytes);
     }
 
-    /// Connect and open a shell on the Tokio runtime, then stream its output here.
-    pub fn connect(&mut self, runtime: tokio::runtime::Handle, opts: ConnectOptions, cx: &mut Context<Self>) {
-        let target = format!("{}@{}:{}", opts.user, opts.host, opts.port);
-        self.connection = Connection::Connecting(target.clone());
-        let size = self.model.size();
-        self.sent_size = Some(size);
-
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        runtime.spawn(async move {
-            let result = async {
-                let session = Session::connect(opts).await?;
-                let shell = session.open_shell(PtySize::cells(size.cols as u16, size.rows as u16)).await?;
-                anyhow::Ok((session, shell))
-            }
-            .await;
-            let _ = ready_tx.send(result);
-        });
-
+    /// Show an open shell: its output is parsed here and keystrokes go to it.
+    /// The caller keeps the `Session` alive.
+    pub fn attach(&mut self, shell: holonet_ssh::Shell, cx: &mut Context<Self>) {
+        let holonet_ssh::Shell { input, mut events } = shell;
+        self.input = Some(input);
+        self.sent_size = None;
+        if matches!(self.connection, Connection::Offline) {
+            self.connection = Connection::Connected(String::new());
+        }
         cx.spawn(async move |this, cx| {
-            let result = ready_rx.await.unwrap_or_else(|_| Err(anyhow!("connection task stopped")));
-            let mut events = match result {
-                Ok((session, shell)) => {
-                    let attached = this.update(cx, |view, cx| {
-                        view.session = Some(session);
-                        view.input = Some(shell.input);
-                        view.connection = Connection::Connected(target);
-                        cx.notify();
-                    });
-                    if attached.is_err() {
-                        return;
-                    }
-                    shell.events
-                }
-                Err(err) => {
-                    let _ = this.update(cx, |view, cx| {
-                        view.connection = Connection::Failed(format!("{err:#}"));
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-
             while let Some(first) = events.recv().await {
                 // Take whatever else is already waiting, up to a budget.
                 let mut batch = vec![first];
@@ -200,6 +187,7 @@ impl TerminalView {
             }
         })
         .detach();
+        cx.notify();
     }
 
     fn apply(&mut self, batch: Vec<ShellEvent>, cx: &mut Context<Self>) {
@@ -211,13 +199,17 @@ impl TerminalView {
                     }
                     self.model.advance(&bytes);
                 }
-                ShellEvent::Exit(code) => self.connection = Connection::Ended(format!("shell exited with {code}")),
+                ShellEvent::Exit(code) => {
+                    self.connection = Connection::Ended(format!("The shell exited with code {code}."))
+                }
                 ShellEvent::Closed => {
                     if !matches!(self.connection, Connection::Ended(_)) {
-                        self.connection = Connection::Ended("connection closed".into());
+                        self.connection = Connection::Ended("The connection closed.".into());
                     }
                     self.input = None;
-                    self.session = None;
+                    if let Connection::Ended(reason) = &self.connection {
+                        cx.emit(TerminalEvent::Ended(reason.clone()));
+                    }
                 }
             }
         }
@@ -411,9 +403,7 @@ impl TerminalView {
         }
         let (state, warn) = match &self.connection {
             Connection::Offline => ("canned output".to_string(), false),
-            Connection::Connecting(target) => (format!("connecting to {target}…"), false),
             Connection::Connected(target) => (target.clone(), false),
-            Connection::Failed(err) => (format!("failed: {err}"), true),
             Connection::Ended(why) => (why.clone(), true),
         };
         let scrolled = if snapshot.display_offset > 0 {
@@ -438,7 +428,13 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let grid = self.grid_for(window.viewport_size());
+        // Size: measured from the canvas at the last paint, or (before the
+        // first paint of a full-window view) estimated from the window.
+        let grid = match self.measured.get() {
+            Some(g) => g,
+            None if self.embedded => self.model.size(),
+            None => self.grid_for(window.viewport_size()),
+        };
         self.model.resize(grid);
         if let Some(input) = &self.input
             && self.sent_size != Some(grid)
@@ -461,6 +457,9 @@ impl Render for TerminalView {
         let line_height = self.line_height;
         let paint_us = self.paint_us.clone();
         let grid_origin = self.grid_origin.clone();
+        let measured = self.measured.clone();
+        let current = snapshot.size;
+        let embedded = self.embedded;
 
         div()
             .size_full()
@@ -470,36 +469,60 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key_down(event, cx)))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| this.on_scroll(event, cx)))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| this.on_mouse_move(event, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)))
-            .child(
-                div().flex_1().p(px(PADDING)).child(
-                    canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, cx| {
-                            grid_origin.set(bounds.origin);
-                            let started = Instant::now();
-                            paint_grid(bounds, &snapshot, &font, cell_width, line_height, window, cx);
-                            paint_us.set(started.elapsed().as_micros());
-                        },
-                    )
-                    .size_full(),
-                ),
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| this.on_mouse_up(event, cx)),
             )
             .child(
                 div()
-                    .h(px(STATUS_HEIGHT))
-                    .px(px(PADDING))
-                    .flex()
-                    .items_center()
-                    .bg(rgb(PANEL))
-                    .border_t_1()
-                    .border_color(rgb(LINE))
-                    .text_color(rgb(if warn { WARN } else { INK_DIM }))
-                    .text_size(px(12.))
-                    .child(status),
+                    .flex_1()
+                    .min_h_0()
+                    .when(embedded, |d| d.px(px(16.)).py(px(14.)))
+                    .when(!embedded, |d| d.p(px(PADDING)))
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                grid_origin.set(bounds.origin);
+                                let fits = GridSize {
+                                    cols: (f32::from(bounds.size.width) / f32::from(cell_width)).floor().max(2.0)
+                                        as usize,
+                                    rows: (f32::from(bounds.size.height) / f32::from(line_height)).floor().max(1.0)
+                                        as usize,
+                                };
+                                if fits != current {
+                                    // Resize on the next frame (and tell the server).
+                                    measured.set(Some(fits));
+                                    window.refresh();
+                                }
+                                let started = Instant::now();
+                                paint_grid(bounds, &snapshot, &font, cell_width, line_height, window, cx);
+                                paint_us.set(started.elapsed().as_micros());
+                            },
+                        )
+                        .size_full(),
+                    ),
             )
+            .when(!embedded, |d| {
+                d.child(
+                    div()
+                        .h(px(STATUS_HEIGHT))
+                        .px(px(PADDING))
+                        .flex()
+                        .items_center()
+                        .bg(rgb(PANEL))
+                        .border_t_1()
+                        .border_color(rgb(LINE))
+                        .text_color(rgb(if warn { WARN } else { INK_DIM }))
+                        .text_size(px(12.))
+                        .child(status),
+                )
+            })
     }
 }
 
@@ -514,7 +537,8 @@ fn paint_grid(
 ) {
     let origin = bounds.origin;
     let font_size = px(FONT_SIZE);
-    let cell_at = |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
+    let cell_at =
+        |row: usize, col: usize| point(origin.x + cell_width * col as f32, origin.y + line_height * row as f32);
 
     for (row, runs) in snap.lines.iter().enumerate() {
         for run in runs {
@@ -537,7 +561,11 @@ fn paint_grid(
                 },
                 color,
                 background_color: None,
-                underline: run.underline.then_some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false }),
+                underline: run.underline.then_some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: false,
+                }),
                 strikethrough: run.strikeout.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
             };
             // Force one glyph per cell, except for runs holding a wide char
@@ -557,9 +585,11 @@ fn paint_grid(
                 Bounds::new(point(at.x, at.y + line_height - px(2.)), size(cell_width, px(2.))),
                 cursor,
             )),
-            CursorShape::HollowBlock => {
-                window.paint_quad(gpui::outline(Bounds::new(at, size(cell_width, line_height)), cursor, gpui::BorderStyle::Solid))
-            }
+            CursorShape::HollowBlock => window.paint_quad(gpui::outline(
+                Bounds::new(at, size(cell_width, line_height)),
+                cursor,
+                gpui::BorderStyle::Solid,
+            )),
             _ => {
                 window.paint_quad(fill(Bounds::new(at, size(cell_width, line_height)), cursor));
                 if !snap.cursor_char.is_whitespace() {

@@ -1,8 +1,8 @@
 # Holonet
 
-Holonet is a personal SSH and SFTP client for Windows on ARM, in the spirit of Termius, written entirely in Rust. This file is the handoff from the design phase. Read it first, then `docs/build-plan.md`.
+Holonet is a personal SSH and SFTP client for Windows on ARM, in the spirit of Termius, written entirely in Rust. Read this file first, then `docs/build-plan.md`.
 
-The repository holds no code yet. The design, the decisions and the build plan are finished; the next task is milestone 1 below.
+Milestones 1 (prototype) and 2 (connect) are done. The app creates and unlocks an encrypted vault, keeps hosts and keys in it, connects by password or key, checks host keys against Known hosts, and runs one terminal per tab. The next task is milestone 3 below.
 
 ## What is decided
 
@@ -15,45 +15,38 @@ The repository holds no code yet. The design, the decisions and the build plan a
 
 All behaviour decisions are in `docs/decisions.md`. Treat them as settled; ask before changing one.
 
-## Workspace layout (planned)
+## Workspace layout
 
-A Cargo workspace of six crates. Everything except `holonet-app` must build and test without a window.
+A Cargo workspace. Everything except `holonet-app` builds and tests without a window.
 
-| Crate | Owns |
-| --- | --- |
-| `holonet-model` | Hosts, groups, snippets, port forwarding rules, settings. No I/O. |
-| `holonet-vault` | Encrypted store on disk, lock and unlock, Windows Hello, key generation and import. |
-| `holonet-net` | Choosing between a host's primary and Tailscale address, Tailscale detection, reachability. |
-| `holonet-ssh` | Sessions, sign-in, host key checks and known hosts, jump hosts, port forwarding, SFTP and its transfer queue, reconnect. |
-| `holonet-import` | OpenSSH `config` and `known_hosts` parsers (Windows profile, a WSL distribution, or a chosen file). |
-| `holonet-app` | The GPUI window, shared controls, terminal rendering. |
+| Crate | Owns | State |
+| --- | --- | --- |
+| `holonet-model` | Hosts, groups, keys, known hosts, settings. No I/O. | Built |
+| `holonet-vault` | Encrypted store on disk (Argon2id, XChaCha20-Poly1305, atomic saves with a backup), lock and unlock. Windows Hello and key generation come later. | Built |
+| `holonet-ssh` | Connecting, host key checks, sign-in (password, keyboard-interactive, keys), PTY shells. Jump hosts, forwarding, SFTP and reconnect come later. | Built |
+| `holonet-app` | The GPUI window, shared controls (`ui/`), vault screens, Hosts, host form, Known hosts, session tabs, terminal rendering. | Built |
+| `holonet-net` | Choosing between a host's primary and Tailscale address, Tailscale detection, reachability. | Planned (milestone 4) |
+| `holonet-import` | OpenSSH `config` and `known_hosts` parsers. | Planned (milestone 7) |
 
-## Next task: milestone 1, the prototype
+## Building and testing
 
-Goal: prove GPUI, russh and alacritty_terminal work together on ARM hardware before any designed screen is rebuilt.
+- Toolchain pinned in `rust-toolchain.toml`. CI (`.github/workflows/ci.yml`) runs fmt, clippy `-D warnings` and the tests on `windows-11-arm` and `windows-latest`.
+- `cargo run -p holonet-app --release` starts the app with the vault at `%APPDATA%\Holonet\vault.holonet`. Set `HOLONET_VAULT` to another file when testing; never test against the owner's real vault.
+- Hidden modes: `--gallery` (every control), `--showcase`, `--fonts`, `--parse-bench`, `--stream-bench`.
+- Test server: sshd in WSL on port 2222, described in `docs/milestone-1-plan.md`. Its credentials live in `.dev/` (gitignored, never committed). `$env:HOLONET_TEST_SERVER = "1"; cargo test -p holonet-ssh` runs the integration tests against it; `cargo run -p holonet-ssh --example shell -- all` drives it without a window. Both share `crates/holonet-ssh/tests/support/`.
+- Results and lessons from every phase are in `docs/prototype-notes.md`, including GPUI and Taffy pitfalls worth reading before UI work.
 
-Build one bare window that:
+## Next task: milestone 3, sessions
 
-1. Takes a host, port, user and password or key path (hard-coded or from arguments is fine).
-2. Connects with russh, requests a PTY and a shell.
-3. Shows a working terminal: input, output, resize, scrollback, selection and copy.
-4. Renders with JetBrainsMono Nerd Font if installed, otherwise a system monospace font.
+From `docs/build-plan.md`: tabs, split panes, the connecting, failed and reconnecting states, and the terminal settings including the bundled Nerd Fonts. Also carried over from milestone 2: find in the terminal, automatic reconnect, and a dedicated key-refused screen.
 
-Then check and write the results into `docs/prototype-notes.md`:
-
-- It builds and runs natively for `aarch64-pc-windows-msvc`.
-- Typing feels immediate; printing a large file (for example `cat` of a 10 MB log) stays responsive.
-- Nerd Font icon glyphs and ligatures render at the right widths.
-- Which crypto backend for russh (`aws-lc-rs` or `ring`) builds cleanly on ARM64 Windows.
-
-Do not build the vault, host list or any designed screen in this milestone.
+Plan it first as `docs/milestone-3-plan.md`, in phases that each end with a commit and a check, as `docs/milestone-2-plan.md` does, and agree it with the owner before building.
 
 ## Things that were not verified
 
-The design phase did not write or run any Rust. Before relying on any of these, check current documentation:
+Settled by milestones 1 and 2: GPUI is `gpui` 0.2.2 from crates.io and runs natively on ARM64 with DirectX 11; russh 0.65 builds with `aws-lc-rs`; alacritty_terminal 0.26 renders in a GPUI canvas. Details are in `docs/prototype-notes.md`. Still open, check current documentation before relying on them:
 
-- How GPUI is consumed outside Zed (crate or git dependency), its current API, and its Windows ARM64 status. The plan rests on Zed shipping on Windows with a DirectX 11 renderer.
-- Current versions and APIs of `russh`, `russh-sftp` and `alacritty_terminal`.
+- The current version and API of `russh-sftp`.
 - russh does not list FIDO key support and does not provide jump hosts ready-made; jump hosts are built by tunnelling one session through another.
 - Windows Hello from a desktop app needs the `UserConsentVerifier` interop interface with a window handle, and its prompt has a reported focus bug.
 - The licence terms for bundling JetBrainsMono Nerd Font.

@@ -134,4 +134,253 @@ For milestone 3 (sessions and terminal settings) unless noted:
 4. **Mouse reporting to programs** (`vim` mouse mode, `tmux`, `htop` clicks). Not wired; the mouse always selects. Shift should bypass reporting when it is added.
 5. **Not yet tested**: IME composition (Japanese and Chinese input), dead keys, focus in/out reporting, the kitty keyboard protocol, cursor blink, and window titles from `OSC 0/2`.
 6. **Host key prompt** (milestone 2): unknown keys are refused today, not offered as "Trust and connect".
-7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault.
+7. **Dev-only paths**: `holonet_ssh::dev` and `.dev/` stand in for the vault; remove them once milestone 2 adds hosts and the vault. *(Done in milestone 2 phase 8: now test support only.)*
+
+## Milestone 2, phases 0 and 1 (25 Nov 2026)
+
+**CI** (`.github/workflows/ci.yml`): `cargo fmt --check`, `clippy -D warnings` and tests on `windows-latest` (x64), plus the same on `windows-11-arm` marked experimental until we know whether this private repository can use that runner. `rustfmt.toml` sets a 120-column width.
+
+**`holonet-model`**: hosts, stored keys, known hosts and settings as serde data; `Secret` wipes itself and is redacted in `Debug`; address and port validation; delete-host keeps the server key unless asked and no other host shares it. 6 tests.
+
+**`holonet-vault`**: the file format in the crate docs (magic, version, JSON header with key slots, XChaCha20-Poly1305 body with the header as associated data). 12 tests: round trip, nothing readable on disk, wrong password, short password, no overwrite, tampering with body or header, newer format refused, backup fallback (missing, unreadable, or damaged main file), password change, slot parameters.
+
+| Measurement (Snapdragon X2 Plus, release) | Result |
+| --- | --- |
+| Argon2id unlock, 19 MiB t=2 (OWASP minimum) | 12 ms |
+| 64 MiB t=3 (planned default) | 78 ms |
+| 128 MiB t=3 | 154 ms |
+| **256 MiB t=3 (chosen default)** | **326 ms** |
+| 512 MiB t=2 | 520 ms |
+| `p=4` vs `p=1` at 64 MiB | No faster (the `argon2` crate runs lanes serially without its `parallel` feature) |
+| Crash check: 60 kills at random moments during back-to-back saves | Vault opened with the right password every time: 57 from the main file, 3 from the backup (killed between the two renames), 0 damaged |
+
+The planned 64 MiB default unlocked far faster than the 0.5 s budget, so the default is 256 MiB, 3 passes. Parameters are stored per slot, so they can be raised later without migration.
+
+## Milestone 2, phase 2: SSH extensions (25 Nov 2026)
+
+`holonet-ssh` now has `hostkey` and `connect` modules, and `Session::connect` returns a typed `ConnectError`.
+
+- **`Prompts` trait**: the interface's side of a connection. `host_key(PresentedKey)` returns Continue or Stop, and is awaited inside russh's `check_server_key`, before any credential is sent. `secret(SecretRequest)` asks for a password, passphrase or keyboard-interactive challenge that is not saved (`None` cancels).
+- **`classify(known, presented)`**: Trusted, Unknown or Changed against a `KnownHost`. Comments are ignored. The app applies `decisions.md`: Changed always stops; Unknown asks, or stops under "Refuse to connect".
+- **`Credential`**: `Password(Option<Secret>)` or `Key { name, private_key, passphrase }`. Keys are decoded from the vault's text with the saved passphrase, or one asked on connect.
+- **Password sign-in falls back to keyboard-interactive** when the server lists it. Hidden "password" prompts get the password once; any other question is asked of the person.
+- **Own TCP connect** (`lookup_host`, then `TcpStream` with the timeout, then `connect_stream`) so failures are typed: `Resolve`, `Refused`, `TimedOut`, `Network`, `HostKeyRejected`, `SignInRefused { method, remaining }`, `Cancelled`, `WrongPassphrase`, `BadKey`, `Protocol`.
+- **`SessionInfo`** for the status bar: key exchange and cipher (from the `kex_done` hook), host key type and key, and the sign-in method used.
+- **`dev::FilePrompts`**: trusts an OpenSSH `known_hosts` file and answers secrets from a script, for the example, the tests and `holonet --ssh`.
+
+The test server gained a second user, `holotest-kbd`, limited by a `Match User` block to keyboard-interactive only (same password, `HOLONET_TEST_KBD_USER` in `.dev/test-server.env`).
+
+| Check against the WSL server | Result |
+| --- | --- |
+| Six sign-in modes: password saved or asked, ed25519, RSA, passphrase saved or asked | All connect (72 to 157 ms). The negotiated key exchange is **`mlkem768x25519-sha256`** (post-quantum hybrid) with `chacha20-poly1305@openssh.com`. |
+| Unknown key, changed key | Both stopped as `HostKeyRejected`, and no secret was requested before the decision |
+| Wrong password | `SignInRefused`, listing `publickey` among the remaining methods |
+| Keyboard-interactive-only user | Signs in through the fallback |
+| Wrong passphrase / cancelled prompt | `WrongPassphrase` / `Cancelled` |
+| Closed port, unresolvable name, non-routable address with a 1 s timeout | `Refused`, `Resolve`, `TimedOut` (within 3 s) |
+
+Tests: 3 unit tests for `hostkey`, plus 6 integration tests in `tests/wsl.rs` that skip unless `HOLONET_TEST_SERVER=1`, so CI passes without the server.
+
+## Milestone 2, phase 3: controls and shell (25 Nov 2026)
+
+`holonet --gallery` shows every shared control in every state inside the app shell. Checked with real keyboard and mouse input on the Snapdragon (release build, 150% scale).
+
+**Assets.** Inter 4.1 (Regular, Medium, SemiBold) and Space Grotesk 2.0.0 (Regular, Medium, Bold) are bundled under SIL OFL 1.1 (`assets/fonts`, about 1.6 MB). Space Grotesk ships no static SemiBold; weight 600 resolves to Bold, and titles look right. 34 stroke icons were extracted from the screen sources into `assets/icons`; `eye` and `eye-off` were added for password fields. The interface mono family resolves at startup: "JetBrains Mono" is not installed here, so the Nerd Font build is used.
+
+**Modules.**
+- `theme.rs`: every token from `tokens.json` under its own name, type styles as `Styled` extension methods, and the few off-token values from the screens, named.
+- `ui`: `Button` (five kinds, compact, header, icon, disabled), `TextField`, `Select`, `Segmented`, `Checkbox`, `Tag` (group, neutral, key), group square, field with label and help, fieldset, key-value table, code box, callouts, dialog (standard and warning) and modal backdrop.
+- `shell.rs`: `TitleBar` and `SideNav`.
+
+**`TextField`** is adapted from GPUI's `examples/input.rs` (Apache-2.0, attributed in the file), keeping its IME support, grapheme-aware editing and clipboard handling. It adds horizontal scrolling that keeps the caret in view, a password mask with show/hide (copy and cut disabled for passwords), the mono variant, a placeholder and problem border, Tab/Shift-Tab focus movement, and Enter/Escape events. It took well under a day, so owner decision 1 (own controls on `gpui` 0.2.2) stands.
+
+| Checked interactively | Result |
+| --- | --- |
+| Typing, Tab through Label → Group → Address → Port, Ctrl+A then retype | Works. Fields and selects need `focus_handle().tab_stop(true)` or `focus_next` skips them. |
+| Select: arrow keys while focused, click to open, popup flips up near the window edge | Works. |
+| Password: masked bullets, reveal toggle | Works. |
+| Segmented, checkboxes, dialog checkbox | Toggle on click. |
+| Warning dialog: layout matches Dialog.md; a backdrop click cancels | Works. The backdrop covers the body only, so the window buttons stay usable. |
+| Title bar: tab click selects; double-click on the empty area maximizes and restores; window buttons | Works after a fix: the first version made the whole bar a drag area, which swallowed tab clicks. Only the brand and a spacer after "+" are drag areas now. |
+| Events: text field `Changed` per keystroke, select `Changed(i)` | Delivered through `cx.subscribe`. |
+
+**Known gaps** (small, fix when the screens use them):
+- Tab names clip without an ellipsis.
+- The select popup is not matched to the field's width.
+- Buttons have no keyboard focus ring.
+- The caret does not blink.
+- Letter-spacing and uppercase transforms are not available in GPUI; section labels pass uppercase text.
+
+**CI**: the first run on `milestone-2` passed on both jobs, including `windows-11-arm`, so the hosted ARM64 runner works for this private repository. That job is no longer experimental.
+
+### Re-estimate (milestone 2 plan, phase 3 checkpoint)
+
+Measured against the work phase 3 took, the remaining phases come to about four times phase 3:
+
+| Phase | Relative size | Why |
+| --- | --- | --- |
+| 4 Vault flow | 0.5 | Two small screens on finished controls and a finished vault crate |
+| 5 Hosts and host form | 1.5 | Two drawn screens, cards and list views, key-file import, Test connection |
+| 6 Session tab | 1.25 | Wiring prompts across the Tokio and GPUI threads, the host key prompt, connection states, status bar |
+| 7 Known hosts | 0.75 | One screen with a table, filters and a detail panel |
+| 8 Wrap-up | 0.25 | Removing the dev paths, docs, PR |
+
+The largest risk left is phase 6's prompt round-trip: a russh callback waiting on a GPUI dialog. Nothing found so far changes the plan.
+
+## Milestone 2, phase 4: vault flow (25 Nov 2026)
+
+`holonet` with no arguments is now the app. It shows Create vault on first start, Locked once a vault exists, then the workspace. `HOLONET_VAULT=<file>` points it at another vault for testing. The canned terminal demo moved to `--showcase`.
+
+**Screens.**
+- *Locked* follows Locked.dc.html (card, icon tile, title, body), with the vault password field in place of Windows Hello. It has two body texts: one at startup, one after "Lock now".
+- *Create vault* is not drawn; it uses the same card. It has password and confirm fields, the 8-character minimum, and a warning that the vault cannot be recovered.
+- *Workspace*: side navigation (Hosts, Settings, the vault card with Lock now) and a Hosts empty state (phase 5 replaces it).
+- *Settings → Vault and security*, following SettingRow.md:
+  - "Unknown host keys" (Ask every time / Refuse to connect), saved in the vault
+  - "Change password", a dialog asking for the current password, the new one and a confirmation
+  - "Vault file", with "Show in folder"
+
+**Behaviour.** Argon2 runs on GPUI's background executor, so the window never freezes during unlock or a password change. Wrong passwords: no delay for the first three, then 1, 2, 4 … seconds (at most 30), with a countdown on the button. Lock now drops the workspace, which drops the unlocked vault and wipes its key. Password fields are cleared after use. A notice says when the vault was opened from its backup, and another when a save fails (the change is kept in memory).
+
+**Checked with real input against a throwaway vault:**
+- Too-short and mismatched passwords are refused with field messages.
+- Create, then the workspace opens.
+- A setting changed, then a restart, then unlock: the setting persisted.
+- Lock now shows the manual-lock text.
+- Five wrong passwords: the countdown shows, and Enter during it is ignored.
+- Change password: a wrong current password is refused. After the change, the old password fails and the new one works.
+- A damaged main file opens from the backup, with the notice.
+
+**Bug found and fixed in `holonet-vault`.** Right after a password change, the backup (the previous save) still opened only with the old password. A damaged main file at that moment would have needed the old password. `change_password` now saves twice, so the backup uses the new password too. A test covers it (13 vault tests).
+
+### GPUI layout notes (taffy)
+
+- A child sized `relative(1.)` (100%) of a parent whose width comes from flex layout can collapse. The text field's text area measured 18 px. Make such children flex items (`flex_grow 1`, `flex_basis 0`) instead.
+- A `div` in a column needs `w_full()` for its text to wrap at the column's width. Without it, wrapping is computed at the intrinsic width ("Try / again in 3 s.").
+- A plain (non-flex) wrapper shrink-wraps flex content. Use `flex().flex_col()` wrappers in forms.
+- Text without spaces never wraps, so long paths are shortened in the middle (`short_path`).
+
+## Milestone 2, phase 5: Hosts and the host form (25 Nov 2026)
+
+**Hosts page** (Main.dc.html):
+- Header with the host count, "Find a host" search (label, address, user and tags; Escape clears it) and New host.
+- "All hosts" with a Cards/List toggle. Cards use a grid whose column count follows the window width (GPUI grids take a fixed count).
+- The detail panel shows the role icon tile, last connected, address, port, user, sign-in, host key (fingerprint if trusted, otherwise "Not trusted yet") and tags, with Edit and Duplicate. Double-clicking a card or row edits the host.
+- An empty vault shows a welcome in FirstRun's layout, without the import cards (milestone 7). A search with no results shows "No hosts match" with Clear search.
+
+**Host form** (NewHost/EditHost.dc.html), with the milestone 2 fields:
+- General: label, primary address (required), port, tags.
+- Credentials: username; SSH key or Password. A key comes from a select of vault keys plus "Import key file…". An encrypted key adds a passphrase field with "Save passphrase in the encrypted vault". Password adds "Save in the encrypted vault".
+- Connection: keep connection alive.
+- The aside shows the live title, the equivalent `ssh` command, a summary, problems (after the first Save), Test connection, and Save / Delete host / Cancel. On a narrow window it stacks below the form.
+- The delete dialog has "Also forget its server key in Known hosts".
+- "Save and connect" and the detail panel's Connect arrive in phase 6.
+
+**`holonet-ssh` additions:**
+- `inspect_private_key` reads OpenSSH keys' public half and encryption flag without the passphrase, and decodes unencrypted PEM/PKCS#8. It refuses encrypted PEM (with a `ssh-keygen -p` hint) and public keys.
+- `probe(host, port, timeout)` runs TCP and the key exchange, captures the host key and stops before sign-in. This is "Test connection".
+- Tests: 2 unit tests for key inspection (the second reads the `.dev` keys when present), plus a `probe` integration test against WSL.
+
+**Checked with real input against a throwaway vault and the WSL server:**
+- New host from the welcome screen, with live updates to the title and equivalent command.
+- Test connection: "Reachable. Host key not yet trusted" with the server's real fingerprint.
+- Import of the passphrase key through the Windows file dialog: recognised as encrypted Ed25519, passphrase saved.
+- Save, then the card and detail panel.
+- Edit (label added; Enter saves), Duplicate (selected afterwards), List view, search.
+- Restart and unlock: both hosts and the key persisted.
+- Delete through the warning dialog.
+- Validation: `root@pi` refused with the address message.
+
+**Fixed during the pass:**
+- The key-value values overflowed the panel; they now shrink and clip.
+- The list's Address column was cut so `:2222` read as `:22`; it is wider now.
+- The Import button stretched to full width.
+
+**Known gaps:**
+- GPUI 0.2.2 clips truncated text but draws no "…", even with `text_ellipsis`.
+- Every host shows "No group" until milestone 6.
+- The role icon has no chooser yet (the design draws none); every host is a server.
+
+## Milestone 2, phase 6: session tabs (25 Nov 2026)
+
+Connect from the Hosts detail panel, by double-clicking a card or row, or with "Save and connect" on the form. Each connection opens a session tab (`session.rs`).
+
+**How it fits together.**
+- `SessionTab` owns the `Session` and an embedded `TerminalView`. The SSH work runs on Tokio.
+- `UiPrompts` implements `holonet_ssh::Prompts` by sending each question (host key, password, passphrase, challenge) over a channel to the tab, and awaits the reply on a `oneshot`. Neither side blocks.
+- Sessions belong to `HolonetApp`, not the workspace, so "Lock now" (which drops the workspace and its vault) leaves them connected. The Locked screen says how many are open, and they reappear on unlock (decisions.md).
+- The title bar lists session tabs (state dot: ring while connecting, solid when connected, amber when failed or ended). "+" goes to Hosts, × disconnects. The session view has the 56 px icon rail (Hosts, Terminal, Settings).
+- The terminal view gained `attach(shell)`, an embedded mode, and sizing from its own canvas (measured at paint, applied next frame, sent to the server).
+
+**States drawn** (HostKey.dc.html, ConnectStates.dc.html, Terminal.dc.html):
+- Connecting: spinner, a log above it, and Cancel.
+- First-connection host key prompt: Trust and connect / Connect once / Cancel, with the fingerprint and Copy.
+- Changed key: trusted and presented fingerprints side by side and Disconnect. "I expected this change" opens "Replace trusted key and connect".
+- Secret prompts: password, passphrase or challenge, with "Save in the encrypted vault".
+- Failures: could not reach, did not answer, password refused (Enter password), key refused, wrong passphrase (Enter passphrase), refused by "Refuse to connect". Each offers Retry or Edit host and Close tab.
+- Session ended: the terminal dims, with Reconnect and Close tab.
+- Status bar: state, cipher, key exchange, sign-in; "xterm-256color · UTF-8".
+
+**Host key rules (decisions.md).**
+- A trusted key connects silently and updates "last matched".
+- An unknown key asks, or is refused under "Refuse to connect".
+- A changed key always stops the connection before credentials. The presented key is recorded as `mismatch` for Known hosts, and replacing it starts a fresh connection.
+
+**Checked with real input against the WSL server and a temporary second sshd** (port 2223, swapped between two throwaway host keys):
+
+| Check | Result |
+| --- | --- |
+| First connect | Prompt with the server's real fingerprint; Trust and connect; passphrase key from the vault; terminal 150×28, which matches `stty size` |
+| Lock with the session open, then unlock | The Locked screen lists 1 open session; a `sleep 4; echo` started before locking had printed when the tab came back |
+| `exit` | Session ended bar, then Reconnect with no prompt (key trusted) |
+| Password host, asked on connect | Trust; wrong password; "The server refused the password" (about 6 s: PAM delays failures, and the keyboard-interactive fallback tries once more); Enter password; connected; password saved only after success |
+| Host key swapped on the server | The changed-key view stops the connection; Replace trusted key and connect works and uses the saved password |
+| "Refuse to connect" with an unknown key | Refused before credentials, with the explanation |
+| Cancel at the prompt | The tab closes and Hosts shows again |
+
+**Bugs found and fixed during the pass:**
+1. **Crash on Connect.** The new tab read the app while the app was creating it (GPUI double-lease panic). The connect timeout is now passed in.
+2. **A mistyped password was saved** with "Save in the encrypted vault" ticked. Typed secrets are now saved only after the server accepts them.
+3. **Prompt fields and the terminal did not take focus**: they were created without a window. Focus is now applied at the next render.
+4. **Tall prompt cards were clipped.** The prompt area now scrolls, with spacers keeping cards centred.
+5. **Singular wording on the Locked screen.**
+
+**Not in milestone 2:** split panes, find, broadcast, snippets, automatic reconnect (milestone 3), and a dedicated key-refused screen variant.
+
+## Milestone 2, phase 7: Known hosts (25 Nov 2026)
+
+**Built.**
+- Known hosts in the side navigation, between Hosts and Settings.
+- Table: host, key type, fingerprint, trusted on, status. Filter pills: All, Saved hosts, No saved host, Needs review. Search matches name, address, fingerprint or key type.
+- Detail panel: a mismatch callout with "Review mismatch", the trusted fingerprint, trusted on, last matched, source, a link to the saved host, Copy fingerprint, Copy public key and "Forget this key" (with a confirmation).
+- Review dialog: the trusted and presented fingerprints side by side. "Keep the trusted key" clears the mismatch. "I expected this change" leads to "Replace trusted key"; the next connection then uses the new key.
+- Links in: "Trusted in Known hosts" on the Hosts detail, and "Review in Known hosts" on a session's changed-key view, which unlocks to Known hosts with that entry selected.
+
+**Checked with real input against the WSL server and a temporary second sshd** (port 2223, with its host key swapped):
+
+| Check | Result |
+| --- | --- |
+| Changed key, then Review in Known hosts | Known hosts opened with the entry selected and "Mismatch seen" |
+| Review, then Keep the trusted key | Mismatch cleared; "Needs review" shows nothing |
+| Forget, with confirmation | Entry removed; the next connect shows the first-connection prompt |
+
+**Fixed during the pass:** the copy buttons overflowed the 320 px panel (now stacked), and the changed-key card was narrower than its wrapper (the wrapper now takes the full width).
+
+## Milestone 2, phase 8: wrap-up (25 Nov 2026)
+
+**Removed from the app.** `holonet_ssh::dev` is gone from the library: its `.dev/test-server.env` reader and `FilePrompts` moved to `crates/holonet-ssh/tests/support/`, shared by the integration tests and the `shell` example. `holonet --ssh` and the terminal view's own connect path are removed; session tabs are the only way to connect.
+
+**Done check from a clean profile**: release build, `APPDATA` pointed at an empty folder, no `HOLONET_VAULT`, no `.dev/` files used by the app.
+
+| Step | Result |
+| --- | --- |
+| First start | Create your vault; vault created at `%APPDATA%\Holonet\vault.holonet` |
+| Add a host | Welcome screen, New host, password host on the WSL server, Save and connect |
+| Verify its key | First-connection prompt with the real fingerprint; Trust and connect |
+| Use the terminal | `echo $(whoami) $(stty size)` printed `holotest 28 150`, matching the 150 × 28 tab |
+| Restart | Unlock; Hosts lists the host with its key; Known hosts lists the trusted key with its saved host |
+| Connect again | No prompts: trusted key, saved password |
+
+Clippy, the unit tests and the WSL integration tests (7) pass.
+
+**Milestone 2 is done.**

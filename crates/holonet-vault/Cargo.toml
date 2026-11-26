@@ -1,0 +1,22 @@
+[package]
+name = "holonet-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2 = "0.6.0"
+base64 = "0.23.1"
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"
+holonet-model = { version = "0.1.0", path = "../holonet-model" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+zeroize = "1.9.2"
+
+[dev-dependencies]
+holonet-model = { path = "../holonet-model" }
+tempfile = "3.27.0"

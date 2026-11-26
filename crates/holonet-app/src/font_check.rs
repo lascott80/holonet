@@ -43,10 +43,7 @@ impl FontCheck {
         let size = px(FONT_SIZE);
         let measure = |ch: char| text.advance(font_id, size, ch).ok().map(|s| f32::from(s.width));
         let cell_width = measure('M').unwrap_or(0.0);
-        let rows = WIDTH_PROBES
-            .iter()
-            .map(|&(label, ch)| WidthRow { label, ch, advance: measure(ch) })
-            .collect();
+        let rows = WIDTH_PROBES.iter().map(|&(label, ch)| WidthRow { label, ch, advance: measure(ch) }).collect();
         Self { family: family.into(), cell_width, rows }
     }
 }
@@ -68,7 +65,9 @@ impl Render for FontCheck {
             .font_family(mono.clone())
             .text_size(px(FONT_SIZE))
             .child(line(format!("Font: {}  cell width: {:.2}px", mono, cell)))
-            .child(line(" \u{E0B6}\u{E0B0} lascott@holonet \u{E0B0} \u{F07B} ~/src \u{E0B0} \u{E725} main \u{E0B4}".into()))
+            .child(line(
+                " \u{E0B6}\u{E0B0} lascott@holonet \u{E0B0} \u{F07B} ~/src \u{E0B0} \u{E725} main \u{E0B4}".into(),
+            ))
             .child(line("Ligatures: -> => != === <= >= :: |> www <!-- -->".into()))
             .child(line("Grid:      |0123456789|ABCDEFGHIJ|".into()))
             .child(line("Icons:     |\u{F07B}\u{E725}\u{F17C}\u{E7A8}\u{E0B0}\u{E0B4}─│┼█|".into()));
