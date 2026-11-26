@@ -398,6 +398,7 @@ impl Render for Workspace {
             .flex()
             .child(
                 SideNav::new(Some(active), PAGES.to_vec())
+                    .hello(self.vault.as_ref().is_some_and(|v| v.has_hello()))
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {

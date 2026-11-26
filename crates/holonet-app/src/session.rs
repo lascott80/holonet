@@ -563,6 +563,8 @@ impl Pane {
         let kind = match event {
             SystemEvent::Suspend | SystemEvent::Resume => Disturbance::Sleep,
             SystemEvent::NetworkChanged => Disturbance::Network,
+            // Windows locking does not touch connections.
+            SystemEvent::SessionLocked | SystemEvent::SessionUnlocked => return,
         };
         // Sleep explains a drop better than the network changes that follow a wake.
         let keep_sleep = matches!(self.disturbance, Some((Disturbance::Sleep, at)) if at.elapsed().as_secs() < 120)

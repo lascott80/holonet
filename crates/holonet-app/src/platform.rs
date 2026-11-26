@@ -26,11 +26,17 @@ pub enum SystemEvent {
     Resume,
     /// A network interface came, went or changed, or connectivity changed.
     NetworkChanged,
+    /// Windows locked (Win L, or the screen locking by itself).
+    SessionLocked,
+    /// Windows unlocked.
+    SessionUnlocked,
 }
 
-/// Report sleep, wake and network changes for the rest of the process's life.
-/// The callbacks need no window (milestone 3 phase 0, spike b); each sends on
-/// `tx`, which the registrations keep alive.
+/// Report sleep, wake, network changes, and Windows locking and unlocking,
+/// for the rest of the process's life. The power and network callbacks need
+/// no window (milestone 3 phase 0, spike b); each sends on `tx`, which the
+/// registrations keep alive. Lock and unlock come to a message-only window
+/// on a thread of its own (milestone 4 phase 0, spike b).
 #[cfg(windows)]
 pub fn watch_system(tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>) {
     use std::ffi::c_void;
@@ -94,6 +100,85 @@ pub fn watch_system(tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>) {
         // Not asking for the initial hint (0): only changes matter.
         NotifyNetworkConnectivityHintChange(Some(on_hint), ctx, 0, &mut hint);
     }
+    // SAFETY: `ctx` is the leaked `Tx`, alive for the process.
+    watch_session(unsafe { &*(ctx as *const Tx) }.clone());
+}
+
+/// `WM_WTSSESSION_CHANGE` to a message-only window, on its own thread.
+#[cfg(windows)]
+fn watch_session(tx: tokio::sync::mpsc::UnboundedSender<SystemEvent>) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::RemoteDesktop::{NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW,
+        TranslateMessage, WNDCLASSW,
+    };
+
+    const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+    const WTS_SESSION_LOCK: usize = 0x7;
+    const WTS_SESSION_UNLOCK: usize = 0x8;
+    static TX: OnceLock<tokio::sync::mpsc::UnboundedSender<SystemEvent>> = OnceLock::new();
+    if TX.set(tx).is_err() {
+        return; // already watching
+    }
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == WM_WTSSESSION_CHANGE {
+            let event = match wparam {
+                WTS_SESSION_LOCK => Some(SystemEvent::SessionLocked),
+                WTS_SESSION_UNLOCK => Some(SystemEvent::SessionUnlocked),
+                _ => None,
+            };
+            if let (Some(e), Some(tx)) = (event, TX.get()) {
+                let _ = tx.send(e);
+            }
+        }
+        // SAFETY: the arguments are the ones Windows passed in.
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    std::thread::Builder::new()
+        .name("session-watch".into())
+        .spawn(|| {
+            let class: Vec<u16> = "HolonetSessionWatch".encode_utf16().chain(Some(0)).collect();
+            // SAFETY: a plain window class and message-only window, used only
+            // on this thread, which runs its message loop for the process's life.
+            unsafe {
+                let instance = GetModuleHandleW(std::ptr::null());
+                let wc = WNDCLASSW {
+                    lpfnWndProc: Some(proc),
+                    hInstance: instance,
+                    lpszClassName: class.as_ptr(),
+                    ..std::mem::zeroed()
+                };
+                RegisterClassW(&wc);
+                let hwnd = CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    class.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    instance,
+                    std::ptr::null(),
+                );
+                if hwnd.is_null() || WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) == 0 {
+                    return;
+                }
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        })
+        .ok();
 }
 
 #[cfg(not(windows))]

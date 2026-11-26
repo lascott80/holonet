@@ -1245,3 +1245,67 @@ fmt, clippy, and the unit tests (32, 15, 12, 7, 13 and 16) pass.
 - Chains of more than one jump host are covered by the `link` unit test, not live.
 
 fmt, clippy, and the unit tests (34, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 8: lock and Windows Hello (25 Nov 2026)
+
+**Windows Hello** (`crates/holonet-app/src/hello.rs`, the `windows` 0.62 calls from phase 0's spike):
+- `create_and_sign` creates the credential, then signs through a freshly opened one, as unlocking does.
+- `sign`, `delete`, `available`.
+- `HelloError`: Cancelled, Missing, Unavailable, Failed. Each has interface text.
+- Every call blocks on Windows, so callers run it on GPUI's background executor.
+- Credential names are `holonet-vault-<12 hex>`, stored in the vault's Hello slot.
+
+**Locking** (`app.rs`):
+- **Idle:** the window's root captures key-down and mouse-down, and listens for mouse moves, recording the time. Only input in Holonet counts: terminal output does not.
+  - A check every 10 s locks after Settings' "Lock vault after" (15 minutes, 1 hour, Never).
+- **Windows lock:** `platform::watch_system` gains the message-only window from phase 0, on its own thread (`WTSRegisterSessionNotification`). It sends `SessionLocked` and `SessionUnlocked` into the same channel as sleep and network changes.
+  - "Lock when Windows locks" (on by default) locks the vault on `SessionLocked`.
+  - Panes ignore these events.
+- Locking drops the workspace as "Lock now" does, so sessions stay connected.
+
+**Locked screen** (Locked.dc.html):
+- It reads the vault file's header (no password needed) for a Hello slot.
+  - With one: **Unlock with Windows Hello** ("Waiting for Windows Hello…" while the prompt is open) and **Use vault password instead**.
+  - The password view then offers "Use Windows Hello instead".
+  - Without one: the password field, as before.
+- The body names the reason:
+  - "Holonet locked after 15 minutes idle." (or "1 hour", or "1 minute")
+  - "Holonet locked when Windows locked."
+  - "You locked the vault."
+  - At startup: "Unlock to open your hosts, keys and passwords." (with Hello)
+- Hello failures show under the button:
+  - "Windows Hello was cancelled."
+  - A missing credential, or a key that does not open the vault, both say to use the vault password and turn Hello on again.
+
+**Settings, Vault and security:**
+- **Unlock with Windows Hello:**
+  - Disabled with "Windows Hello is not set up on this PC. Add a PIN, fingerprint or face in Windows Settings, Accounts, Sign-in options." when `IsSupportedAsync` says no. It reads "Checking…" while Windows answers.
+  - **Turning it on** opens "Turn on Windows Hello", which asks for the vault password. Holonet checks the password (Argon2, off the UI thread, holding the vault as the password change does), has Hello create its key and sign a new challenge, and adds the slot. The file becomes format 2.
+  - **Turning it off** removes the slot and deletes the credential. The file goes back to format 1.
+- **Lock vault after** (select) and **Lock when Windows locks** (switch). The owner's plan kept these separate, where the design merges them into one select.
+- The side navigation's vault card reads "Encrypted, unlocks with Windows Hello or the vault password" when the vault has a Hello slot.
+
+**Fixed on the way: the Settings page layout.**
+- Sections were sized to their content, not to `w_full` with `max_w(1080)`: Taffy did not apply them inside the scroll column.
+  - So the Connection card was wider than the others (since phase 6's long help line).
+  - Sections were measured too short: the Connection heading overlapped the Vault file row.
+- `page_block` now takes a definite width (the window less the side navigation and padding, at most 1080), and the card and row wrappers are flex columns. All cards now share one width, with no overlap.
+
+**Checked live** (the phase 4 test vault):
+
+| Check | Result |
+| --- | --- |
+| Idle lock (set to 1 minute with `examples/m4_idle_seed.rs`), a session printing the time every 5 s | Locked about 60 s after the last keystroke with "Holonet locked after 1 minute idle." and "1 session is open…"; the output did not keep it unlocked. After the password unlock the loop had kept printing, with no reconnect |
+| Turn on Windows Hello (the owner completed the prompt) | "Windows Hello now unlocks the vault. The vault password still works too."; the vault file became format 2 with the credential in its slot |
+| Win L with a behind-a session open (the owner) | Holonet showed the Locked screen after Windows unlocked, and Hello opened it. The session was the same login, with no reconnect |
+| New process, Hello at startup (the owner) | Cancelling showed the cancelled message; the second try opened the vault. **This confirms the signature repeats across processes** (phase 0 had checked one process only) |
+| Lock now, then Use vault password instead | The password view with "Use Windows Hello instead"; the password unlocked |
+| Turn off Windows Hello | "Windows Hello no longer unlocks the vault. Use the vault password."; file back to format 1, no Hello slot |
+
+**Not checked:**
+- Hello not set up on this PC (the disabled switch): this PC has Hello. The wording is in `hello::UNAVAILABLE`.
+- A missing credential, or a key that does not open the vault: not run live.
+- That the credential was deleted from Windows after turning Hello off: not confirmed directly. The vault no longer refers to it.
+- The prompt focus workaround was not needed; every prompt opened in front.
+
+fmt, clippy, and the unit tests (35, 15, 12, 7, 13 and 16) pass.

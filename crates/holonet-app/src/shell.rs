@@ -371,6 +371,14 @@ impl SideNav {
         }
     }
 
+    /// The vault also unlocks with Windows Hello.
+    pub fn hello(mut self, yes: bool) -> Self {
+        if yes {
+            self.vault_status = "Encrypted, unlocks with Windows Hello or the vault password".into();
+        }
+        self
+    }
+
     pub fn update_available(mut self, yes: bool) -> Self {
         self.update_available = yes;
         self

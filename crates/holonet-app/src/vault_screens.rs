@@ -1,6 +1,7 @@
 //! The vault gate: create a vault on first start, unlock it, and the
-//! wrong-password delay. Locked follows docs/design/screens/Locked.dc.html
-//! with the vault password as the method (Windows Hello is milestone 4).
+//! wrong-password delay. Locked follows docs/design/screens/Locked.dc.html:
+//! "Unlock with Windows Hello" when the vault has a Hello key slot, with
+//! "Use vault password instead", otherwise the vault password.
 //! Create vault is not drawn; it uses the same card.
 
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use gpui::{
     BoxShadow, Context, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, WeakEntity, Window, div,
     hsla, point, prelude::*, px,
 };
-use holonet_vault::{LockedVault, MIN_PASSWORD_LEN, UnlockedVault, VaultError};
+use holonet_vault::{HelloRequest, LockedVault, MIN_PASSWORD_LEN, UnlockedVault, VaultError};
 
 use crate::app::HolonetApp;
 use crate::theme::{self, TypeStyles};
@@ -179,6 +180,26 @@ pub enum LockReason {
     Startup,
     /// "Lock now".
     Manual,
+    /// No input in Holonet for this many minutes.
+    Idle(u32),
+    /// Windows locked.
+    WindowsLocked,
+}
+
+impl LockReason {
+    /// The Locked screen's body (Locked.dc.html).
+    fn body(self, hello: bool) -> String {
+        const AFTER: &str = "Your hosts, keys and passwords are encrypted until you unlock.";
+        match self {
+            LockReason::Startup if hello => "Unlock to open your hosts, keys and passwords.".into(),
+            LockReason::Startup => "Enter your vault password to open your hosts, keys and passwords.".into(),
+            LockReason::Manual => format!("You locked the vault. {AFTER}"),
+            LockReason::Idle(60) => format!("Holonet locked after 1 hour idle. {AFTER}"),
+            LockReason::Idle(1) => format!("Holonet locked after 1 minute idle. {AFTER}"),
+            LockReason::Idle(m) => format!("Holonet locked after {m} minutes idle. {AFTER}"),
+            LockReason::WindowsLocked => format!("Holonet locked when Windows locked. {AFTER}"),
+        }
+    }
 }
 
 pub struct Locked {
@@ -192,6 +213,10 @@ pub struct Locked {
     busy: bool,
     /// Sessions that stay connected while locked.
     open_sessions: usize,
+    /// The vault's Hello key slot, read from the file when locking.
+    hello: Option<HelloRequest>,
+    /// "Use vault password instead" was chosen.
+    use_password: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -206,8 +231,15 @@ impl Locked {
     ) -> Self {
         let password = cx.new(|cx| TextField::new(cx, "").password());
         let subscriptions = vec![cx.subscribe_in(&password, window, Self::on_field)];
-        password.read(cx).focus(window);
+        // Reading the header needs no password; a file without a Hello slot
+        // (or one that cannot be read) uses the password.
+        let hello = LockedVault::open(&path).ok().and_then(|v| v.hello());
+        if hello.is_none() {
+            password.read(cx).focus(window);
+        }
         Self {
+            hello,
+            use_password: false,
             app,
             path,
             reason,
@@ -269,6 +301,41 @@ impl Locked {
         cx.notify();
     }
 
+    /// "Unlock with Windows Hello": Hello signs the slot's challenge, and the
+    /// signature opens the vault. Both wait on Windows, off the UI thread.
+    fn unlock_with_hello(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.hello.clone() else { return };
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.problem = None;
+        let path = self.path.clone();
+        let task = cx.background_executor().spawn(async move {
+            let signature = crate::hello::sign(&request.credential, &request.challenge).map_err(|e| e.message())?;
+            LockedVault::open(&path).and_then(|v| v.unlock_with_hello(&signature)).map_err(|e| match e {
+                VaultError::HelloRejected => "Windows Hello's key did not open this vault. Unlock with the vault password, then turn Windows Hello on again in Settings.".to_string(),
+                e => e.to_string(),
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(vault) => {
+                        let restored = vault.restored_from_backup;
+                        let _ = this.app.update(cx, |app, cx| app.opened(vault, restored, cx));
+                    }
+                    Err(message) => this.problem = Some(message.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Redraw every second while the retry delay runs down.
     fn tick(&mut self, cx: &mut Context<Self>) {
         let timer = cx.background_executor().timer(Duration::from_millis(250));
@@ -289,56 +356,87 @@ impl Locked {
 
 impl Render for Locked {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body: SharedString = match self.reason {
-            LockReason::Startup => "Enter your vault password to open your hosts, keys and passwords.".into(),
-            LockReason::Manual => {
-                "You locked the vault. Your hosts, keys and passwords are encrypted until you unlock.".into()
-            }
-        };
+        let hello = self.hello.is_some() && !self.use_password;
+        let body: SharedString = self.reason.body(self.hello.is_some()).into();
         let waiting = self.waiting();
         let help: Option<(SharedString, bool)> = match (&self.problem, waiting) {
             (Some(p), Some(secs)) => Some((format!("{p} Try again in {secs} s.").into(), true)),
             (Some(p), None) => Some((p.clone(), true)),
             (None, _) => None,
         };
-        let label = if self.busy {
-            "Unlocking…"
-        } else if waiting.is_some() {
-            "Wait to try again"
+        let card = gate_card("lock", "Vault locked", body);
+        let card = if hello {
+            // Locked.dc.html: the Hello button, then the password as an alternative.
+            card.child(
+                Button::primary(
+                    "unlock-hello",
+                    if self.busy { "Waiting for Windows Hello…" } else { "Unlock with Windows Hello" },
+                )
+                .full_width()
+                .disabled(self.busy)
+                .on_click(cx.listener(|this, _, _, cx| this.unlock_with_hello(cx))),
+            )
+            .children(
+                self.problem
+                    .clone()
+                    .map(|p| div().w_full().text_body().text_color(theme::warn()).text_center().child(p)),
+            )
+            .child(
+                Button::quiet("use-password", "Use vault password instead").disabled(self.busy).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.use_password = true;
+                        this.problem = None;
+                        this.password.read(cx).focus(window);
+                        cx.notify();
+                    },
+                )),
+            )
         } else {
-            "Unlock"
-        };
-        gate_body(
-            gate_card("lock", "Vault locked", body)
-                .child(div().w_full().flex().flex_col().child(field("Vault password", self.password.clone(), help)))
+            let label = if self.busy {
+                "Unlocking…"
+            } else if waiting.is_some() {
+                "Wait to try again"
+            } else {
+                "Unlock"
+            };
+            card.child(div().w_full().flex().flex_col().child(field("Vault password", self.password.clone(), help)))
                 .child(
                     Button::primary("unlock", label)
                         .full_width()
                         .disabled(self.busy || waiting.is_some())
                         .on_click(cx.listener(|this, _, window, cx| this.unlock(window, cx))),
                 )
-                .when(self.open_sessions > 0, |d| {
-                    let n = self.open_sessions;
-                    d.child(
-                        div()
-                            .w_full()
-                            .pt(theme::SPACE_3)
-                            .border_t_1()
-                            .border_color(theme::line())
-                            .text_meta()
-                            .text_color(theme::ink_muted())
-                            .text_center()
-                            .child(SharedString::from(if n == 1 {
-                                "1 session is open. It stays connected in the background and reappears when you unlock."
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "{n} sessions are open. They stay connected in the background and reappear when you unlock."
-                                )
-                            })),
-                    )
-                }),
-        )
+                .when(self.hello.is_some(), |d| {
+                    d.child(Button::quiet("use-hello", "Use Windows Hello instead").disabled(self.busy).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.use_password = false;
+                            this.problem = None;
+                            cx.notify();
+                        }),
+                    ))
+                })
+        };
+        gate_body(card.when(self.open_sessions > 0, |d| {
+            let n = self.open_sessions;
+            d.child(
+                div()
+                    .w_full()
+                    .pt(theme::SPACE_3)
+                    .border_t_1()
+                    .border_color(theme::line())
+                    .text_meta()
+                    .text_color(theme::ink_muted())
+                    .text_center()
+                    .child(SharedString::from(if n == 1 {
+                        "1 session is open. It stays connected in the background and reappears when you unlock."
+                            .to_string()
+                    } else {
+                        format!(
+                            "{n} sessions are open. They stay connected in the background and reappear when you unlock."
+                        )
+                    })),
+            )
+        }))
     }
 }
 
@@ -355,5 +453,13 @@ mod tests {
         assert_eq!(lockout_delay(7), Duration::from_secs(16));
         assert_eq!(lockout_delay(8), Duration::from_secs(30));
         assert_eq!(lockout_delay(50), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn lock_reasons_read_as_drawn() {
+        assert!(LockReason::Idle(15).body(true).starts_with("Holonet locked after 15 minutes idle."));
+        assert!(LockReason::Idle(60).body(true).starts_with("Holonet locked after 1 hour idle."));
+        assert!(LockReason::WindowsLocked.body(false).starts_with("Holonet locked when Windows locked."));
+        assert!(LockReason::Startup.body(false).starts_with("Enter your vault password"));
     }
 }

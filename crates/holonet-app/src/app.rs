@@ -5,12 +5,15 @@
 //! drops the workspace and its unlocked vault) leaves them connected. They
 //! reappear when the vault is unlocked (decisions.md).
 //!
+//! The vault locks after the idle time (only input in Holonet counts, not
+//! terminal output) and when Windows locks, as Settings says.
+//!
 //! App shortcuts are actions bound in the "HolonetApp" context. GPUI matches
 //! bindings before key-down handlers, so they win over the terminal, and
 //! they all use Ctrl Shift (or Ctrl Tab) so shell keys still reach the shell.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -82,7 +85,12 @@ pub struct HolonetApp {
     /// Holds keyboard focus when nothing inside does, so app shortcuts
     /// still dispatch (GPUI needs a focused element to start from).
     focus: gpui::FocusHandle,
+    /// The last key, click or mouse movement in the window, for idle locking.
+    last_input: Rc<Cell<Instant>>,
 }
+
+/// How often the idle time is checked.
+const IDLE_CHECK: Duration = Duration::from_secs(10);
 
 impl HolonetApp {
     pub fn new(path: PathBuf, runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -94,12 +102,23 @@ impl HolonetApp {
             let p = path.clone();
             Stage::Create(cx.new(|cx| CreateVault::new(app, p, window, cx)))
         };
-        // Sleep, wake and network changes, for reconnecting (phase 7).
+        // Sleep, wake and network changes for reconnecting, and Windows
+        // locking for the vault.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         crate::platform::watch_system(tx);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = rx.recv().await {
-                if this.update(cx, |app, cx| app.system_event(event, cx)).is_err() {
+                if this.update_in(cx, |app, window, cx| app.system_event(event, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // The idle lock.
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(IDLE_CHECK).await;
+                if this.update_in(cx, |app, window, cx| app.check_idle(window, cx)).is_err() {
                     break;
                 }
             }
@@ -116,6 +135,7 @@ impl HolonetApp {
             tab_scroll: ScrollHandle::new(),
             edit_origin: None,
             focus: cx.focus_handle(),
+            last_input: Rc::new(Cell::new(Instant::now())),
         }
     }
 
@@ -124,12 +144,29 @@ impl HolonetApp {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
         self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, cx)));
+        self.last_input.set(Instant::now());
         cx.notify();
     }
 
-    /// "Lock now": dropping the workspace drops the unlocked vault, which
-    /// wipes its key and secrets from memory. Sessions stay connected.
+    /// "Lock now".
     pub fn lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lock_for(LockReason::Manual, window, cx);
+    }
+
+    /// Lock after the idle time set in Settings.
+    fn check_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mins) = self.vault_data(cx).and_then(|d| d.settings.lock_after_idle_mins) else { return };
+        if self.last_input.get().elapsed() >= Duration::from_secs(u64::from(mins) * 60) {
+            self.lock_for(LockReason::Idle(mins), window, cx);
+        }
+    }
+
+    /// Dropping the workspace drops the unlocked vault, which wipes its key
+    /// and secrets from memory. Sessions stay connected.
+    fn lock_for(&mut self, reason: LockReason, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_unlocked() {
+            return;
+        }
         let app = cx.entity().downgrade();
         let path = self.path.clone();
         let open = self.tabs.iter().map(|t| t.read(cx).panes().len()).sum();
@@ -137,7 +174,7 @@ impl HolonetApp {
             tab.update(cx, |t, cx| t.close_menu(cx));
         }
         self.picker = None;
-        self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, LockReason::Manual, open, window, cx)));
+        self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, reason, open, window, cx)));
         self.active = None;
         cx.notify();
     }
@@ -238,7 +275,18 @@ impl HolonetApp {
         matches!(self.stage, Stage::Open(_))
     }
 
-    fn system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+    fn system_event(&mut self, event: crate::platform::SystemEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::platform::SystemEvent;
+        match event {
+            SystemEvent::SessionLocked => {
+                if self.vault_data(cx).is_some_and(|d| d.settings.lock_when_windows_locks) {
+                    self.lock_for(LockReason::WindowsLocked, window, cx);
+                }
+                return;
+            }
+            SystemEvent::SessionUnlocked => return,
+            SystemEvent::Suspend | SystemEvent::Resume | SystemEvent::NetworkChanged => {}
+        }
         let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
         for pane in panes {
             pane.update(cx, |p, cx| p.on_system_event(event, cx));
@@ -596,11 +644,17 @@ impl Render for HolonetApp {
                         .child(picker),
                 )
         });
+        let (keys, clicks, moves) = (self.last_input.clone(), self.last_input.clone(), self.last_input.clone());
         div()
             .size_full()
             .relative()
             .flex()
             .flex_col()
+            // Input anywhere in the window keeps the vault unlocked; capture
+            // runs before any child can stop the event.
+            .capture_key_down(move |_, _, _| keys.set(Instant::now()))
+            .capture_any_mouse_down(move |_, _, _| clicks.set(Instant::now()))
+            .on_mouse_move(move |_, _, _| moves.set(Instant::now()))
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_picker(window, cx)))

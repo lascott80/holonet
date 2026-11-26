@@ -414,10 +414,16 @@ pub fn key_values(rows: Vec<(SharedString, AnyElement)>) -> Div {
 /// (SettingRow.md).
 pub fn setting_card(rows: Vec<AnyElement>) -> Div {
     let count = rows.len();
-    div().flex().flex_col().bg(theme::card()).rounded(theme::RADIUS_LG).children(
-        rows.into_iter()
-            .enumerate()
-            .map(|(i, row)| div().when(i + 1 < count, |d| d.border_b_1().border_color(theme::line())).child(row)),
+    div().w_full().flex().flex_col().bg(theme::card()).rounded(theme::RADIUS_LG).children(
+        rows.into_iter().enumerate().map(|(i, row)| {
+            // Flex wrappers, so each row's text wraps at the card's width.
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .when(i + 1 < count, |d| d.border_b_1().border_color(theme::line()))
+                .child(row)
+        }),
     )
 }
 
