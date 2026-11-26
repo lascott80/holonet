@@ -306,3 +306,147 @@ async fn unanswered_keep_alives_are_lost() {
     let waited = started.elapsed();
     assert!(waited >= Duration::from_secs(2) && waited < Duration::from_secs(8), "{waited:?}");
 }
+
+// ---- Milestone 4 phase 2: generated keys, Install on host, jump hosts ----
+
+/// A random marker for this run, put in generated keys' comments so they can
+/// be removed from `authorized_keys` afterwards.
+fn marker() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    format!("holonet-it-{nanos:08x}")
+}
+
+#[tokio::test]
+async fn generated_keys_install_and_sign_in() {
+    if !enabled() {
+        return;
+    }
+    let env = env();
+    let admin = Session::connect(options_from("password", &env).unwrap()).await.unwrap();
+    // Keys a failed earlier run left behind (a panic skips the cleanup below).
+    admin.exec("sed -i '/holonet-it-/d' ~/.ssh/authorized_keys").await.unwrap();
+    let marker = marker();
+    let cases = [
+        (holonet_ssh::KeyKind::Ed25519, None),
+        (holonet_ssh::KeyKind::Ed25519, Some("generated passphrase")),
+        (holonet_ssh::KeyKind::EcdsaP256, None),
+        (holonet_ssh::KeyKind::Rsa4096, None),
+    ];
+    let result = async {
+        for (kind, passphrase) in cases {
+            let started = std::time::Instant::now();
+            let key = holonet_ssh::generate_key(kind, &format!("{marker}@{}", kind.label()), passphrase).unwrap();
+            let generated_in = started.elapsed();
+            // A freshly generated key cannot be authorized yet, so signing in
+            // with it proves the install. (No refused attempt first: sshd's
+            // PerSourcePenalties would then drop the next connections.)
+            let mut opts = options_from("password", &env).unwrap();
+            opts.credential = Credential::Key {
+                name: kind.label().into(),
+                private_key: key.private_key.clone(),
+                passphrase: passphrase.map(Secret::new),
+            };
+            let full_line = format!("{} {}", key.info.public_key, key.info.comment);
+            assert_eq!(admin.install_public_key(&full_line).await.unwrap(), holonet_ssh::InstallOutcome::Added);
+            // Installing again changes nothing, even with another comment.
+            assert_eq!(
+                admin.install_public_key(&key.info.public_key).await.unwrap(),
+                holonet_ssh::InstallOutcome::AlreadyPresent
+            );
+            let session = Session::connect(opts).await.unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            assert_eq!(session.info().auth_method, "publickey");
+            session.close().await.unwrap();
+            eprintln!(
+                "{kind:?} (passphrase {}): generated in {generated_in:?}, installed, signed in",
+                passphrase.is_some()
+            );
+        }
+        let modes = admin.exec("stat -c %a ~/.ssh ~/.ssh/authorized_keys").await.unwrap();
+        assert_eq!(modes.stdout.split_whitespace().collect::<Vec<_>>(), ["700", "600"]);
+    }
+    .await;
+    // Remove this run's keys, whatever happened above.
+    let cleanup = admin
+        .exec(&format!("sed -i '/{marker}/d' ~/.ssh/authorized_keys; grep -c {marker} ~/.ssh/authorized_keys"))
+        .await
+        .unwrap();
+    assert_eq!(cleanup.stdout.trim(), "0", "test keys left in authorized_keys");
+    admin.close().await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn jump_host_connects_and_reports_failures_per_hop() {
+    if !enabled() {
+        return;
+    }
+    let env = env();
+    // Through the server to itself: the target address is as the jump host
+    // sees it (127.0.0.1:2222 inside WSL), and both keys are in known_hosts.
+    let mut opts = options_from("ed25519", &env).unwrap();
+    opts.jump = Some(Box::new(options_from("password", &env).unwrap()));
+    let session = Session::connect(opts.clone()).await.unwrap();
+    let jump = session.jump_host().expect("jump host session");
+    let outer = jump.exec("echo $SSH_CONNECTION").await.unwrap().stdout;
+    let inner = session.exec("echo $SSH_CONNECTION").await.unwrap().stdout;
+    assert_ne!(outer.trim(), inner.trim(), "two separate connections");
+    assert_eq!(session.info().auth_method, "publickey");
+    assert_eq!(jump.info().auth_method, "password");
+    session.close().await.unwrap();
+    // The disconnect is sent at once; the session notices a moment later.
+    for _ in 0..40 {
+        if jump.is_closed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(jump.is_closed(), "closing the session closes its jump host");
+
+    // The jump host cannot reach the target port.
+    let mut closed_port = opts.clone();
+    closed_port.port = 1;
+    match Session::connect(closed_port).await {
+        Err(ConnectError::JumpCouldNotReach { target, reason, .. }) => {
+            assert_eq!(target, format!("{}:1", env["HOLONET_TEST_HOST"]));
+            eprintln!("closed port: {reason}");
+        }
+        other => panic!("expected JumpCouldNotReach, got {:?}", other.err()),
+    }
+
+    // The jump host's own key is unknown: stopped at the first hop, wrapped.
+    let dir = root().join("target/hostkey-check");
+    std::fs::create_dir_all(&dir).unwrap();
+    let empty = dir.join("jump_empty_known_hosts");
+    std::fs::write(&empty, "").unwrap();
+    let mut unknown_jump = opts.clone();
+    unknown_jump.jump.as_mut().unwrap().prompts = FilePrompts::new(&empty);
+    let err = Session::connect(unknown_jump).await.err().expect("refused");
+    let (innermost, hops) = err.innermost();
+    assert!(matches!(innermost, ConnectError::HostKeyRejected), "{err:?}");
+    assert_eq!(hops, [env["HOLONET_TEST_HOST"].as_str()]);
+
+    // The target's key is not trusted under the name the jump host uses.
+    let mut unknown_target = opts.clone();
+    unknown_target.host = "localhost".into();
+    assert!(matches!(Session::connect(unknown_target).await, Err(ConnectError::HostKeyRejected)));
+}
+
+#[tokio::test]
+async fn lost_jump_host_is_the_reported_cause() {
+    if !enabled() {
+        return;
+    }
+    let env = env();
+    let mut opts = options_from("ed25519", &env).unwrap();
+    opts.jump = Some(Box::new(options_from("password", &env).unwrap()));
+    let session = Session::connect(opts).await.unwrap();
+    let mut shell = session.open_shell(PtySize::cells(80, 24)).await.unwrap();
+    // Drop the jump host's connection the way killed_connection_is_lost does.
+    let jump_shell = session.jump_host().unwrap().open_shell(PtySize::cells(80, 24)).await.unwrap();
+    type_line(&jump_shell, "kill -9 $PPID");
+    match wait_for_end(&mut shell).await {
+        End::Lost(reason @ LostReason::JumpHost { .. }) => eprintln!("lost: {reason}"),
+        other => panic!("expected the jump host as the cause, got {other:?}"),
+    }
+    assert!(matches!(session.lost_reason(), Some(LostReason::JumpHost { .. })));
+}

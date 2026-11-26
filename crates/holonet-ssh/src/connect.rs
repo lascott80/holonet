@@ -13,7 +13,8 @@ use std::time::Duration;
 use holonet_model::Secret;
 use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, decode_secret_key};
-use russh::{MethodKind, MethodSet};
+use russh::{ChannelOpenFailure, MethodKind, MethodSet};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use crate::hostkey::PresentedKey;
@@ -84,6 +85,10 @@ pub struct ConnectOptions {
     /// end the connection as lost.
     pub keep_alive: Option<Duration>,
     pub prompts: Arc<dyn Prompts>,
+    /// Connect through this host first. `host` and `port` above are then as
+    /// the jump host sees them, and the host key is checked against them. A
+    /// jump host may have its own jump host.
+    pub jump: Option<Box<ConnectOptions>>,
 }
 
 /// Why a connection did not come up. Each maps to a connection state screen.
@@ -114,6 +119,37 @@ pub enum ConnectError {
     BadKey(String),
     #[error("SSH error: {0}")]
     Protocol(String),
+    /// Connecting to a jump host failed; `error` says how.
+    #[error("the jump host {host} did not connect: {error}")]
+    JumpHost { host: String, error: Box<ConnectError> },
+    /// The jump host was signed in to, but could not reach the next host.
+    #[error("{jump} could not reach {target}: {reason}")]
+    JumpCouldNotReach { jump: String, target: String, reason: String },
+}
+
+impl ConnectError {
+    /// The error at the end of a chain of jump hosts, and the jump hosts it
+    /// passed through (outermost first). For choosing a connection state.
+    pub fn innermost(&self) -> (&ConnectError, Vec<&str>) {
+        let mut hops = Vec::new();
+        let mut error = self;
+        while let ConnectError::JumpHost { host, error: inner } = error {
+            hops.push(host.as_str());
+            error = inner;
+        }
+        (error, hops)
+    }
+}
+
+fn open_failure_text(failure: &ChannelOpenFailure) -> String {
+    match failure {
+        ChannelOpenFailure::ConnectFailed => "the connection was refused, or nothing answered".into(),
+        ChannelOpenFailure::AdministrativelyProhibited => "the jump host does not allow forwarding".into(),
+        ChannelOpenFailure::ResourceShortage => "the jump host is out of resources".into(),
+        ChannelOpenFailure::UnknownChannelType => "the jump host does not support forwarding".into(),
+        ChannelOpenFailure::Other { reason, .. } if !reason.trim().is_empty() => reason.trim().to_string(),
+        ChannelOpenFailure::Other { code, .. } => format!("refused with code {code}"),
+    }
 }
 
 impl From<russh::Error> for ConnectError {
@@ -155,6 +191,8 @@ pub enum LostReason {
     Network(String),
     /// Some other protocol error.
     Other(String),
+    /// The connection to a jump host on the way was lost.
+    JumpHost { host: String, reason: Box<LostReason> },
 }
 
 impl std::fmt::Display for LostReason {
@@ -165,6 +203,7 @@ impl std::fmt::Display for LostReason {
             Self::NoResponse => f.write_str("The server stopped answering keep-alives."),
             Self::Network(m) => write!(f, "The network connection failed: {m}"),
             Self::Other(m) => write!(f, "The connection failed: {m}"),
+            Self::JumpHost { host, reason } => write!(f, "The connection to the jump host {host} was lost. {reason}"),
         }
     }
 }
@@ -232,11 +271,56 @@ impl client::Handler for Handler {
 
 pub(crate) type Handle = client::Handle<Handler>;
 
-/// Open TCP, run the handshake (with the host key decision) and sign in.
-pub(crate) async fn connect(
-    opts: &ConnectOptions,
-) -> Result<(Handle, SessionInfo, Arc<Mutex<Option<LostReason>>>), ConnectError> {
-    let stream = open_tcp(&opts.host, opts.port, opts.connect_timeout).await?;
+/// A signed-in connection, and the jump host session it runs through.
+pub(crate) struct Connected {
+    pub handle: Handle,
+    pub info: SessionInfo,
+    pub lost: Arc<Mutex<Option<LostReason>>>,
+    pub via: Option<Box<crate::Session>>,
+}
+
+/// Connect (through the jump host, if any), run the handshake with the host
+/// key decision, and sign in.
+pub(crate) async fn connect(opts: &ConnectOptions) -> Result<Connected, ConnectError> {
+    let Some(jump) = &opts.jump else {
+        let stream = open_tcp(&opts.host, opts.port, opts.connect_timeout).await?;
+        return handshake(opts, stream).await;
+    };
+    let via = Box::pin(crate::Session::connect((**jump).clone()))
+        .await
+        .map_err(|e| ConnectError::JumpHost { host: jump.host.clone(), error: Box::new(e) })?;
+    let target = format!("{}:{}", opts.host, opts.port);
+    let open = via.handle.channel_open_direct_tcpip(opts.host.clone(), opts.port.into(), "127.0.0.1", 0);
+    let channel = match tokio::time::timeout(opts.connect_timeout, open).await {
+        Ok(Ok(channel)) => channel,
+        failed => {
+            let _ = via.close().await;
+            return Err(match failed {
+                Err(_) => ConnectError::TimedOut(opts.connect_timeout.as_secs()),
+                Ok(Err(russh::Error::ChannelOpenFailure(f))) => {
+                    ConnectError::JumpCouldNotReach { jump: jump.host.clone(), target, reason: open_failure_text(&f) }
+                }
+                Ok(Err(e)) => e.into(),
+                Ok(Ok(_)) => unreachable!(),
+            });
+        }
+    };
+    match handshake(opts, channel.into_stream()).await {
+        Ok(mut connected) => {
+            connected.via = Some(Box::new(via));
+            Ok(connected)
+        }
+        Err(e) => {
+            let _ = via.close().await;
+            Err(e)
+        }
+    }
+}
+
+async fn handshake<R>(opts: &ConnectOptions, stream: R) -> Result<Connected, ConnectError>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let config =
         Arc::new(client::Config { keepalive_interval: opts.keep_alive, keepalive_max: 3, ..Default::default() });
     let lost = Arc::new(Mutex::new(None));
@@ -258,7 +342,7 @@ pub(crate) async fn connect(
     let method = sign_in(&mut handle, opts).await?;
     let mut info = info.lock().unwrap().clone();
     info.auth_method = method.to_string();
-    Ok((handle, info, lost))
+    Ok(Connected { handle, info, lost, via: None })
 }
 
 async fn open_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, ConnectError> {

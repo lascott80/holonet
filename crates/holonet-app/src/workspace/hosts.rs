@@ -57,13 +57,18 @@ fn last_connected(host: &Host) -> SharedString {
     }
 }
 
+/// How a (resolved) host signs in, as the cards and detail panel say it.
 fn sign_in(host: &Host, data: &VaultData) -> SharedString {
-    match &host.auth {
+    let how: SharedString = match &host.auth {
         Auth::Password { saved: Some(_) } => "Password".into(),
         Auth::Password { saved: None } => "Password, asked".into(),
         Auth::Key { key_id, .. } => {
             data.key(*key_id).map(|k| k.name.clone()).unwrap_or_else(|| "Missing key".into()).into()
         }
+    };
+    match host.identity.and_then(|id| data.identity(id)) {
+        Some(identity) => format!("{} ({how})", identity.name).into(),
+        None => how,
     }
 }
 
@@ -85,7 +90,9 @@ impl Workspace {
             return self.welcome(cx).into_any_element();
         }
         let query = self.search.read(cx).text().trim().to_string();
-        let mut hosts: Vec<&Host> = data.hosts.iter().filter(|h| matches(h, &query)).collect();
+        // Shown with their identity's username and sign-in.
+        let resolved: Vec<Host> = data.hosts.iter().map(|h| data.resolved(h)).collect();
+        let mut hosts: Vec<&Host> = resolved.iter().filter(|h| matches(h, &query)).collect();
         hosts.sort_by_key(|h| h.display_name().to_lowercase());
         // Keep a selection while there is something to select.
         if self.selected.is_none_or(|id| !hosts.iter().any(|h| h.id == id)) {
@@ -167,7 +174,8 @@ impl Workspace {
             self.host_list(&hosts, selected, &data, cx).into_any_element()
         };
 
-        let detail = selected.and_then(|id| data.host(id)).map(|h| self.host_detail(h, &data, cx));
+        let detail =
+            selected.and_then(|id| resolved.iter().find(|h| h.id == id)).map(|h| self.host_detail(h, &data, cx));
 
         div()
             .size_full()
@@ -246,32 +254,41 @@ impl Workspace {
                 d.bg(theme::card()).border_color(theme::line()).hover(|s| s.shadow(theme::shadow_hover()))
             })
             .child(
-                div().flex().items_center().gap(theme::SPACE_3).child(icon_tile(host, 40., 10., 20.)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_body()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::ink())
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(SharedString::from(host.display_name().to_string())),
-                        )
-                        .child(
-                            div()
-                                .text_mono_small()
-                                .text_color(theme::ink_muted())
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(SharedString::from(host.target())),
-                        ),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme::SPACE_3)
+                    .child(icon_tile(host, 40., 10., 20.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_body()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::ink())
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(SharedString::from(host.display_name().to_string())),
+                            )
+                            .child(
+                                div()
+                                    .text_mono_small()
+                                    .text_color(theme::ink_muted())
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(SharedString::from(host.target())),
+                            ),
+                    )
+                    // Main.dc.html: hosts with a Tailscale address carry the badge.
+                    .when(host.tailscale().is_some(), |d| {
+                        d.child(div().flex_none().child(crate::ui::Tag::Neutral("Tailscale".into())))
+                    }),
             )
             .child(
                 div()
@@ -375,7 +392,9 @@ impl Workspace {
 
     fn host_detail(&self, host: &Host, data: &VaultData, cx: &mut Context<Self>) -> Div {
         let id = host.id;
-        let known = data.known_host(host.address.trim(), host.port);
+        // Trusted under either of the host's addresses (they share trust).
+        let others = VaultData::other_addresses(host, host.address.trim());
+        let known = data.known_host_or_alias(host.address.trim(), host.port, &others).map(|(k, _)| k);
         let host_key: AnyElement = match known {
             Some(k) => div()
                 .flex()
@@ -431,11 +450,66 @@ impl Workspace {
                     )
                     .child(div().text_meta().text_color(theme::ink_muted()).child(last_connected(host))),
             )
+            .when(host.tailscale().is_some(), |d| {
+                // Main.dc.html: the route, stored per host, shown when there is a choice.
+                let route = crate::host_form::ROUTES.iter().position(|r| *r == host.route).unwrap_or(0);
+                let wait = data.settings.connection.fallback_wait.duration().as_secs();
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(theme::SPACE_2)
+                        .child(section_label("Connect using"))
+                        .child(
+                            crate::ui::Segmented::new(
+                                "detail-route",
+                                crate::host_form::ROUTES
+                                    .iter()
+                                    .map(|r| SharedString::from(crate::host_form::route_label(*r)))
+                                    .collect(),
+                                route,
+                            )
+                            .compact()
+                            .on_change({
+                                let this = cx.weak_entity();
+                                move |i, _, cx| {
+                                    let route = crate::host_form::ROUTES[i.min(2)];
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.save(
+                                            move |d| {
+                                                if let Some(h) = d.host_mut(id) {
+                                                    h.route = route;
+                                                }
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                }
+                            }),
+                        )
+                        .child(crate::ui::field_help(crate::host_form::route_help(host.route, true, wait), false)),
+                )
+            })
             .child(key_values(vec![
                 ("Primary address".into(), SharedString::from(host.address.clone()).into_any_element()),
+                (
+                    "Tailscale address".into(),
+                    SharedString::from(host.tailscale().unwrap_or("Not set").to_string()).into_any_element(),
+                ),
                 ("Port".into(), port.into_any_element()),
                 ("Username".into(), username.into_any_element()),
                 ("Authentication".into(), sign_in(host, data).into_any_element()),
+                // Main.dc.html: the jump host by name, or None.
+                (
+                    "Jump host".into(),
+                    SharedString::from(
+                        host.jump_host
+                            .map(|id| data.host(id).map_or("Deleted host", |j| j.display_name()))
+                            .unwrap_or("None")
+                            .to_string(),
+                    )
+                    .into_any_element(),
+                ),
             ]))
             .child(div().flex().flex_col().gap(theme::SPACE_2).child(section_label("Host key")).child(host_key))
             .when(!host.tags.is_empty(), |d| {

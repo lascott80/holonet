@@ -3,8 +3,8 @@
 //! Plain data with serde, no I/O. The vault (`holonet-vault`) encrypts and
 //! stores a [`VaultData`]; everything else reads and edits it.
 //!
-//! Fields for later milestones (groups, Tailscale, jump hosts, snippets,
-//! logging) are added when their milestone lands. `#[serde(default)]` on every
+//! Fields for later milestones (groups, snippets, logging) are added when
+//! their milestone lands. `#[serde(default)]` on every
 //! collection and optional field keeps older vault files readable.
 
 use std::fmt;
@@ -14,7 +14,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 /// Schema version of [`VaultData`]. Bump when a change needs a migration.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// 2 (milestone 4): key passphrases are saved on the key, not on each host.
+/// [`VaultData::migrate`] moves them.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Seconds since the Unix epoch, UTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -79,6 +82,7 @@ macro_rules! id_type {
 
 id_type!(HostId);
 id_type!(KeyId);
+id_type!(IdentityId);
 
 /// Icon shown for a host. Chosen by the person; defaults to a server.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,11 +107,14 @@ pub enum Auth {
         saved: Option<Secret>,
     },
     /// A key stored in the vault. If the key has a passphrase and none is
-    /// saved, it is asked for on connect.
+    /// saved on the key ([`StoredKey::saved_passphrase`]), it is asked for on
+    /// connect.
     Key {
         key_id: KeyId,
-        #[serde(default)]
-        passphrase: Option<Secret>,
+        /// Where schema 1 saved the passphrase. Read so [`VaultData::migrate`]
+        /// can move it to the key; never written.
+        #[serde(default, rename = "passphrase", skip_serializing)]
+        legacy_passphrase: Option<Secret>,
     },
 }
 
@@ -115,6 +122,31 @@ impl Default for Auth {
     fn default() -> Self {
         Auth::Password { saved: None }
     }
+}
+
+impl Auth {
+    pub fn key(key_id: KeyId) -> Self {
+        Auth::Key { key_id, legacy_passphrase: None }
+    }
+
+    pub fn key_id(&self) -> Option<KeyId> {
+        match self {
+            Auth::Key { key_id, .. } => Some(*key_id),
+            Auth::Password { .. } => None,
+        }
+    }
+}
+
+/// Which address a host connects to (`decisions.md`, NewHost.dc.html
+/// "Connect using").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Route {
+    /// The primary address first, then Tailscale after the fallback wait.
+    #[default]
+    Automatic,
+    Primary,
+    Tailscale,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +163,17 @@ pub struct Host {
     pub username: String,
     #[serde(default)]
     pub auth: Auth,
+    /// A shared sign-in. When set, it replaces `username` and `auth`.
+    #[serde(default)]
+    pub identity: Option<IdentityId>,
+    /// A 100.x address or tailnet name, if the host is on the tailnet.
+    #[serde(default)]
+    pub tailscale_address: Option<String>,
+    #[serde(default)]
+    pub route: Route,
+    /// A saved host to connect through.
+    #[serde(default)]
+    pub jump_host: Option<HostId>,
     #[serde(default = "yes")]
     pub keep_alive: bool,
     #[serde(default)]
@@ -156,6 +199,7 @@ pub enum HostProblem {
     AddressMissing,
     AddressInvalid,
     PortZero,
+    TailscaleAddressInvalid,
 }
 
 impl HostProblem {
@@ -165,6 +209,9 @@ impl HostProblem {
             HostProblem::AddressMissing => "Add an address to test or save this host.",
             HostProblem::AddressInvalid => "Use a hostname or an IP address, without spaces or a user name.",
             HostProblem::PortZero => "Use a port from 1 to 65535.",
+            HostProblem::TailscaleAddressInvalid => {
+                "Use a 100.x address or a tailnet name, such as name.tailnet.ts.net."
+            }
         }
     }
 }
@@ -178,6 +225,10 @@ impl Host {
             port: 22,
             username: String::new(),
             auth: Auth::default(),
+            identity: None,
+            tailscale_address: None,
+            route: Route::default(),
+            jump_host: None,
             keep_alive: true,
             tags: Vec::new(),
             icon: RoleIcon::default(),
@@ -199,12 +250,35 @@ impl Host {
         format!("{user}{}{port}", self.address)
     }
 
+    /// The Tailscale address, trimmed, if one is set.
+    pub fn tailscale(&self) -> Option<&str> {
+        self.tailscale_address.as_deref().map(str::trim).filter(|a| !a.is_empty())
+    }
+
+    /// The route actually used: Primary when there is no Tailscale address
+    /// (NewHost.dc.html forces it).
+    pub fn effective_route(&self) -> Route {
+        if self.tailscale().is_none() { Route::Primary } else { self.route }
+    }
+
     /// The equivalent `ssh` command shown on the host form.
     pub fn ssh_command(&self) -> String {
-        let address = if self.address.trim().is_empty() { "[address]" } else { self.address.trim() };
+        self.ssh_command_via(None)
+    }
+
+    /// The equivalent command through a jump host, named by its label as
+    /// drawn (`ssh -J bastion-east deploy@10.30.0.9`). The target is the
+    /// Tailscale address only when the route is Tailscale.
+    pub fn ssh_command_via(&self, jump: Option<&str>) -> String {
+        let address = match (self.effective_route(), self.tailscale()) {
+            (Route::Tailscale, Some(t)) => t,
+            _ if self.address.trim().is_empty() => "[address]",
+            _ => self.address.trim(),
+        };
+        let jump = jump.map(|j| format!("-J {j} ")).unwrap_or_default();
         let user = if self.username.is_empty() { String::new() } else { format!("{}@", self.username) };
         let port = if self.port == 22 { String::new() } else { format!(" -p {}", self.port) };
-        format!("ssh {user}{address}{port}")
+        format!("ssh {jump}{user}{address}{port}")
     }
 
     /// Problems that stop the host from being saved, in form order.
@@ -218,6 +292,11 @@ impl Host {
         }
         if self.port == 0 {
             problems.push(HostProblem::PortZero);
+        }
+        if let Some(t) = self.tailscale()
+            && !is_valid_address(t)
+        {
+            problems.push(HostProblem::TailscaleAddressInvalid);
         }
         problems
     }
@@ -251,6 +330,16 @@ pub fn is_valid_address(address: &str) -> bool {
         })
 }
 
+/// A named sign-in shared by several hosts (Keychain.dc.html, Identities).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub id: IdentityId,
+    /// Shown name, e.g. "deploy" or "root (client-acme)".
+    pub name: String,
+    pub username: String,
+    pub auth: Auth,
+}
+
 /// A private key copied into the vault.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredKey {
@@ -265,6 +354,12 @@ pub struct StoredKey {
     pub encrypted: bool,
     /// OpenSSH public key line, e.g. "ssh-ed25519 AAAA... comment".
     pub public_key: String,
+    /// The key's comment, e.g. "holonet@work-laptop". Shown with the public key.
+    #[serde(default)]
+    pub comment: String,
+    /// The passphrase, when the person chose to save it in the vault.
+    #[serde(default)]
+    pub saved_passphrase: Option<Secret>,
     /// Where it was imported from, for the person's reference.
     #[serde(default)]
     pub source: Option<String>,
@@ -348,6 +443,12 @@ pub struct Settings {
     /// Enforced from milestone 4.
     #[serde(default = "default_lock_after")]
     pub lock_after_idle_mins: Option<u32>,
+    /// Lock when Windows locks (`decisions.md`).
+    #[serde(default = "yes")]
+    pub lock_when_windows_locks: bool,
+    /// Unlock with Windows Hello. On only once a Hello key slot exists.
+    #[serde(default)]
+    pub hello_unlock: bool,
     #[serde(default)]
     pub terminal: TerminalSettings,
     #[serde(default)]
@@ -368,6 +469,8 @@ impl Default for Settings {
             unknown_host_keys: UnknownHostKeys::Ask,
             connect_timeout_secs: default_connect_timeout(),
             lock_after_idle_mins: default_lock_after(),
+            lock_when_windows_locks: true,
+            hello_unlock: false,
             terminal: TerminalSettings::default(),
             connection: ConnectionSettings::default(),
         }
@@ -552,6 +655,29 @@ impl KeepAlive {
     }
 }
 
+/// How long Automatic waits on the primary address before trying
+/// Tailscale (`decisions.md`: 3 seconds, adjustable).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackWait {
+    Secs2,
+    #[default]
+    Secs3,
+    Secs5,
+    Secs10,
+}
+
+impl FallbackWait {
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::Secs2 => 2,
+            Self::Secs3 => 3,
+            Self::Secs5 => 5,
+            Self::Secs10 => 10,
+        })
+    }
+}
+
 /// Settings, Connection (Settings.dc.html).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -560,11 +686,12 @@ pub struct ConnectionSettings {
     /// Reconnect after sleep, a network change or a dropped connection
     /// (`decisions.md`: on, 5 attempts).
     pub reconnect: bool,
+    pub fallback_wait: FallbackWait,
 }
 
 impl Default for ConnectionSettings {
     fn default() -> Self {
-        Self { keep_alive: KeepAlive::Secs30, reconnect: true }
+        Self { keep_alive: KeepAlive::Secs30, reconnect: true, fallback_wait: FallbackWait::default() }
     }
 }
 
@@ -585,6 +712,8 @@ pub struct VaultData {
     #[serde(default)]
     pub keys: Vec<StoredKey>,
     #[serde(default)]
+    pub identities: Vec<Identity>,
+    #[serde(default)]
     pub known_hosts: Vec<KnownHost>,
     #[serde(default)]
     pub settings: Settings,
@@ -596,8 +725,27 @@ impl Default for VaultData {
             schema: SCHEMA_VERSION,
             hosts: Vec::new(),
             keys: Vec::new(),
+            identities: Vec::new(),
             known_hosts: Vec::new(),
             settings: Settings::default(),
+        }
+    }
+}
+
+/// Why a host's jump host cannot be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JumpProblem {
+    /// The chain leads back to a host already in it.
+    Loop,
+    /// A jump host in the chain was deleted.
+    Missing,
+}
+
+impl JumpProblem {
+    pub fn message(self) -> &'static str {
+        match self {
+            JumpProblem::Loop => "This jump host leads back to this host. Choose another, or None.",
+            JumpProblem::Missing => "A jump host on the way was deleted. Choose another, or None.",
         }
     }
 }
@@ -615,8 +763,137 @@ impl VaultData {
         self.keys.iter().find(|k| k.id == id)
     }
 
+    pub fn key_mut(&mut self, id: KeyId) -> Option<&mut StoredKey> {
+        self.keys.iter_mut().find(|k| k.id == id)
+    }
+
+    pub fn identity(&self, id: IdentityId) -> Option<&Identity> {
+        self.identities.iter().find(|i| i.id == id)
+    }
+
+    /// The username and sign-in a host uses: its identity's when it has one
+    /// that still exists, otherwise its own.
+    pub fn sign_in<'a>(&'a self, host: &'a Host) -> (&'a str, &'a Auth) {
+        match host.identity.and_then(|id| self.identity(id)) {
+            Some(identity) => (identity.username.as_str(), &identity.auth),
+            None => (host.username.as_str(), &host.auth),
+        }
+    }
+
+    /// A copy of `host` with its identity's username and sign-in in place
+    /// of its own, for connecting and for showing. `identity` stays set, so
+    /// callers can still say where the sign-in comes from.
+    pub fn resolved(&self, host: &Host) -> Host {
+        let mut resolved = host.clone();
+        let (user, auth) = self.sign_in(host);
+        resolved.username = user.to_string();
+        resolved.auth = auth.clone();
+        resolved
+    }
+
+    /// Where a host's sign-in is stored: its identity's when it has one that
+    /// still exists, otherwise its own. For saving a password typed at a
+    /// prompt.
+    pub fn sign_in_auth_mut(&mut self, host: HostId) -> Option<&mut Auth> {
+        let identity = self.host(host)?.identity.filter(|id| self.identity(*id).is_some());
+        match identity {
+            Some(id) => self.identities.iter_mut().find(|i| i.id == id).map(|i| &mut i.auth),
+            None => self.host_mut(host).map(|h| &mut h.auth),
+        }
+    }
+
+    /// Hosts that use an identity.
+    pub fn identity_users(&self, identity: IdentityId) -> Vec<HostId> {
+        self.hosts.iter().filter(|h| h.identity == Some(identity)).map(|h| h.id).collect()
+    }
+
+    /// Delete an identity. Hosts that used it keep a copy of its username
+    /// and sign-in as their own, so they still connect.
+    pub fn delete_identity(&mut self, identity: IdentityId) -> Option<Identity> {
+        let index = self.identities.iter().position(|i| i.id == identity)?;
+        let removed = self.identities.remove(index);
+        for host in self.hosts.iter_mut().filter(|h| h.identity == Some(identity)) {
+            host.identity = None;
+            host.username = removed.username.clone();
+            host.auth = removed.auth.clone();
+        }
+        Some(removed)
+    }
+
+    /// Hosts and identities that sign in with a key. A host counts when it
+    /// uses the key itself or through its identity.
+    pub fn key_users(&self, key_id: KeyId) -> (Vec<HostId>, Vec<IdentityId>) {
+        let hosts = self.hosts.iter().filter(|h| self.sign_in(h).1.key_id() == Some(key_id)).map(|h| h.id).collect();
+        let identities = self.identities.iter().filter(|i| i.auth.key_id() == Some(key_id)).map(|i| i.id).collect();
+        (hosts, identities)
+    }
+
+    /// The hops to reach `host`, first hop first, not including `host`
+    /// itself. `host` need not be saved yet (the host form checks before
+    /// saving), so its own id counts as a loop.
+    pub fn jump_chain(&self, host: &Host) -> Result<Vec<HostId>, JumpProblem> {
+        let mut chain = Vec::new();
+        let mut next = host.jump_host;
+        while let Some(id) = next {
+            if id == host.id || chain.contains(&id) {
+                return Err(JumpProblem::Loop);
+            }
+            let hop = self.host(id).ok_or(JumpProblem::Missing)?;
+            chain.push(id);
+            next = hop.jump_host;
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Bring data from an older schema up to date. Idempotent.
+    ///
+    /// Schema 1 to 2: a key passphrase saved on a host (or identity) moves to
+    /// the key, unless the key already has one.
+    pub fn migrate(&mut self) {
+        let mut moved: Vec<(KeyId, Secret)> = Vec::new();
+        let auths = self.hosts.iter_mut().map(|h| &mut h.auth).chain(self.identities.iter_mut().map(|i| &mut i.auth));
+        for auth in auths {
+            if let Auth::Key { key_id, legacy_passphrase } = auth
+                && let Some(secret) = legacy_passphrase.take()
+            {
+                moved.push((*key_id, secret));
+            }
+        }
+        for (key_id, secret) in moved {
+            if let Some(key) = self.key_mut(key_id)
+                && key.saved_passphrase.is_none()
+            {
+                key.saved_passphrase = Some(secret);
+            }
+        }
+        self.schema = SCHEMA_VERSION;
+    }
+
     pub fn known_host(&self, host: &str, port: u16) -> Option<&KnownHost> {
         self.known_hosts.iter().find(|k| k.matches(host, port))
+    }
+
+    /// The trusted key for `host:port`, or else for one of the same saved
+    /// host's other addresses on that port (owner decision, milestone 4
+    /// phase 6: a host's primary and Tailscale addresses share trust when
+    /// the key matches). The flag says it came from another address.
+    pub fn known_host_or_alias(&self, host: &str, port: u16, aliases: &[String]) -> Option<(&KnownHost, bool)> {
+        if let Some(known) = self.known_host(host, port) {
+            return Some((known, false));
+        }
+        aliases.iter().find_map(|a| self.known_host(a.trim(), port)).map(|k| (k, true))
+    }
+
+    /// A host's addresses other than `connected`: its primary and
+    /// Tailscale addresses, trimmed.
+    pub fn other_addresses(host: &Host, connected: &str) -> Vec<String> {
+        [Some(host.address.trim()), host.tailscale()]
+            .into_iter()
+            .flatten()
+            .filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case(connected.trim()))
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn known_host_mut(&mut self, host: &str, port: u16) -> Option<&mut KnownHost> {
@@ -735,8 +1012,16 @@ mod tests {
     fn json_round_trip_and_old_files_load() {
         let mut d = VaultData::default();
         let mut h = Host::new("pi.local");
-        h.auth = Auth::Key { key_id: KeyId::new(), passphrase: Some(Secret::new("p")) };
+        h.auth = Auth::key(KeyId::new());
+        h.tailscale_address = Some("100.64.0.21".into());
+        h.route = Route::Tailscale;
         d.hosts.push(h);
+        d.identities.push(Identity {
+            id: IdentityId::new(),
+            name: "deploy".into(),
+            username: "deploy".into(),
+            auth: Auth::Password { saved: Some(Secret::new("s")) },
+        });
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<VaultData>(&json).unwrap(), d);
         // A minimal file with only required fields still loads with defaults.
@@ -792,7 +1077,7 @@ mod tests {
 
     #[test]
     fn keep_alive_respects_the_host_switch() {
-        let c = ConnectionSettings { keep_alive: KeepAlive::Secs60, reconnect: true };
+        let c = ConnectionSettings { keep_alive: KeepAlive::Secs60, ..Default::default() };
         let mut h = Host::new("x");
         assert_eq!(c.keep_alive_for(&h), Some(std::time::Duration::from_secs(60)));
         h.keep_alive = false;
@@ -800,5 +1085,173 @@ mod tests {
         let off = ConnectionSettings { keep_alive: KeepAlive::Off, ..c };
         h.keep_alive = true;
         assert_eq!(off.keep_alive_for(&h), None);
+    }
+
+    fn stored_key(name: &str) -> StoredKey {
+        StoredKey {
+            id: KeyId::new(),
+            name: name.into(),
+            algorithm: "ssh-ed25519".into(),
+            private_key: Secret::new("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            encrypted: true,
+            public_key: "ssh-ed25519 AAAA".into(),
+            comment: String::new(),
+            saved_passphrase: None,
+            source: None,
+            imported_at: Timestamp(0),
+        }
+    }
+
+    #[test]
+    fn milestone_3_vault_migrates_passphrases_to_keys() {
+        // A host and key exactly as schema 1 wrote them, passphrase on the host.
+        let key_id = "00000000-0000-0000-0000-0000000000aa";
+        let old = format!(
+            r#"{{"schema":1,
+            "hosts":[{{"id":"00000000-0000-0000-0000-000000000001","address":"x","created_at":0,
+                "auth":{{"method":"key","key_id":"{key_id}","passphrase":"hunter2"}}}},
+                {{"id":"00000000-0000-0000-0000-000000000002","address":"y","created_at":0,
+                "auth":{{"method":"key","key_id":"{key_id}","passphrase":"other"}}}}],
+            "keys":[{{"id":"{key_id}","name":"id_ed25519","algorithm":"ssh-ed25519","private_key":"k",
+                "encrypted":true,"public_key":"ssh-ed25519 AAAA","imported_at":0}}],
+            "settings":{{"lock_after_idle_mins":15}}}}"#
+        );
+        let mut d: VaultData = serde_json::from_str(&old).unwrap();
+        assert_eq!(d.schema, 1);
+        d.migrate();
+        assert_eq!(d.schema, SCHEMA_VERSION);
+        // The first host's passphrase wins; neither host keeps one.
+        assert_eq!(d.keys[0].saved_passphrase.as_ref().unwrap().expose(), "hunter2");
+        assert!(d.hosts.iter().all(|h| matches!(h.auth, Auth::Key { legacy_passphrase: None, .. })));
+        // New fields take their defaults.
+        let h = &d.hosts[0];
+        assert_eq!((h.route, h.tailscale(), h.jump_host, h.identity), (Route::Automatic, None, None, None));
+        assert!(d.settings.lock_when_windows_locks && !d.settings.hello_unlock);
+        assert_eq!(d.settings.connection.fallback_wait.duration(), std::time::Duration::from_secs(3));
+        // Written back, the passphrase is only on the key.
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json.matches("hunter2").count(), 1);
+        assert!(!json.contains("other"));
+        // Migrating again changes nothing.
+        let before = d.clone();
+        d.migrate();
+        assert_eq!(d, before);
+    }
+
+    #[test]
+    fn jump_chains_and_loops() {
+        let mut d = VaultData::default();
+        let mut bastion = Host::new("203.0.113.20");
+        let mut inner = Host::new("10.30.0.2");
+        inner.jump_host = Some(bastion.id);
+        let mut app = Host::new("10.30.0.9");
+        app.jump_host = Some(inner.id);
+        assert_eq!(d.jump_chain(&bastion), Ok(vec![]));
+        d.hosts.extend([bastion.clone(), inner.clone(), app.clone()]);
+        assert_eq!(d.jump_chain(&app), Ok(vec![bastion.id, inner.id]));
+        // Pointing the bastion at the app would close a loop.
+        bastion.jump_host = Some(app.id);
+        assert_eq!(d.jump_chain(&bastion), Err(JumpProblem::Loop));
+        // A host as its own jump host.
+        app.jump_host = Some(app.id);
+        assert_eq!(d.jump_chain(&app), Err(JumpProblem::Loop));
+        // A deleted hop.
+        d.delete_host(inner.id, false);
+        app.jump_host = Some(inner.id);
+        assert_eq!(d.jump_chain(&app), Err(JumpProblem::Missing));
+    }
+
+    #[test]
+    fn routes_and_equivalent_command() {
+        let mut h = Host::new("10.30.0.9");
+        h.username = "deploy".into();
+        assert_eq!(h.effective_route(), Route::Primary, "no Tailscale address forces Primary");
+        h.route = Route::Tailscale;
+        assert_eq!(h.effective_route(), Route::Primary);
+        h.tailscale_address = Some(" 100.64.0.21 ".into());
+        assert_eq!(h.effective_route(), Route::Tailscale);
+        assert_eq!(h.ssh_command(), "ssh deploy@100.64.0.21");
+        h.route = Route::Automatic;
+        assert_eq!(h.ssh_command_via(Some("bastion-east")), "ssh -J bastion-east deploy@10.30.0.9");
+        h.tailscale_address = Some("not valid!".into());
+        assert_eq!(h.problems(), vec![HostProblem::TailscaleAddressInvalid]);
+        h.tailscale_address = Some("  ".into());
+        assert!(h.problems().is_empty() && h.tailscale().is_none());
+    }
+
+    #[test]
+    fn resolved_hosts_and_identity_deletion() {
+        let mut d = VaultData::default();
+        let identity = Identity {
+            id: IdentityId::new(),
+            name: "deploy".into(),
+            username: "deploy".into(),
+            auth: Auth::Password { saved: None },
+        };
+        let mut a = Host::new("a");
+        a.identity = Some(identity.id);
+        let mut b = Host::new("b");
+        b.identity = Some(identity.id);
+        let c = Host::new("c");
+        d.identities.push(identity.clone());
+        d.hosts.extend([a.clone(), b.clone(), c.clone()]);
+        assert_eq!(d.resolved(&a).username, "deploy");
+        assert_eq!(d.identity_users(identity.id), [a.id, b.id]);
+        // A password typed for a host goes to its identity, shared by both.
+        if let Some(Auth::Password { saved }) = d.sign_in_auth_mut(a.id) {
+            *saved = Some(Secret::new("typed"));
+        }
+        assert!(matches!(d.resolved(&b).auth, Auth::Password { saved: Some(_) }));
+        assert!(matches!(d.host(c.id).unwrap().auth, Auth::Password { saved: None }));
+        // Deleting the identity leaves each host its own copy.
+        d.delete_identity(identity.id).unwrap();
+        let a_after = d.host(a.id).unwrap();
+        assert_eq!((a_after.identity, a_after.username.as_str()), (None, "deploy"));
+        assert!(matches!(a_after.auth, Auth::Password { saved: Some(_) }));
+    }
+
+    #[test]
+    fn a_hosts_addresses_share_trust() {
+        let mut d = VaultData::default();
+        let mut h = Host::new("192.168.1.51");
+        h.tailscale_address = Some("100.64.0.21".into());
+        d.trust_host_key("192.168.1.51", 22, "ssh-ed25519 K", KnownHostSource::FirstConnection);
+        let aliases = VaultData::other_addresses(&h, "100.64.0.21");
+        assert_eq!(aliases, ["192.168.1.51"]);
+        let (known, alias) = d.known_host_or_alias("100.64.0.21", 22, &aliases).unwrap();
+        assert!(alias && known.public_key == "ssh-ed25519 K");
+        // Its own entry wins once there is one.
+        d.trust_host_key("100.64.0.21", 22, "ssh-ed25519 K", KnownHostSource::FirstConnection);
+        assert!(!d.known_host_or_alias("100.64.0.21", 22, &aliases).unwrap().1);
+        // Another port is another server.
+        assert!(d.known_host_or_alias("100.64.0.21", 2222, &aliases).is_none());
+    }
+
+    #[test]
+    fn identities_sign_in_and_key_users() {
+        let mut d = VaultData::default();
+        let key = stored_key("work-ed25519");
+        let identity = Identity {
+            id: IdentityId::new(),
+            name: "deploy".into(),
+            username: "deploy".into(),
+            auth: Auth::key(key.id),
+        };
+        let mut a = Host::new("a");
+        a.username = "root".into();
+        a.identity = Some(identity.id);
+        let mut b = Host::new("b");
+        b.auth = Auth::key(key.id);
+        let c = Host::new("c");
+        d.keys.push(key.clone());
+        d.identities.push(identity.clone());
+        d.hosts.extend([a.clone(), b.clone(), c]);
+        assert_eq!(d.sign_in(&a).0, "deploy");
+        assert_eq!(d.sign_in(&b).0, "");
+        assert_eq!(d.key_users(key.id), (vec![a.id, b.id], vec![identity.id]));
+        // A host whose identity was deleted falls back to its own sign-in.
+        d.identities.clear();
+        assert_eq!(d.sign_in(&a).0, "root");
+        assert_eq!(d.key_users(key.id), (vec![b.id], vec![]));
     }
 }

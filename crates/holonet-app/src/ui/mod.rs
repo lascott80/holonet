@@ -2,6 +2,7 @@
 //! in docs/design/components. Stateless controls live here; the text field and
 //! select keep state and have their own modules.
 
+pub mod lists;
 pub mod select;
 pub mod slider;
 pub mod text_field;
@@ -14,6 +15,7 @@ use gpui::{
 use crate::assets;
 use crate::theme::{self, TypeStyles};
 
+pub use lists::{TableColumn, TableRow, add_card, identity_card, name_cell, pick_row, side_panel, table};
 pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent};
 pub use text_field::{TextField, TextFieldEvent};
@@ -231,16 +233,24 @@ pub struct Segmented {
     options: Vec<SharedString>,
     selected: usize,
     compact: bool,
+    /// Lay the options out in a grid of this many columns (Keychain.dc.html's
+    /// key types) instead of one row.
+    columns: Option<u16>,
     on_change: Option<IndexHandler>,
 }
 
 impl Segmented {
     pub fn new(id: impl Into<ElementId>, options: Vec<SharedString>, selected: usize) -> Self {
-        Self { id: id.into(), options, selected, compact: false, on_change: None }
+        Self { id: id.into(), options, selected, compact: false, columns: None, on_change: None }
     }
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn columns(mut self, columns: u16) -> Self {
+        self.columns = Some(columns);
         self
     }
 
@@ -254,12 +264,17 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let height = if self.compact { theme::CONTROL_COMPACT } else { theme::CONTROL };
         let id = self.id.clone();
-        div().id(self.id).flex().gap(theme::SPACE_2).children(self.options.into_iter().enumerate().map(|(i, label)| {
+        let columns = self.columns;
+        let container = match columns {
+            Some(n) => div().id(self.id).grid().grid_cols(n).gap(theme::SPACE_2),
+            None => div().id(self.id).flex().gap(theme::SPACE_2),
+        };
+        container.children(self.options.into_iter().enumerate().map(|(i, label)| {
             let on = i == self.selected;
             let handler = self.on_change.clone();
             div()
                 .id(ElementId::NamedInteger(SharedString::from(format!("{id:?}")), i as u64))
-                .flex_1()
+                .when(columns.is_none(), |d| d.flex_1())
                 .h(height)
                 .px(theme::SPACE_3)
                 .flex()
@@ -401,10 +416,16 @@ pub fn key_values(rows: Vec<(SharedString, AnyElement)>) -> Div {
 /// (SettingRow.md).
 pub fn setting_card(rows: Vec<AnyElement>) -> Div {
     let count = rows.len();
-    div().flex().flex_col().bg(theme::card()).rounded(theme::RADIUS_LG).children(
-        rows.into_iter()
-            .enumerate()
-            .map(|(i, row)| div().when(i + 1 < count, |d| d.border_b_1().border_color(theme::line())).child(row)),
+    div().w_full().flex().flex_col().bg(theme::card()).rounded(theme::RADIUS_LG).children(
+        rows.into_iter().enumerate().map(|(i, row)| {
+            // Flex wrappers, so each row's text wraps at the card's width.
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .when(i + 1 < count, |d| d.border_b_1().border_color(theme::line()))
+                .child(row)
+        }),
     )
 }
 

@@ -51,6 +51,7 @@ impl HostPicker {
         let mut hosts: Vec<Entry> = data
             .hosts
             .iter()
+            .map(|h| data.resolved(h))
             .map(|h| {
                 let target = if h.username.is_empty() {
                     format!("{}:{}", h.address.trim(), h.port)

@@ -11,6 +11,8 @@ use holonet_model::{
     TerminalSettings,
 };
 
+use holonet_vault::{LockedVault, VaultError};
+
 use super::{Workspace, short_path};
 use crate::terminal_view::TerminalView;
 use crate::theme::{self, TypeStyles};
@@ -70,12 +72,31 @@ pub(crate) struct SettingsUi {
     line_height: Entity<Slider>,
     scrollback: Entity<Select>,
     keep_alive: Entity<Select>,
+    fallback_wait: Entity<Select>,
+    /// "Lock vault after": 15 minutes, 1 hour, Never.
+    lock_after: Entity<Select>,
+    /// Whether Windows Hello is set up on this PC; `None` while checking.
+    hello_available: Option<bool>,
+    /// "Turn on Windows Hello", asking for the vault password first.
+    hello_dialog: Option<HelloDialog>,
     /// Created at the first render (it needs a window).
     preview: Option<Entity<TerminalView>>,
     scroll: ScrollHandle,
     font_picker: Option<FontPicker>,
     licences_open: bool,
 }
+
+struct HelloDialog {
+    password: Entity<TextField>,
+    problem: Option<SharedString>,
+    busy: bool,
+}
+
+/// The side navigation's width (as on the Hosts page).
+const NAV: f32 = 220.;
+
+/// Settings, Vault and security, "Lock vault after" options in order.
+const LOCK_AFTER: [Option<u32>; 3] = [Some(15), Some(60), None];
 
 struct FontPicker {
     search: Entity<TextField>,
@@ -90,6 +111,14 @@ fn scrollback_index(s: Scrollback) -> usize {
         Scrollback::Unlimited => 2,
     }
 }
+
+/// Settings, Connection, "Tailscale fallback wait" options in order.
+const FALLBACK_WAITS: [holonet_model::FallbackWait; 4] = [
+    holonet_model::FallbackWait::Secs2,
+    holonet_model::FallbackWait::Secs3,
+    holonet_model::FallbackWait::Secs5,
+    holonet_model::FallbackWait::Secs10,
+];
 
 fn keep_alive_index(k: KeepAlive) -> usize {
     match k {
@@ -133,8 +162,35 @@ impl SettingsUi {
                 keep_alive_index(settings.connection.keep_alive),
             )
         });
+        let fallback_wait = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["2 seconds".into(), "3 seconds".into(), "5 seconds".into(), "10 seconds".into()],
+                FALLBACK_WAITS.iter().position(|w| *w == settings.connection.fallback_wait).unwrap_or(1),
+            )
+        });
+        let lock_after = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["15 minutes idle".into(), "1 hour idle".into(), "Never".into()],
+                LOCK_AFTER.iter().position(|l| *l == settings.lock_after_idle_mins).unwrap_or(0),
+            )
+        });
+        // Asking Windows takes a moment: the switch waits for the answer.
+        cx.spawn(async move |this, cx| {
+            let available = cx.background_executor().spawn(async { crate::hello::available() }).await;
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                w.settings_ui.hello_available = Some(available);
+                cx.notify();
+            });
+        })
+        .detach();
         Self {
             unknown_keys,
+            fallback_wait,
+            lock_after,
+            hello_available: None,
+            hello_dialog: None,
             font_size,
             line_height,
             scrollback,
@@ -167,6 +223,16 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let s = [Scrollback::Lines10k, Scrollback::Lines50k, Scrollback::Unlimited][i.min(2)];
                 this.set_terminal(|t| t.scrollback = s, cx);
+            }),
+            cx.subscribe(&self.lock_after, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let after = LOCK_AFTER[i.min(2)];
+                this.save(|d| d.settings.lock_after_idle_mins = after, cx);
+            }),
+            cx.subscribe(&self.fallback_wait, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let w = FALLBACK_WAITS[i.min(3)];
+                this.save(|d| d.settings.connection.fallback_wait = w, cx);
             }),
             cx.subscribe(&self.keep_alive, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -232,6 +298,8 @@ impl Workspace {
     }
 
     pub(super) fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The reading width: the window less the side navigation and padding.
+        let width = px((f32::from(window.viewport_size().width) - NAV - 56.).clamp(320., 1080.));
         let settings = self.terminal_settings();
         let connection = self.vault_data().map(|d| d.settings.connection.clone()).unwrap_or_default();
         let preview = self
@@ -277,12 +345,15 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(theme::SPACE_5)
-            .child(page_block(div().child(div().text_title().text_color(theme::ink()).child("Settings")).child(chips)))
-            .child(page_block(self.terminal_section(&settings, &installed, preview, cx)))
-            .child(page_block(self.security_section(cx)))
-            .child(page_block(self.connection_section(&connection, cx)))
-            .child(page_block(keyboard_section()))
-            .child(page_block(self.about_section(cx)))
+            .child(page_block(
+                width,
+                div().child(div().text_title().text_color(theme::ink()).child("Settings")).child(chips),
+            ))
+            .child(page_block(width, self.terminal_section(&settings, &installed, preview, cx)))
+            .child(page_block(width, self.security_section(cx)))
+            .child(page_block(width, self.connection_section(&connection, cx)))
+            .child(page_block(width, keyboard_section()))
+            .child(page_block(width, self.about_section(cx)))
     }
 
     fn terminal_section(
@@ -532,7 +603,49 @@ impl Workspace {
 
     fn security_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let path = self.path.clone();
+        let has_hello = self.vault.as_ref().is_some_and(|v| v.has_hello());
+        let lock_windows = self.vault_data().is_some_and(|d| d.settings.lock_when_windows_locks);
+        let (hello_help, hello_enabled): (SharedString, bool) = match self.settings_ui.hello_available {
+            _ if has_hello => (
+                "Use your PIN, fingerprint or face instead of the vault password. The vault password always works too."
+                    .into(),
+                true,
+            ),
+            None => ("Checking whether Windows Hello is set up on this PC…".into(), false),
+            Some(false) => (crate::hello::UNAVAILABLE.into(), false),
+            Some(true) => (
+                "Use your PIN, fingerprint or face instead of the vault password. Turning it on asks for the vault password first."
+                    .into(),
+                true,
+            ),
+        };
         section("Vault and security").child(setting_card(vec![
+            check_row_with(
+                "hello-unlock",
+                "Unlock with Windows Hello",
+                Some(hello_help),
+                has_hello,
+                hello_enabled && self.vault.is_some(),
+                cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_hello(window, cx)),
+            ),
+            setting_row(
+                "Lock vault after",
+                Some(
+                    "Only typing, clicking or moving the mouse in Holonet counts. Open sessions stay connected.".into(),
+                ),
+                div().w(px(200.)).child(self.settings_ui.lock_after.clone()),
+            )
+            .into_any_element(),
+            check_row(
+                "lock-windows",
+                "Lock when Windows locks",
+                Some("Win L, or the screen locking by itself."),
+                lock_windows,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| d.settings.lock_when_windows_locks = !d.settings.lock_when_windows_locks, cx);
+                }),
+            ),
             setting_row(
                 "Unknown host keys",
                 Some("Refuse to connect stops any server whose key is not already in Known hosts.".into()),
@@ -578,6 +691,15 @@ impl Workspace {
                 div().w(px(200.)).child(self.settings_ui.keep_alive.clone()),
             )
             .into_any_element(),
+            setting_row(
+                "Tailscale fallback wait",
+                Some(
+                    "How long Automatic waits for a host's primary address before trying its Tailscale address. Skipped when the primary address is private and unreachable from this network."
+                        .into(),
+                ),
+                div().w(px(200.)).child(self.settings_ui.fallback_wait.clone()),
+            )
+            .into_any_element(),
             check_row(
                 "reconnect",
                 "Reconnect after sleep or network change",
@@ -615,9 +737,125 @@ impl Workspace {
         ]))
     }
 
-    /// The font picker or the licences dialog, if open.
+    /// The Settings switch: on asks for the vault password, off removes the
+    /// Hello slot and its credential at once (the password still unlocks).
+    fn toggle_hello(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault.as_mut() else { return };
+        if let Some(request) = vault.hello() {
+            match vault.remove_hello() {
+                Ok(()) => {
+                    let name = request.credential;
+                    cx.background_executor().spawn(async move { crate::hello::delete(&name) }).detach();
+                    self.save(|d| d.settings.hello_unlock = false, cx);
+                    self.notice = Some("Windows Hello no longer unlocks the vault. Use the vault password.".into());
+                }
+                Err(e) => self.save_error = Some(format!("Holonet could not turn off Windows Hello: {e}").into()),
+            }
+            cx.notify();
+            return;
+        }
+        let password = cx.new(|cx| TextField::new(cx, "").password());
+        self._subscriptions.push(cx.subscribe_in(&password, window, |this, _, e: &TextFieldEvent, _, cx| match e {
+            TextFieldEvent::Submitted => this.submit_hello(cx),
+            TextFieldEvent::Cancelled => this.close_hello_dialog(cx),
+            TextFieldEvent::Changed => {}
+        }));
+        password.read(cx).focus(window);
+        self.settings_ui.hello_dialog = Some(HelloDialog { password, problem: None, busy: false });
+        cx.notify();
+    }
+
+    fn close_hello_dialog(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_ui.hello_dialog.as_ref().is_some_and(|d| d.busy) {
+            self.settings_ui.hello_dialog = None;
+            cx.notify();
+        }
+    }
+
+    /// Check the vault password, then have Windows Hello create its key and
+    /// sign a new challenge, and add the Hello slot. All of it waits on
+    /// Argon2 or Windows, so it runs off the UI thread with the vault.
+    fn submit_hello(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.settings_ui.hello_dialog.as_mut() else { return };
+        let password = dialog.password.read(cx).text().to_string();
+        if dialog.busy || password.is_empty() {
+            return;
+        }
+        let Some(mut vault) = self.vault.take() else { return };
+        dialog.busy = true;
+        dialog.problem = None;
+        let path = self.path.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mut add = || -> Result<(), String> {
+                LockedVault::open(&path).and_then(|l| l.unlock(&password).map(drop)).map_err(|e| match e {
+                    VaultError::WrongPassword => "The vault password is wrong.".to_string(),
+                    e => e.to_string(),
+                })?;
+                let name = crate::hello::new_credential_name();
+                let challenge = holonet_vault::new_hello_challenge();
+                let signature = crate::hello::create_and_sign(&name, &challenge).map_err(|e| e.message())?;
+                vault.set_hello(&name, &challenge, &signature).map_err(|e| {
+                    crate::hello::delete(&name);
+                    format!("Holonet could not save the vault: {e}")
+                })
+            };
+            let result = add();
+            (vault, result)
+        });
+        cx.spawn(async move |this, cx| {
+            let (vault, result) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.vault = Some(vault);
+                match result {
+                    Ok(()) => {
+                        this.settings_ui.hello_dialog = None;
+                        this.save(|d| d.settings.hello_unlock = true, cx);
+                        this.notice =
+                            Some("Windows Hello now unlocks the vault. The vault password still works too.".into());
+                    }
+                    Err(message) => {
+                        if let Some(d) = this.settings_ui.hello_dialog.as_mut() {
+                            d.busy = false;
+                            d.problem = Some(message.into());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The font picker, the licences dialog or "Turn on Windows Hello", if open.
     pub(super) fn settings_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let entity = cx.entity();
+        if let Some(d) = &self.settings_ui.hello_dialog {
+            let busy = d.busy;
+            let close = entity.clone();
+            return Some(
+                modal(
+                    "hello-dialog",
+                    px(460.),
+                    dialog(
+                        false,
+                        "Turn on Windows Hello",
+                        "Enter the vault password. Windows then asks for your PIN, fingerprint or face, and Holonet saves a Windows Hello key for this vault on this PC.",
+                    )
+                    .child(crate::ui::field("Vault password", d.password.clone(), d.problem.clone().map(|p| (p, true))))
+                    .child(dialog_buttons([
+                        Button::quiet("hello-cancel", "Cancel")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.close_hello_dialog(cx))),
+                        Button::primary("hello-on", if busy { "Waiting for Windows Hello…" } else { "Turn on" })
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_hello(cx))),
+                    ])),
+                    move |_, cx| close.update(cx, |this, cx| this.close_hello_dialog(cx)),
+                )
+                .into_any_element(),
+            );
+        }
         if let Some(picker) = &self.settings_ui.font_picker {
             let query = picker.search.read(cx).text().to_lowercase();
             let matches: Vec<SharedString> =
@@ -728,8 +966,11 @@ impl Workspace {
 }
 
 /// Every top-level block keeps the page's reading width.
-fn page_block(child: impl IntoElement) -> gpui::Div {
-    div().w_full().max_w(px(1080.)).child(child)
+fn page_block(width: gpui::Pixels, child: impl IntoElement) -> gpui::Div {
+    // A definite width: Taffy does not apply `w_full` with `max_w` inside
+    // the scroll column, so blocks took their content's width and text was
+    // measured at the wrong width (sections overlapped).
+    div().w(width).flex_none().flex().flex_col().child(child)
 }
 
 /// Font cards two to a row, equal widths (the design's two-column grid);
@@ -764,6 +1005,17 @@ fn check_row(
     enabled: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    check_row_with(id, name, help.map(SharedString::from), checked, enabled, on_toggle)
+}
+
+fn check_row_with(
+    id: &'static str,
+    name: &'static str,
+    help: Option<SharedString>,
+    checked: bool,
+    enabled: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     let mark = div()
         .size(px(18.))
         .flex_none()
@@ -778,8 +1030,10 @@ fn check_row(
         .when(checked, |b| b.child(icon("check", px(14.), theme::on_accent())));
     div()
         .id(id)
+        .flex()
+        .flex_col()
         .when(enabled, |d| d.cursor_pointer().on_click(on_toggle))
-        .child(setting_row(name, help.map(SharedString::from), mark))
+        .child(setting_row(name, help, mark))
         .into_any_element()
 }
 

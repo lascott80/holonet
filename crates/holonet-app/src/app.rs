@@ -5,12 +5,15 @@
 //! drops the workspace and its unlocked vault) leaves them connected. They
 //! reappear when the vault is unlocked (decisions.md).
 //!
+//! The vault locks after the idle time (only input in Holonet counts, not
+//! terminal output) and when Windows locks, as Settings says.
+//!
 //! App shortcuts are actions bound in the "HolonetApp" context. GPUI matches
 //! bindings before key-down handlers, so they win over the terminal, and
 //! they all use Ctrl Shift (or Ctrl Tab) so shell keys still reach the shell.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -82,7 +85,12 @@ pub struct HolonetApp {
     /// Holds keyboard focus when nothing inside does, so app shortcuts
     /// still dispatch (GPUI needs a focused element to start from).
     focus: gpui::FocusHandle,
+    /// The last key, click or mouse movement in the window, for idle locking.
+    last_input: Rc<Cell<Instant>>,
 }
+
+/// How often the idle time is checked.
+const IDLE_CHECK: Duration = Duration::from_secs(10);
 
 impl HolonetApp {
     pub fn new(path: PathBuf, runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -94,12 +102,23 @@ impl HolonetApp {
             let p = path.clone();
             Stage::Create(cx.new(|cx| CreateVault::new(app, p, window, cx)))
         };
-        // Sleep, wake and network changes, for reconnecting (phase 7).
+        // Sleep, wake and network changes for reconnecting, and Windows
+        // locking for the vault.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         crate::platform::watch_system(tx);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = rx.recv().await {
-                if this.update(cx, |app, cx| app.system_event(event, cx)).is_err() {
+                if this.update_in(cx, |app, window, cx| app.system_event(event, window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // The idle lock.
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(IDLE_CHECK).await;
+                if this.update_in(cx, |app, window, cx| app.check_idle(window, cx)).is_err() {
                     break;
                 }
             }
@@ -116,6 +135,7 @@ impl HolonetApp {
             tab_scroll: ScrollHandle::new(),
             edit_origin: None,
             focus: cx.focus_handle(),
+            last_input: Rc::new(Cell::new(Instant::now())),
         }
     }
 
@@ -124,12 +144,29 @@ impl HolonetApp {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
         self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, cx)));
+        self.last_input.set(Instant::now());
         cx.notify();
     }
 
-    /// "Lock now": dropping the workspace drops the unlocked vault, which
-    /// wipes its key and secrets from memory. Sessions stay connected.
+    /// "Lock now".
     pub fn lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lock_for(LockReason::Manual, window, cx);
+    }
+
+    /// Lock after the idle time set in Settings.
+    fn check_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mins) = self.vault_data(cx).and_then(|d| d.settings.lock_after_idle_mins) else { return };
+        if self.last_input.get().elapsed() >= Duration::from_secs(u64::from(mins) * 60) {
+            self.lock_for(LockReason::Idle(mins), window, cx);
+        }
+    }
+
+    /// Dropping the workspace drops the unlocked vault, which wipes its key
+    /// and secrets from memory. Sessions stay connected.
+    fn lock_for(&mut self, reason: LockReason, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_unlocked() {
+            return;
+        }
         let app = cx.entity().downgrade();
         let path = self.path.clone();
         let open = self.tabs.iter().map(|t| t.read(cx).panes().len()).sum();
@@ -137,7 +174,7 @@ impl HolonetApp {
             tab.update(cx, |t, cx| t.close_menu(cx));
         }
         self.picker = None;
-        self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, LockReason::Manual, open, window, cx)));
+        self.stage = Stage::Locked(cx.new(|cx| Locked::new(app, path, reason, open, window, cx)));
         self.active = None;
         cx.notify();
     }
@@ -161,19 +198,34 @@ impl HolonetApp {
     }
 
     /// Compare a presented key with Known hosts; `None` while locked.
-    pub fn check_host_key(&mut self, key: &PresentedKey, cx: &mut Context<Self>) -> Option<KeyCheck> {
+    /// Check a presented key. `aliases` are the same host's other addresses:
+    /// with no entry for this address, a key trusted for one of them is
+    /// trusted here too when it matches (and recorded for this address), and
+    /// a different one stops the connection as a changed key.
+    pub fn check_host_key(
+        &mut self,
+        key: &PresentedKey,
+        aliases: &[String],
+        cx: &mut Context<Self>,
+    ) -> Option<KeyCheck> {
         let data = self.vault_data(cx)?;
-        let known = data.known_host(&key.host, key.port);
+        let found = data.known_host_or_alias(&key.host, key.port, aliases);
+        let known = found.map(|(k, _)| k);
+        let from_alias = found.is_some_and(|(_, alias)| alias);
         let check = KeyCheck {
             status: classify(known, key),
             policy: data.settings.unknown_host_keys,
             trusted_at: known.map(|k| k.trusted_at),
+            from_alias: from_alias.then(|| known.map(|k| k.host.clone())).flatten(),
         };
         if matches!(check.status, holonet_ssh::KeyStatus::Trusted) {
-            let (host, port) = (key.host.clone(), key.port);
+            let (host, port, public) = (key.host.clone(), key.port, key.public_key.clone());
             self.update_vault(
                 move |d| {
-                    if let Some(k) = d.known_host_mut(&host, port) {
+                    if from_alias {
+                        // The same key, now also trusted under this address.
+                        d.trust_host_key(&host, port, &public, KnownHostSource::FirstConnection);
+                    } else if let Some(k) = d.known_host_mut(&host, port) {
                         k.last_matched_at = Some(Timestamp::now());
                     }
                 },
@@ -189,9 +241,12 @@ impl HolonetApp {
         self.update_vault(move |d| d.trust_host_key(&host, port, &public, KnownHostSource::FirstConnection), cx);
     }
 
-    /// A changed key was refused: keep it for Known hosts' "Mismatch seen".
-    pub fn record_mismatch(&mut self, key: &PresentedKey, cx: &mut Context<Self>) {
-        let (host, port, public) = (key.host.clone(), key.port, key.public_key.clone());
+    /// A changed key was refused: keep it for Known hosts' "Mismatch seen",
+    /// on the entry it was compared with (this address, or the host's other
+    /// address when this one has none).
+    pub fn record_mismatch(&mut self, key: &PresentedKey, entry: Option<&str>, cx: &mut Context<Self>) {
+        let host = entry.map(str::to_string).unwrap_or_else(|| key.host.clone());
+        let (port, public) = (key.port, key.public_key.clone());
         self.update_vault(
             move |d| {
                 if let Some(k) = d.known_host_mut(&host, port) {
@@ -220,7 +275,18 @@ impl HolonetApp {
         matches!(self.stage, Stage::Open(_))
     }
 
-    fn system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
+    fn system_event(&mut self, event: crate::platform::SystemEvent, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::platform::SystemEvent;
+        match event {
+            SystemEvent::SessionLocked => {
+                if self.vault_data(cx).is_some_and(|d| d.settings.lock_when_windows_locks) {
+                    self.lock_for(LockReason::WindowsLocked, window, cx);
+                }
+                return;
+            }
+            SystemEvent::SessionUnlocked => return,
+            SystemEvent::Suspend | SystemEvent::Resume | SystemEvent::NetworkChanged => {}
+        }
         let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
         for pane in panes {
             pane.update(cx, |p, cx| p.on_system_event(event, cx));
@@ -246,7 +312,8 @@ impl HolonetApp {
         cx: &mut Context<Self>,
     ) -> Option<Entity<Pane>> {
         let data = self.vault_data(cx)?;
-        let host = data.host(id).cloned()?;
+        // With its identity's username and sign-in, if it has one.
+        let host = data.resolved(data.host(id)?);
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } => None,
@@ -257,22 +324,22 @@ impl HolonetApp {
             connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
             keep_alive: data.settings.connection.keep_alive_for(&host),
             terminal: data.settings.terminal.clone(),
+            fallback_wait: data.settings.connection.fallback_wait.duration(),
         };
-        let pane = cx.new(|cx| Pane::new(app, host, key, runtime, limits, size, window, cx));
+        let jumps = crate::hops::jumps(data, &host);
+        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, window, cx));
         cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_pane(pane, window, cx),
             SessionEvent::ReviewKnownHost => {
-                let (host, port) = {
-                    let t = pane.read(cx);
-                    (t.host.address.trim().to_string(), t.host.port)
-                };
+                let (host, port) = pane.read(cx).review_address();
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.show_known_host(&host, port, cx));
                 }
             }
             SessionEvent::EditHost => {
-                let id = pane.read(cx).host.id;
+                // The failed hop: a jump host's failure edits the jump host.
+                let id = pane.read(cx).host_to_edit();
                 this.edit_origin = Some(pane.downgrade());
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
@@ -288,12 +355,14 @@ impl HolonetApp {
     /// the host was edited from.
     pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.edit_origin.take().and_then(|p| p.upgrade())
-            && pane.read(cx).host.id == id
+            && pane.read(cx).depends_on(id)
             && pane.read(cx).is_stopped()
             && let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(&pane))
             && let Some(data) = self.vault_data(cx)
-            && let Some(host) = data.host(id).cloned()
+            // The pane's own host, with an edited jump host's new details.
+            && let Some(host) = data.host(pane.read(cx).host.id).map(|h| data.resolved(h))
         {
+            let jumps = crate::hops::jumps(data, &host);
             let key = match &host.auth {
                 holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
                 holonet_model::Auth::Password { .. } => None,
@@ -302,8 +371,9 @@ impl HolonetApp {
                 connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
                 keep_alive: data.settings.connection.keep_alive_for(&host),
                 terminal: data.settings.terminal.clone(),
+                fallback_wait: data.settings.connection.fallback_wait.duration(),
             };
-            pane.update(cx, |p, cx| p.retry_with(host, key, limits, cx));
+            pane.update(cx, |p, cx| p.retry_with(host, key, jumps, limits, cx));
             self.select(Some(index), window, cx);
             return;
         }
@@ -574,11 +644,17 @@ impl Render for HolonetApp {
                         .child(picker),
                 )
         });
+        let (keys, clicks, moves) = (self.last_input.clone(), self.last_input.clone(), self.last_input.clone());
         div()
             .size_full()
             .relative()
             .flex()
             .flex_col()
+            // Input anywhere in the window keeps the vault unlocked; capture
+            // runs before any child can stop the event.
+            .capture_key_down(move |_, _, _| keys.set(Instant::now()))
+            .capture_any_mouse_down(move |_, _, _| clicks.set(Instant::now()))
+            .on_mouse_move(move |_, _, _| moves.set(Instant::now()))
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_picker(window, cx)))

@@ -800,3 +800,558 @@ Every keystroke's search plus a frame stays under 16 ms. The time is spent readi
 fmt, clippy `-D warnings`, the unit tests and the WSL integration tests pass.
 
 **Milestone 3 is done.** Carried forward, not tested here: a drop after sleep from a remote server (phase 7).
+
+## Milestone 4, phase 0: spikes (25 Nov 2026)
+
+The spike programs stay in the tree until the phases that replace them land, then go in phase 9:
+- `crates/holonet-ssh/examples/m4_keygen.rs`, `m4_jump.rs`
+- `crates/holonet-app/examples/m4_tailscale.rs`, `m4_lock.rs`, `m4_hello.rs`
+
+### (a) Windows Hello: signatures repeat, so the vault can have a Hello key slot
+`m4_hello` opens an ordinary window as a stand-in for Holonet's. It then creates a Hello key credential with `KeyCredentialManager::RequestCreateAsync` (`windows` 0.62, plain calls without a window handle), signs the same 32-byte challenge twice, compares the signatures, and deletes the credential.
+
+| Step | Result |
+| --- | --- |
+| `IsSupportedAsync` | true |
+| Create | Success after 4.4 s (the owner's Hello check) |
+| Sign 1 | Success after 0.5 s with no new prompt: Hello reused the check just made |
+| Sign 2 | Success after 3.3 s, with a prompt |
+| Signatures | 256 bytes each (RSA 2048), **identical** |
+| Prompt placement | All three prompts opened in front, without the "Credential Dialog Xaml Host" workaround |
+
+- Microsoft's documentation describes these signatures as RSA-PSS, which would normally differ every time. On this PC they repeat, which matches KeePassXC's experience. So the **Hello key slot** design from the plan goes ahead: wrap the data key under SHA-256 of the signature over a random challenge stored in the slot.
+- Phase 1 tests the slot with a fake signer. Phase 8 confirms live that a signature made in a new process, after `OpenAsync`, matches the one made when the slot was created. If it ever does not, the password slot still opens the vault, and Hello is set up again.
+- The focus workaround is kept in reserve and not built unless phase 8 shows a prompt behind the window.
+
+### (b) Windows lock and unlock: a message-only window hears them
+`m4_lock` runs its own thread with a message loop. It registers two windows with `WTSRegisterSessionNotification`: a message-only window (`HWND_MESSAGE`) and a hidden ordinary one. The owner pressed Win L and unlocked about 10 s later:
+
+```
+28.9 s  message-only  WTS_SESSION_LOCK (0x7)
+28.9 s  hidden window WTS_SESSION_LOCK (0x7)
+39.3 s  message-only  WTS_SESSION_UNLOCK (0x8)
+39.3 s  hidden window WTS_SESSION_UNLOCK (0x8)
+```
+
+The message-only window is enough. `platform::watch_system` gains it in phase 8, on a thread of its own, feeding the same channel as sleep and network changes.
+
+### (c) Key generation: fast in release, slow RSA in debug
+`m4_keygen` generates each type with `ssh-key` 0.7.0-rc.12 (re-exported by russh 0.65.4, with `rand` 0.10). It encrypts each key with a passphrase (bcrypt-pbkdf, AES-256-CTR), writes it as OpenSSH text, and reads it back with `decode_secret_key`. The round trip matched every time.
+
+| Key | Generate, release | Generate, debug | Encrypt and encode, release | Decode, release |
+| --- | --- | --- | --- | --- |
+| Ed25519 | 0.1 ms | 0.4 ms | 95 ms | 88 ms |
+| ECDSA P-256 | 0.4 ms | 4.7 ms | 89 ms | 88 ms |
+| RSA 4096 (3 runs) | 205–409 ms | 3.4–14.6 s | 86–88 ms | 87–105 ms |
+
+- RSA generation time varies a lot, because it is a prime search. Generation runs off the UI thread with a progress state. The RSA crates get `opt-level = 3` in the dev profile so debug builds stay usable.
+- About 90 ms of every encrypt or decode is bcrypt-pbkdf's work factor. That cost falls on each connect with a passphrase-protected key, which is acceptable.
+
+### (d) Tailscale LocalAPI: works over the pipe, no admin
+`m4_tailscale` opens `\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled` and sends `GET /localapi/v0/status` (headers `Host: local-tailscaled.sock`, `Sec-Tailscale: localapi`).
+
+- **With Tokio's named-pipe client** it got `200 OK`, BackendState "Running", this PC's own addresses and the peer count. The round trip took 0.3–0.8 ms for 21 KB, as a normal user, with or without the identification-level impersonation flag.
+- **`std::fs::OpenOptions`** failed on the same path with "path not found" (os error 3), with or without the flag. `holonet-net` uses Tokio's client.
+- Tailscale 1.104.7 is installed and native ARM64. When Tailscale is stopped the pipe is missing, which reads as "not running"; phase 3 checks that live.
+
+### (e) Jump host: `direct-tcpip` plus `connect_stream` works
+`m4_jump` signs in to the WSL server, opens `channel_open_direct_tcpip` from it to `127.0.0.1:2222`, and runs a second `client::connect_stream` session over `Channel::into_stream()`. Both host keys are checked against `.dev/known_hosts`, each with its own address.
+
+| Case | Result |
+| --- | --- |
+| Through the jump host to itself | Both keys matched; signed in to the jump host in 222 ms, then the target in 454 ms. `$SSH_CONNECTION` differed between the two sessions |
+| Closing | Disconnecting the inner session left the outer one open, then the outer one closed |
+| Target port closed | "Failed to open channel (ConnectFailed)" from the jump host. Phase 7 words this as "bastion could not reach app-01:22" |
+| Target name not in Known hosts (`localhost`) | "Unknown server key": stopped, nothing trusted |
+
+### (f) WSL on this PC's Tailscale address: not reachable
+A TCP connection to this PC's own Tailscale IPv4 address on port 2222 was refused. WSL runs in NAT mode, and only `localhost` is forwarded into it. So the WSL test server cannot stand in for "a host on the tailnet" without a change. How phase 6 tests the fallback is an open question for the owner, recorded in the plan once decided.
+
+## Milestone 4, phase 1: model and vault (25 Nov 2026)
+
+**Model** (`holonet-model`, schema 2):
+- **`Host`** gains:
+  - `tailscale_address` and `route` (Automatic, Primary or Tailscale). `effective_route()` is Primary when no Tailscale address is set, as the host form forces.
+  - `jump_host`, a saved host.
+  - `identity`, which replaces the host's own username and sign-in when set (`VaultData::sign_in`).
+  - A Tailscale address must pass the same check as the primary address.
+- **`ssh_command_via(jump)`** builds the drawn `ssh -J bastion-east deploy@10.30.0.9`. The target is the Tailscale address only under the Tailscale route.
+- **`Identity`** holds a name, a username and an `Auth`. `VaultData.identities` stores them.
+- **`StoredKey`** gains `comment` and `saved_passphrase`.
+- **`Settings`** gains `lock_when_windows_locks` (on) and `hello_unlock` (off until a Hello slot exists). `ConnectionSettings.fallback_wait` offers 2, 3, 5 or 10 s, default 3.
+- **`VaultData::jump_chain`** lists the hops in order. It refuses a loop, including a host as its own jump host, and reports a deleted hop.
+- **`key_users`** returns the hosts (directly or through an identity) and the identities that use a key, for the Keychain's Hosts column and the delete prompt.
+
+**Migration:**
+- Schema 1 saved a key's passphrase on each host (`Auth::Key.passphrase`). That field is still read, as `legacy_passphrase`, but never written.
+- `VaultData::migrate` moves the passphrase onto the key; when hosts disagree, the first one wins. Unlock runs it, and the next save writes schema 2.
+- The host form now saves the passphrase on the key, and a passphrase typed at a prompt and saved goes to the key too.
+
+**Vault** (`holonet-vault`):
+- A **`hello` slot** holds the Hello credential's name, a random 32-byte challenge, and the data key wrapped with XChaCha20-Poly1305 under SHA-256 of Hello's signature. The vault crate never calls Windows; the app passes the signature in.
+- `LockedVault::hello()` returns the credential and challenge to sign, and `unlock_with_hello(signature)` opens the vault.
+- `UnlockedVault::set_hello` adds or replaces the slot, and `remove_hello` removes it. Both save twice so the backup matches.
+- Changing the password now replaces only the password slot, so it keeps the Hello slot.
+- Files with a Hello slot are written as **format 2**, so a milestone 3 build says "saved by a newer version" instead of failing on the unknown slot. Without one, files stay format 1.
+
+**Checks:**
+- Unit tests, using a fake signer that returns the same bytes for the same challenge:
+  - the Hello round trip, including that another device's signature is refused and that the backup matches
+  - the password change keeping Hello
+  - removing Hello falling back to format 1
+  - schema 1 data migrating on unlock
+  - jump chains and loops
+  - routes and `-J`
+  - identity sign-in and key users
+  - a schema 1 vault's JSON migrating, with the passphrase written only once
+- Live, on a copy of milestone 3's test vault: unlocked, connected `wsl-test` with its passphrase-protected key and no prompt, closed, reopened and connected again with no prompt.
+- fmt, clippy, the unit tests (28, 13, 5, 10 and 16) and the WSL tests (10) pass.
+
+## Milestone 4, phase 2: SSH (25 Nov 2026)
+
+**Key generation** (`holonet_ssh::generate_key`, `KeyKind`):
+- Ed25519, RSA 4096 and ECDSA P-256, with the comment set. With a passphrase, the key is encrypted the OpenSSH way (bcrypt-pbkdf, AES-256-CTR).
+- `KeyKind` carries the Generate panel's labels and notes as drawn.
+- The workspace optimises `rsa`, `crypto-bigint`, `crypto-primes`, `bcrypt-pbkdf`, `blowfish`, `argon2` and `blake2` even in dev builds. In the WSL test (debug build), generation took 0.3 ms for Ed25519, 5 ms for ECDSA and 0.3 s for RSA 4096. In phase 0's unoptimised debug build, RSA 4096 took 3–15 s.
+
+**PuTTY keys** (`.ppk` v2 and v3):
+- `inspect_private_key` reads a `.ppk` file's header and public lines without the passphrase: type, comment, public key and whether it is encrypted.
+- `convert_ppk` decodes the key, with its passphrase when it has one, and returns it in OpenSSH format, encrypted again with the same passphrase. Holonet stores that.
+- **Checked against PuTTY 0.83's own `puttygen`** (`putty-tools`, installed in the WSL test distribution with the owner's approval). Windows PuTTYgen has no command-line conversion. puttygen made 40 keys, each with its own OpenSSH export as the reference: Ed25519 ×12, ECDSA P-256 ×4 and RSA 3072 ×4, each in PPK v2 and v3, encrypted and not.
+  - All 39 checkable keys converted to exactly the same private key, with the same passphrase.
+  - The 40th was skipped because ssh-key can't read puttygen's OpenSSH export of it, although OpenSSH's `ssh-keygen` reads it. Its `.ppk` still converted.
+- Four of these throwaway keys are fixtures in `crates/holonet-ssh/tests/fixtures/`, for the unit test. They were never installed anywhere.
+- `examples/m4_ppk.rs` repeats the check over a folder of puttygen files.
+- My first unit test wrote its own `.ppk` and failed for about half of Ed25519 keys. The writer was wrong (it encoded the private value with an extra sign byte), not the reader. The real files replaced it.
+- **Known limit, upstream:** ssh-key 0.7.0-rc.12 refused one valid ECDSA key in OpenSSH format, puttygen's export above, that `ssh-keygen` accepts. ECDSA private keys imported from OpenSSH files may occasionally fail with "not a private key Holonet can read". Recorded for the Keychain's import error text in phase 4.
+
+**Jump hosts** (`ConnectOptions::jump`):
+- A jump host is a full `ConnectOptions` of its own, with its own sign-in, prompts, keep-alive and its own jump host. `connect` signs in to it first, opens `direct-tcpip` to the target (within the connect timeout), then runs the handshake and sign-in over that channel.
+- The target's host key is checked against the address the jump host sees.
+- `Session` keeps its jump host session open (`jump_host()`). `close` closes the target, then the jump hosts.
+- **Errors:**
+  - A failure at a jump host is `ConnectError::JumpHost { host, error }`. `innermost()` gives the real error and the hops it passed through.
+  - A jump host that cannot reach the target is `JumpCouldNotReach { jump, target, reason }`, for example "the connection was refused, or nothing answered".
+- **Lost connections:** a shell notices a dropped jump host as `LostReason::JumpHost { host, reason }` ("The connection to the jump host 127.0.0.1 was lost. …"). The jump host's reason is preferred, because it is the cause; the shell waits up to 0.2 s for it after the target's own reason.
+
+**Install on host** (`Session::install_public_key`):
+- One remote command creates `~/.ssh` (700) and `authorized_keys` (600) if needed, then appends the line unless the same type and key is already there, whatever the comment. It adds a newline first if the file lacks one.
+- Existing lines are never changed.
+- It returns `Added` or `AlreadyPresent`, or the server's error text.
+- `Session::exec` runs a command and collects its output and exit status.
+
+**Connecting to a chosen address:** `ConnectOptions.host` is already whatever address the caller chooses, and the host key check uses it. That means a host reached over Tailscale checks its key under the Tailscale address, which is a separate Known hosts entry. Phase 6 decides how a host's two addresses share a trusted key.
+
+**WSL tests** (13, all pass):
+
+| Test | Result |
+| --- | --- |
+| Generate, install, sign in | Ed25519, Ed25519 with a passphrase, ECDSA P-256 and RSA 4096: each installed (`Added`), installed again (`AlreadyPresent`), then signed in by public key. `~/.ssh` stays 700 and `authorized_keys` 600. The test's keys are removed afterwards; none are left |
+| Jump host to itself | Separate `$SSH_CONNECTION` on each hop. The target signed in with a key and the jump host with a password. Closing the target closed the jump host |
+| Jump host, closed target port | `JumpCouldNotReach`: "the connection was refused, or nothing answered" |
+| Jump host's key unknown | Stopped at the first hop: `JumpHost { error: HostKeyRejected }`, with no credentials sent |
+| Target's key unknown under its name | `HostKeyRejected` |
+| Jump host's connection killed under a running target shell | `ShellEvent::Lost(LostReason::JumpHost { .. })` |
+
+**sshd's per-source penalties.** OpenSSH 10 drops new connections from an address for a while after failed sign-ins (the log shows "srclimit_penalise … penalty: failed authentication"). My first version of the key test also tried each key before installing it. Those deliberate failures, together with the wrong-password tests running in parallel, got 127.0.0.1 penalised for 18 s, and the next connection was dropped ("Disconnected"). A freshly generated key cannot already be authorized, so that check was removed. Signing in with it proves the install.
+
+fmt, clippy, and the unit tests (28, 13, 7, 13 and 16) pass. The WSL tests (13) pass.
+
+## Milestone 4, phase 3: `holonet-net` (25 Nov 2026)
+
+A new crate with no window, so it tests without one.
+
+**Tailscale status** (`tailscale::status()`):
+- Asks the LocalAPI over its named pipe with Tokio's client and reads the HTTP answer, including chunked bodies.
+- If the pipe answers badly, it runs `tailscale.exe status --json` with no console window. It never waits more than 3 s.
+- **Result:**
+  - `NotInstalled`
+  - `NotRunning`: no pipe, though the client is installed
+  - `NotConnected { state }`: for example "Stopped" when switched off, or "NeedsLogin"
+  - `Running(status)`: this PC's own addresses, the MagicDNS suffix, and peers with their names, addresses and whether they are online
+- `problem()` gives the sentence a pane shows when Tailscale cannot be used: "Tailscale on this PC is switched off. Connect it, then try again."
+- `TailscaleStatus::peer(address)` finds the device a Tailscale address names: a 100.x address, the full MagicDNS name, or the short name.
+
+**Route check** (`route::route_to`, `primary_unreachable`):
+- `GetBestRoute2` says which route Windows would use: a specific route (with its prefix length), only the default route, or none.
+- `primary_unreachable(address, tailscale_running)` is true when the primary address is a private IP and only the default route (or none) leads to it. That is the `decisions.md` case for skipping the fallback wait.
+- **Private** means RFC 1918, link-local, IPv6 unique-local and link-local, plus Tailscale's 100.64.0.0/10 only while Tailscale is not running.
+- Hostnames are never skipped: resolving them could itself take time, and many resolve to public addresses.
+
+**Planning** (`plan()`), a pure function:
+
+| Route | Tailscale | Attempts |
+| --- | --- | --- |
+| Automatic, with a Tailscale address | Running | Primary for the fallback wait, then Tailscale |
+| Automatic, primary private and unroutable | Running | Tailscale only, with the note `PrimarySkipped` |
+| Automatic | Not usable | Primary only, with the note `NoFallback(reason)` |
+| Primary, or no Tailscale address | Any | Primary only |
+| Tailscale | Running | Tailscale only; `PeerOffline` if Tailscale lists that device as offline (still tried) |
+| Tailscale | Not usable | Error `TailscaleUnavailable(reason)`, so the pane says why instead of timing out |
+| Override "Try Tailscale" on a Primary host | Running | Tailscale only. With no Tailscale address: `NoTailscaleAddress` |
+
+The last attempt has no `give_up_after`; it uses the connect timeout (10 s).
+
+**Live check** (`examples/net_check.rs`, release build). The owner switched Tailscale off and then on again from its tray icon.
+
+| Address | Tailscale on | Tailscale off |
+| --- | --- | --- |
+| Status | Running, 15 peers, in 0.6–1.2 ms | `NotConnected { "Stopped" }`, in 0.5 ms, "…switched off. Connect it, then try again." |
+| 127.0.0.1 | Specific /32, waits | Same |
+| A private address on this PC's own network | Specific /24, waits | Same |
+| 10.255.255.1, 172.31.255.1 (private, not local) | Default route only, **skips** | Same |
+| fd00::1 | No route, **skips** | Same |
+| 100.100.100.100 (Tailscale's service address) | Specific /32, waits | Default route only, **skips** |
+| 100.127.255.254 (tailnet range, no device) | Default route only, waits: not private while Tailscale runs | **Skips** |
+| 192.0.2.1, 8.8.8.8 (public) | Default route only, waits | Same |
+| This PC's own Tailscale address | Specific /32 | Not listed: no status while off |
+
+- Each route check took under 0.15 ms, so it can run before every connect.
+- Tailscale installs a /32 route per device, not one for the whole 100.64.0.0/10. So a 100.x address with no device behind it has only the default route even while Tailscale runs. The plan still tries it under the Tailscale route, and `peer()` can say no such device is known.
+
+fmt, clippy, and the unit tests (28, 13, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 4: Keychain (25 Nov 2026)
+
+**The page** (`workspace/keychain.rs`, Keychain.dc.html), a new side-navigation entry between Hosts and Known hosts:
+- **Header:** "Keychain" with Import key file, Import from ~/.ssh and Import from WSL.
+- **Keys table:**
+  - Name with its fingerprint underneath.
+  - Type: "Ed25519", "ECDSA P-256", "RSA 4096" or "RSA 3072", with RSA's size read from the public key.
+  - Protected by: "No passphrase" in `warn`; "Passphrase"; "Passphrase, saved in vault"; or "Passphrase + Windows Hello" once Hello unlock is on, which is phase 8.
+  - Hosts: the count from `key_users`, including hosts that use the key through an identity.
+  - When there are no keys: "No keys yet".
+- **Public key of the selected key:**
+  - The full line with its comment, with Copy (which reads "Copied" for 2 s) and Install on host.
+  - Where the key came from, and which hosts sign in with it.
+  - Rename, and Delete key in `warn` outline.
+- **Generate key panel** (320 px, always shown as drawn): Name, Type and Passphrase.
+  - Type is drawn as a 2-column grid, so `Segmented` gained `.columns(n)`.
+  - "Unlock with Windows Hello" saves the passphrase in the vault.
+  - Generation runs off the UI thread and shows "Generating…". The comment is `holonet@<computer name>`, and the new key is selected.
+
+**Imports** (`key_import.rs`, shared with the host form's "Import key file…"):
+- **File:** the native picker. A PuTTY key with a passphrase opens "Enter the passphrase for …"; a wrong one says "The passphrase did not unlock this key."
+- **~/.ssh:** `%USERPROFILE%\.ssh`.
+- **WSL:**
+  - `wsl.exe -l -q` lists the distributions (its output is UTF-16), leaving out Docker's. Each one's `$HOME` is asked for, and `\wsl.localhost\<distro><home>\.ssh` is read.
+  - The source is recorded as "Ubuntu-26.04: ~/.ssh/<name>".
+- **The list dialog:**
+  - `.pub`, `known_hosts`, `authorized_keys` and `config` files are skipped, and so are files that are not keys.
+  - Keys already in the vault are shown, unticked.
+  - PuTTY keys with a passphrase are shown but point to Import key file, which can ask for it.
+  - Importable keys start ticked.
+- **Rules:** keys already in the vault (same public key) are never added twice. PuTTY keys are stored converted to OpenSSH, keeping their passphrase. Files are only read.
+- **Fixed:** the host form's import used to store a `.ppk` file as it was; it now converts it. A PuTTY key with a passphrase is sent to the Keychain.
+
+**Install on host:**
+- A dialog picks a host and signs in the way that host is set up (its password or key, or its identity's).
+- When the host's password or key passphrase isn't saved, a field asks for it.
+- Only a host key already trusted in Known hosts is accepted. A new or changed key stops before signing in, with "Connect to it once from Hosts" or "Check it in Known hosts".
+- The result shows in the dialog:
+  - "Installed m4-test-ed25519 on wsl-a. To sign in with it, edit wsl-a and choose this key."
+  - Or "… already accepts …", or the server's error.
+- For now it connects straight to the primary address. Routes and jump hosts join it in phases 6 and 7.
+
+**Host form fixes found while testing:**
+- **Passphrase cleared by accident.** Editing a host whose "Save passphrase" box started unticked would have cleared the key's saved passphrase on save, even when nothing was touched. That came from moving the passphrase to the key in phase 1. Now the form shows "This key's passphrase is saved in the vault, so it unlocks without asking." with **Forget saved passphrase**. It clears the passphrase only when you choose that.
+- **Fields stretching in a full-height column.** `field()` has `flex_1`, so in the Generate panel the fields grew to share the panel's height. The panel's fields are `flex_none`.
+
+**Checked against WSL** (a copy of the clean-profile test vault):
+
+| Check | Result |
+| --- | --- |
+| Generate Ed25519 "m4-test-ed25519" with a passphrase, Hello box ticked | Listed, selected, "Passphrase, saved in vault", Hosts 0 |
+| Install on host → wsl-a (saved password) | "Installed m4-test-ed25519 on wsl-a. To sign in with it, edit wsl-a and choose this key." |
+| Edit wsl-b → SSH key → m4-test-ed25519 → Save and connect | Connected; the status bar shows "Key m4-test-ed25519", with no prompt (the passphrase saved on the key) |
+| Keychain afterwards | Hosts 1, "Signs in to wsl-b." |
+| Import from ~/.ssh (a throwaway key, with the owner's approval) | Listed ticked; imported, with the full path as its source |
+| Import from WSL | Ubuntu-26.04 listed the throwaway ECDSA key and the owner's own `id_ed25519`, both ticked. The owner's key was unticked; only the throwaway one was imported ("No passphrase" in `warn`) |
+| Import key file: a PuTTY RSA key with a passphrase | Passphrase dialog. A wrong passphrase was refused; the right one imported "RSA 3072 · Passphrase" |
+| Rename | putty-rsa-v2-enc-1.ppk → putty-rsa-3072 |
+| Delete m4-test-ed25519 | "wsl-b signs in with it, and will need another key or a password. Servers that accept it are not changed." Deleted |
+| Copy | "Copied" for 2 s; the clipboard held the public key line |
+
+**Afterwards:**
+- Both throwaway keys were deleted, along with the Windows `.ssh` folder created for the test. The owner's WSL `~/.ssh` is back to its original five files.
+- The installed test key was removed from the test server's `authorized_keys`.
+
+**Not done:**
+- The gallery has not gained the new pieces: the grid `Segmented`, the keys table and the pick list. Recorded for the wrap-up.
+- Workspace notices stay until dismissed, so an old "Imported …" message can sit above later actions, as on other pages.
+
+fmt, clippy, and the unit tests (32 in the app) pass.
+
+## Milestone 4, phase 5: Identities (25 Nov 2026)
+
+An identity is a name, a username and a sign-in (a key, or a password that is saved or asked on connect), shared by several hosts.
+
+**Keychain:**
+- The Identities section sits between Keys and the public key, as drawn.
+- **Cards:**
+  - the name
+  - the sign-in: "Key work-ed25519", "Password, stored in vault" or "Password, asked on connect"
+  - a faint line, "User deploy · 2 hosts"
+- A dashed **New identity** card is always last. With no identities, a line explains what they are.
+- **The dialog (undrawn):** Name, Username, and Authentication (SSH key with a key list, or Password with "Save in the encrypted vault"). It shows Add identity or Save identity, and Delete identity when editing. Each field is required, with a message.
+- **Delete identity** names the hosts that use it: "wsl-a and wsl-b use it. They keep its username and sign-in as their own, so they still connect." `VaultData::delete_identity` copies them onto each host.
+- Deleting a key now also names the identities that use it.
+
+**Host form:** Authentication offers SSH key, Password and **Identity**, the last once the vault has one. It takes the place the design gives "SSH agent", which comes in milestone 6.
+- With Identity chosen, the Username field is hidden. An identity list and a line take its place: "Signs in as holotest with a password stored in the vault. Edit the identity in the Keychain; every host that uses it changes too."
+- The summary shows "Identity holotest-shared", and the equivalent command uses the identity's username.
+- The host's own sign-in is kept underneath, unchanged.
+
+**Using it everywhere** (`VaultData::resolved`):
+- Panes, the host cards and list, the detail panel and the new-tab picker all work on the host with its identity's username and sign-in.
+- The detail panel says "holotest-shared (Password)".
+- A password typed at a prompt and saved goes to the identity (`sign_in_auth_mut`), so every host using it gets it.
+- Install on host already used `sign_in` (phase 4).
+
+**Checked against WSL** (the phase 4 test vault):
+
+| Check | Result |
+| --- | --- |
+| New identity "holotest-shared": holotest, password saved | Card: "Password, stored in vault · User holotest · no hosts" |
+| wsl-a → Identity; wsl-b → Identity, Save and connect | wsl-b connected with the identity's password. The card reads "2 hosts" |
+| Edit the identity's username to `nobody-test` | Both host cards show `nobody-test@127.0.0.1:2222`. Connecting wsl-a offered a password for nobody-test and was refused |
+| Username back to holotest | wsl-a connected |
+| Delete the identity | Both hosts show holotest and Password as their own, with nothing missing |
+
+**Fixed on the way:**
+- The Hosts detail panel used the stored host rather than the resolved one, so it showed the host's old username and "Missing key" from wsl-b's deleted key. It now uses the resolved host.
+- `HostForm::new` takes the vault data instead of separate lists. Clippy's argument limit prompted it.
+
+**Noted, older behaviour:** a host whose key was deleted opens in the form with the first key in the vault selected, without saying its own key is gone. Saving would quietly switch it to that key. Recorded for the wrap-up.
+
+fmt, clippy, and the unit tests (32, 14, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 6: routes (25 Nov 2026)
+
+**Owner decisions:**
+1. Test the fallback through a **test relay**: `crates/holonet-net/examples/ts_relay.rs` listens on this PC's own Tailscale IPv4 address and forwards to the WSL server. No firewall prompt appeared.
+2. **A host's addresses share trust when the key matches.**
+   - With no Known hosts entry for the address connected to, the entry for the same host's other address on that port is used.
+   - The same key is trusted, and recorded for this address too. The log reads "Host key matches the one trusted for 127.0.0.1; trusted for this address too".
+   - A different key stops the connection as a changed key, with the mismatch recorded on the entry it was compared with.
+
+**Panes follow the route plan** (`holonet_net::plan` before each attempt and reconnect):
+- The connection task asks Tailscale for its status, checks whether the primary address has a route, plans, and tries each address in turn.
+- The fallback wait limits only the TCP connection, so a prompt can take as long as it needs.
+- An unreachable address moves on to the next one and logs why ("No answer from 192.0.2.1 after 3 s"). Any other failure, such as a refused sign-in, stops there.
+- **Connecting card**, as drawn:
+  - "Trying the primary address. Tailscale is next if it does not answer."
+  - "Trying 100.x over Tailscale."
+  - "… is not reachable from this network, so Holonet is using Tailscale (100.x)."
+  - "The primary address did not answer. Trying Tailscale (100.x)."
+- **Status bar:** "Connected over Tailscale". The session header shows the address actually used.
+- **Timed out**, as drawn:
+  - "… This host also has a Tailscale address." with **Try Tailscale (100.x)**, which overrides the route for this connection, and Retry.
+  - If Tailscale is off: "…, but Tailscale on this PC is switched off. Connect it, then try again.", with no Try Tailscale button.
+  - If both addresses failed: "Neither … nor its Tailscale address … answered."
+- **Tailscale off** (a new failure, "Tailscale off") for a host that must use Tailscale: "ts-route connects over Tailscale", "Tailscale on this PC is switched off. Connect it, then try again. Or edit the host to connect another way.", with Retry and Edit host.
+- **Reconnecting** says "over Tailscale" when the last route was Tailscale. A host that needs Tailscale while it is off **waits instead of using up attempts**: "Waiting for Tailscale on this PC." It checks every 16 s, and Tailscale's own network change starts the next attempt at once.
+
+**Screens:**
+- **Host form:** "Tailscale address (optional)", checked like the primary address. Below it, "Connect using" (Automatic, Primary, Tailscale) with the drawn help text, which names the Settings fallback wait. Without a Tailscale address only the help line shows ("Add a Tailscale address…"). The summary gains Tailscale address and Connect using, and the equivalent command uses the Tailscale address under the Tailscale route.
+- **Hosts:**
+  - Cards carry the TAILSCALE tag.
+  - The detail panel shows "Connect using" (saved per host as soon as it changes) and the Tailscale address row.
+  - Its Host key section finds trust under either address.
+- **Settings, Connection:** "Tailscale fallback wait" (2, 3, 5 or 10 seconds).
+
+**Checked live** (the phase 4 test vault, four seeded hosts from `examples/m4_routes_seed.rs`, relay running):
+
+| Host | Setup | Result |
+| --- | --- | --- |
+| ts-route | Primary 127.0.0.1 (trusted), route Tailscale | Connected over Tailscale with no key prompt; trust carried over from 127.0.0.1 |
+| ts-fallback | Primary 192.0.2.1 (public, never answers), Automatic | "Trying the primary address. Tailscale is next…", then connected over Tailscale after the 3 s wait |
+| ts-skip | Primary 10.255.255.1 (private, no route), Automatic | Connected over Tailscale in under 1.2 s, with no wait |
+| ts-primary | Primary 192.0.2.1, route Primary | Timed out after 10 s with "Try Tailscale (100.x)", which connected over Tailscale |
+| Tailscale off (the owner switched it off), new ts-route tab | | "Tailscale off" state, as above |
+| Tailscale off, new ts-fallback tab | | Timed out on the primary; the message says Tailscale is switched off |
+| Tailscale off under four open Tailscale sessions | First build | **They used up all 5 attempts within seconds and gave up**: Tailscale switching off is itself a network change, which starts attempts at once. Fixed by waiting for Tailscale |
+| Tailscale off and on again with the fix | | ts-route showed "Waiting for Tailscale on this PC." and reconnected by itself when Tailscale came back. ts-fallback, under Automatic, spent attempts on its unreachable primary, then reconnected over Tailscale within its 5 |
+
+**Fixed on the way:**
+- The session header showed the primary address between attempts. It now shows the address the route starts with.
+- The reconnect banner lost "over Tailscale" between attempts.
+
+**Not checked:**
+- The Settings "Tailscale fallback wait" row was not screenshotted. Its select saves like the keep-alive select next to it.
+- Once, Ctrl Shift T from a pane in the "Tailscale off" state did not open the host picker; "+" did. Not reproduced or investigated yet; recorded for the wrap-up.
+- An Automatic host whose primary address is truly down while Tailscale is off still uses its attempts. That is reasonable, since the primary address may come back, but it differs from a Tailscale-only host.
+
+The relay and seeder stay in the tree with the other milestone 4 test programs until the wrap-up.
+
+fmt, clippy, and the unit tests (32, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 7: jump hosts in panes (25 Nov 2026)
+
+**Shared connection code** (`crates/holonet-app/src/hops.rs`), used by panes and Install on host:
+- `Hop` holds a host with its identity applied, its key and its keep-alive.
+- `jumps()` returns the jump hosts in front of a host, first hop first.
+- `link()` nests each hop's `ConnectOptions` as the next one's jump host.
+- `connect_by_route()` runs the route plan for the **first hop**, the only one this PC connects to.
+  - Hosts further along are reached at their primary address, or at their Tailscale address when their route is Tailscale. They get no fallback.
+  - Only the first hop's own failure to answer moves on to its next address.
+
+**Panes:**
+- **Per hop:** each hop has its own prompts, sign-in state (ask again, typed and remembered secrets, pending save) and host key check, with shared trust across that host's own addresses.
+  - Log lines are prefixed with the hop's name ("jump-a: Host key verified against Known hosts").
+  - Prompts name the hop:
+    - "This is the first time Holonet has connected to the jump host jump-a."
+    - "jump-a is the jump host for behind-a. It has no saved password."
+  - A typed secret saved from a jump host's prompt goes to that host's (or its identity's) entry.
+- **Failures** belong to the hop that failed: each jump host wraps an error once, so the depth gives the hop.
+  - Titles name it: "Holonet could not reach the jump host jump-a", "The jump host jump-a refused the key …", "jump-a could not reach behind-a".
+  - "Edit host" becomes "Edit jump-a" and opens that host. "Save and connect" there retries the pane it came from, because the pane checks whether it uses that host.
+  - "Try Tailscale" applies only to a first-hop failure.
+  - A deleted jump host or a loop fails before connecting, with "Edit the host to choose another jump host, or None."
+- **Display:**
+  - The connecting card reads "Connecting to jump-a, then behind-a." ("jump-a over Tailscale" when it applies).
+  - The header keeps the host's own address.
+  - The status bar adds "Through jump-a".
+- **Reconnect** restarts the whole chain from the first hop:
+  - A lost jump host reads "The connection to the jump host jump-a was lost."
+  - A failed attempt's error line names the hop ("jump-a: The host refused the connection…").
+
+**Screens:**
+- **Host form, Connection:**
+  - A "Jump host" select: None, then the other saved hosts by name.
+  - Hosts that already go through this one are left out, so a loop cannot be chosen.
+  - The summary gains "Jump host", and the equivalent command gains `-J jump-a`.
+  - With a jump host set, **Test connection tests the first hop** and says so ("This tested the jump host jump-a. The host itself is checked when you connect through it."), because this PC usually cannot reach the host directly.
+- **Host detail:** a "Jump host" row ("None", the name, or "Deleted host").
+- **Install on host** connects the way panes do, through the jump hosts and the route plan. Every hop's host key must already be trusted (under either of its addresses).
+  - A failure names the hop.
+  - A jump host whose password or passphrase is not saved stops with "Connect to … once from Hosts and save it".
+
+**Checked live** (the phase 4 test vault; `examples/m4_jump_seed.rs` added jump-a at 127.0.0.1:2222, and behind-a at localhost:2222 through jump-a, and cleared Known hosts; from WSL, localhost is the same server under another Known hosts name):
+
+| Check | Result |
+| --- | --- |
+| Connect behind-a from a clean Known hosts | Prompt for the jump host jump-a (127.0.0.1:2222), trusted. Prompt for behind-a (localhost:2222), trusted. Shell; status bar "Through jump-a" |
+| `kill -9` the jump host's `sshd-session` (the one without a terminal) | Reconnected through both hops within a second, with no prompts; "-- Reconnected at 21:04 …" in scrollback |
+| Same with sshd's listener stopped, then started | "The connection to the jump host jump-a was lost. Attempt 1 of 5 failed. Trying again in 2 s.", "The host refused the connection…"; reconnected by itself once the listener was back |
+| jump-a's port set to 2223 | "Holonet could not reach the jump host jump-a" with Retry, **Edit jump-a**, Close tab. Edit jump-a, port back to 2222, Save and connect: the same pane connected |
+| Host form for behind-a | Command `ssh -J jump-a holotest@localhost -p 2222`; summary "Jump host jump-a"; Test connection tested jump-a. jump-a's own select leaves out behind-a |
+| jump-a's saved password removed, new behind-a tab | "Enter the password for holotest@127.0.0.1", naming jump-a as the jump host for behind-a. Typed with Save ticked: connected, and jump-a shows "Password, saved" again |
+| Install on host: holonet-test-import on behind-a | "Installed holonet-test-import on behind-a." sshd logged two password sign-ins back to back (jump-a, then behind-a through it). The added line was removed from the test account's `authorized_keys` afterwards |
+
+**Not checked:**
+- The hop name on a reconnect attempt's error line was added after the live run. It is one line and is covered by clippy only.
+- A jump host over Tailscale (the first hop's route plan) was not run live. It uses the same code as phase 6, with the first hop's host.
+- Chains of more than one jump host are covered by the `link` unit test, not live.
+
+fmt, clippy, and the unit tests (34, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 8: lock and Windows Hello (25 Nov 2026)
+
+**Windows Hello** (`crates/holonet-app/src/hello.rs`, the `windows` 0.62 calls from phase 0's spike):
+- `create_and_sign` creates the credential, then signs through a freshly opened one, as unlocking does.
+- `sign`, `delete`, `available`.
+- `HelloError`: Cancelled, Missing, Unavailable, Failed. Each has interface text.
+- Every call blocks on Windows, so callers run it on GPUI's background executor.
+- Credential names are `holonet-vault-<12 hex>`, stored in the vault's Hello slot.
+
+**Locking** (`app.rs`):
+- **Idle:** the window's root captures key-down and mouse-down, and listens for mouse moves, recording the time. Only input in Holonet counts: terminal output does not.
+  - A check every 10 s locks after Settings' "Lock vault after" (15 minutes, 1 hour, Never).
+- **Windows lock:** `platform::watch_system` gains the message-only window from phase 0, on its own thread (`WTSRegisterSessionNotification`). It sends `SessionLocked` and `SessionUnlocked` into the same channel as sleep and network changes.
+  - "Lock when Windows locks" (on by default) locks the vault on `SessionLocked`.
+  - Panes ignore these events.
+- Locking drops the workspace as "Lock now" does, so sessions stay connected.
+
+**Locked screen** (Locked.dc.html):
+- It reads the vault file's header (no password needed) for a Hello slot.
+  - With one: **Unlock with Windows Hello** ("Waiting for Windows Hello…" while the prompt is open) and **Use vault password instead**.
+  - The password view then offers "Use Windows Hello instead".
+  - Without one: the password field, as before.
+- The body names the reason:
+  - "Holonet locked after 15 minutes idle." (or "1 hour", or "1 minute")
+  - "Holonet locked when Windows locked."
+  - "You locked the vault."
+  - At startup: "Unlock to open your hosts, keys and passwords." (with Hello)
+- Hello failures show under the button:
+  - "Windows Hello was cancelled."
+  - A missing credential, or a key that does not open the vault, both say to use the vault password and turn Hello on again.
+
+**Settings, Vault and security:**
+- **Unlock with Windows Hello:**
+  - Disabled with "Windows Hello is not set up on this PC. Add a PIN, fingerprint or face in Windows Settings, Accounts, Sign-in options." when `IsSupportedAsync` says no. It reads "Checking…" while Windows answers.
+  - **Turning it on** opens "Turn on Windows Hello", which asks for the vault password. Holonet checks the password (Argon2, off the UI thread, holding the vault as the password change does), has Hello create its key and sign a new challenge, and adds the slot. The file becomes format 2.
+  - **Turning it off** removes the slot and deletes the credential. The file goes back to format 1.
+- **Lock vault after** (select) and **Lock when Windows locks** (switch). The owner's plan kept these separate, where the design merges them into one select.
+- The side navigation's vault card reads "Encrypted, unlocks with Windows Hello or the vault password" when the vault has a Hello slot.
+
+**Fixed on the way: the Settings page layout.**
+- Sections were sized to their content, not to `w_full` with `max_w(1080)`: Taffy did not apply them inside the scroll column.
+  - So the Connection card was wider than the others (since phase 6's long help line).
+  - Sections were measured too short: the Connection heading overlapped the Vault file row.
+- `page_block` now takes a definite width (the window less the side navigation and padding, at most 1080), and the card and row wrappers are flex columns. All cards now share one width, with no overlap.
+
+**Checked live** (the phase 4 test vault):
+
+| Check | Result |
+| --- | --- |
+| Idle lock (set to 1 minute with `examples/m4_idle_seed.rs`), a session printing the time every 5 s | Locked about 60 s after the last keystroke with "Holonet locked after 1 minute idle." and "1 session is open…"; the output did not keep it unlocked. After the password unlock the loop had kept printing, with no reconnect |
+| Turn on Windows Hello (the owner completed the prompt) | "Windows Hello now unlocks the vault. The vault password still works too."; the vault file became format 2 with the credential in its slot |
+| Win L with a behind-a session open (the owner) | Holonet showed the Locked screen after Windows unlocked, and Hello opened it. The session was the same login, with no reconnect |
+| New process, Hello at startup (the owner) | Cancelling showed the cancelled message; the second try opened the vault. **This confirms the signature repeats across processes** (phase 0 had checked one process only) |
+| Lock now, then Use vault password instead | The password view with "Use Windows Hello instead"; the password unlocked |
+| Turn off Windows Hello | "Windows Hello no longer unlocks the vault. Use the vault password."; file back to format 1, no Hello slot |
+
+**Not checked:**
+- Hello not set up on this PC (the disabled switch): this PC has Hello. The wording is in `hello::UNAVAILABLE`.
+- A missing credential, or a key that does not open the vault: not run live.
+- That the credential was deleted from Windows after turning Hello off: not confirmed directly. The vault no longer refers to it.
+- The prompt focus workaround was not needed; every prompt opened in front.
+
+fmt, clippy, and the unit tests (35, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 9: wrap-up (25 Nov 2026)
+
+**Removed:**
+- The phase 0 spikes: `holonet-app` examples `m4_hello`, `m4_lock`, `m4_tailscale`, and `holonet-ssh` examples `m4_jump`, `m4_keygen`, `m4_ppk` (the `.ppk` fixtures and their tests cover what `m4_ppk` checked).
+- The test seeders `m4_routes_seed`, `m4_jump_seed`, `m4_idle_seed`.
+- `holonet-app`'s dev-dependencies, which only the spikes used.
+- **Kept:** `holonet-net`'s `ts_relay` (the relay for testing routes) and `net_check`, both listed in `CLAUDE.md`.
+
+**Fixed:**
+- **A host whose key was deleted** opened in the form with the first key selected, and saving would quietly switch it to that key.
+  - The Key select now starts on "Deleted key: choose another".
+  - The field says "The key this host used was deleted. Choose another key, import one, or sign in with a password.", and saving is blocked until a key is chosen.
+  - The summary says "Deleted key".
+- **App shortcuts from a pane with nothing to focus** (connecting, a card, a failure): a pane now has its own focus handle on its root.
+  - It takes focus in those states, and when its terminal stops being drawn while focused.
+  - So Ctrl Shift T and the others dispatch from inside the pane. A focused terminal in a hidden tab, or one that is no longer drawn, could not dispatch them; this is the likely cause of phase 6's one-off "Ctrl Shift T did nothing".
+  - After the fix: a connected wsl-a tab, then a ts-skip tab failing with "Not reachable", then Ctrl Shift T opened the host picker. The original failure was never reproduced, so this checks the fix, not the cause.
+
+**Gallery:**
+- The Keychain controls moved into `ui/lists.rs`, which the Keychain page uses too: `table` with `TableColumn`/`TableRow` and `name_cell`, `identity_card` and `add_card`, `pick_row`, and `side_panel`.
+- `--gallery` has a Keychain section:
+  - a three-row table, with the row clicked selected and a "No passphrase" row in `warn`
+  - two identity cards and the dashed "New identity" card
+  - the import list with a checked, an unchecked and a disabled row
+  - the Generate key side panel
+
+**Done check, from a clean profile** (a new throwaway vault, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Generate an Ed25519 key, install it on a host, sign in with it | Generated `done-ed25519` with a passphrase saved in the vault. Added done-a (127.0.0.1:2222, password), connected once to trust its key, then Install on host: "Installed done-ed25519 on done-a." Switched done-a to the key: connected, status bar "Key done-ed25519". The line was removed from the test account's `authorized_keys` afterwards |
+| Import keys from a file, `~/.ssh`, and WSL | File: `.dev/holotest_rsa` imported ("RSA 3072, No passphrase"). `~/.ssh`: the picker said "No private keys in …\.ssh" (this profile has none now; phase 4 imported from it). WSL: the picker listed the Ubuntu distribution's `id_ed25519`, and was cancelled, because that is the owner's real key |
+| Tailscale fallback, and the pane says which route | done-ts (primary 192.0.2.1, this PC's Tailscale address through `ts_relay`, Automatic): "No answer from 192.0.2.1 after 3 s", "Opening TCP connection to …:2222 over Tailscale", then "Connected over Tailscale" |
+| Through a jump host, both host keys checked | done-behind (localhost, jump host done-a): "done-a: Host key verified against Known hosts", then the prompt for done-behind's own key. Connected, "Through done-a" |
+| The vault locks after the idle time and when Windows locks, and Hello unlocks it | Lock now with four sessions: "4 sessions are open…"; the password unlocked and the sessions were still connected. Idle lock, Windows lock and Hello unlock (also from a fresh start) were checked live in phase 8, with the owner, on this build's code |
+
+fmt, clippy, the unit tests (35, 15, 12, 7, 13 and 16) and the WSL integration tests (13) pass.
+
+**Milestone 4 is done.**
+
+Carried forward, not tested:
+- Hello on a PC without Hello set up (the disabled switch).
+- A jump host reached over Tailscale.
+- Chains of more than one jump host, live.
+- An identity whose key was deleted opens its form with the first key selected. This is the same issue fixed above for hosts; recorded for milestone 5.

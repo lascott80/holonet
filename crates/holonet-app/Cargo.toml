@@ -11,10 +11,12 @@ name = "holonet"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.23.1"
 alacritty_terminal = "0.26"
 anyhow = "1.0.105"
 gpui.workspace = true
 holonet-model = { version = "0.1.0", path = "../holonet-model" }
+holonet-net = { version = "0.1.0", path = "../holonet-net" }
 holonet-ssh = { version = "0.1.0", path = "../holonet-ssh" }
 holonet-vault = { version = "0.1.0", path = "../holonet-vault" }
 jiff = "1.0.3"
@@ -23,4 +25,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 unicode-segmentation = "1.13.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_RemoteDesktop", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"] }
+# Windows Hello (hello.rs).
+windows = { version = "0.62", features = ["Foundation", "Security_Credentials", "Security_Cryptography", "Storage_Streams"] }

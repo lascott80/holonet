@@ -2,6 +2,7 @@
 //! Settings). Phases 6 and 7 add the session tab and Known hosts.
 
 mod hosts;
+mod keychain;
 mod known_hosts;
 mod settings;
 
@@ -43,11 +44,12 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 3] = [NavEntry::Hosts, NavEntry::KnownHosts, NavEntry::Settings];
+const PAGES: [NavEntry; 4] = [NavEntry::Hosts, NavEntry::Keychain, NavEntry::KnownHosts, NavEntry::Settings];
 
 pub(crate) enum Page {
     Hosts,
     Form(Entity<HostForm>),
+    Keychain,
     KnownHosts,
     Settings,
 }
@@ -87,6 +89,7 @@ pub struct Workspace {
     save_error: Option<SharedString>,
     notice: Option<SharedString>,
     settings_ui: settings::SettingsUi,
+    kc: keychain::KeychainUi,
     change_password: Option<ChangePassword>,
     _subscriptions: Vec<Subscription>,
 }
@@ -114,6 +117,7 @@ impl Workspace {
             }),
         ];
         let path = vault.path().to_path_buf();
+        let kc = keychain::KeychainUi::new(cx);
         Self {
             app,
             vault: Some(vault),
@@ -131,6 +135,7 @@ impl Workspace {
             save_error: None,
             notice: None,
             settings_ui,
+            kc,
             change_password: None,
             _subscriptions: subscriptions.into_iter().chain(settings_subs).collect(),
         }
@@ -151,22 +156,25 @@ impl Workspace {
     /// New host (`None`) or Edit host.
     pub(crate) fn open_form(&mut self, host: Option<Host>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
-        let keys = data.keys.clone();
-        let known = data.known_hosts.clone();
         let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
         let runtime = self.runtime.clone();
-        let form = cx.new(|cx| HostForm::new(host, keys, known, timeout, runtime, window, cx));
+        let form = cx.new(|cx| HostForm::new(host, data, timeout, runtime, window, cx));
         self._subscriptions.push(cx.subscribe_in(
             &form,
             window,
             |this: &mut Self, _, event: &HostFormEvent, window, cx| {
                 match event {
-                    HostFormEvent::Saved { host, new_keys, connect } => {
-                        let (host, new_keys) = (host.clone(), new_keys.clone());
+                    HostFormEvent::Saved { host, new_keys, passphrase, connect } => {
+                        let (host, new_keys, passphrase) = ((**host).clone(), new_keys.clone(), passphrase.clone());
                         let id = host.id;
                         this.save(
                             move |d| {
                                 d.keys.extend(new_keys);
+                                if let Some((key_id, secret)) = passphrase
+                                    && let Some(key) = d.key_mut(key_id)
+                                {
+                                    key.saved_passphrase = secret;
+                                }
                                 match d.host_mut(id) {
                                     Some(existing) => *existing = host,
                                     None => d.hosts.push(host),
@@ -371,6 +379,7 @@ impl Render for Workspace {
         let active = match self.page {
             Page::Settings => NavEntry::Settings,
             Page::KnownHosts => NavEntry::KnownHosts,
+            Page::Keychain => NavEntry::Keychain,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
@@ -378,6 +387,7 @@ impl Render for Workspace {
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
+            Page::Keychain => self.keychain_page(cx),
         };
         let app = self.app.clone();
         let dialog = self.change_password_dialog(cx).or_else(|| self.settings_dialog(cx));
@@ -388,12 +398,14 @@ impl Render for Workspace {
             .flex()
             .child(
                 SideNav::new(Some(active), PAGES.to_vec())
+                    .hello(self.vault.as_ref().is_some_and(|v| v.has_hello()))
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {
                                 this.page = match entry {
                                     NavEntry::Settings => Page::Settings,
                                     NavEntry::KnownHosts => Page::KnownHosts,
+                                    NavEntry::Keychain => Page::Keychain,
                                     _ => Page::Hosts,
                                 };
                                 cx.notify();

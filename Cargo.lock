@@ -2949,14 +2949,17 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64 0.23.1",
  "gpui",
  "holonet-model",
+ "holonet-net",
  "holonet-ssh",
  "holonet-vault",
  "jiff",
  "regex",
  "tokio",
  "unicode-segmentation",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
 ]
 
@@ -2971,11 +2974,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "holonet-net"
+version = "0.1.0"
+dependencies = [
+ "holonet-model",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "holonet-ssh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "holonet-model",
+ "rand 0.10.4",
  "russh",
  "thiserror 2.0.21",
  "tokio",
@@ -2992,6 +3007,7 @@ dependencies = [
  "holonet-model",
  "serde",
  "serde_json",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror 2.0.21",
  "zeroize",

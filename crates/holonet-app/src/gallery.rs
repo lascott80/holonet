@@ -1,5 +1,6 @@
 //! `holonet --gallery`: every shared control in every state, inside the app
-//! shell, for checking against docs/design (milestone 2, phase 3).
+//! shell, for checking against docs/design (milestone 2, phase 3; the
+//! Keychain controls from milestone 4).
 
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, px};
 
@@ -35,6 +36,9 @@ pub struct Gallery {
     dialog: OpenDialog,
     nav: NavEntry,
     active_tab: Option<usize>,
+    /// Keychain section: the selected table row and the import picks.
+    kc_row: usize,
+    picks: [bool; 2],
     log: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -98,6 +102,8 @@ impl Gallery {
             dialog: OpenDialog::None,
             nav: NavEntry::Hosts,
             active_tab: None,
+            kc_row: 0,
+            picks: [true, false],
             log: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -348,6 +354,97 @@ impl Render for Gallery {
             .child(div().text_mono().text_color(theme::ink_soft()).child("deploy@10.20.0.11:22 (mono)"))
             .child(div().text_mono_small().text_color(theme::ink_soft()).child("SHA256:[FINGERPRINT] (mono small)"));
 
+        let keychain = {
+            use crate::ui::{TableColumn, TableRow, add_card, identity_card, name_cell, pick_row, side_panel, table};
+            let columns = [
+                TableColumn { label: "NAME", width: None },
+                TableColumn { label: "TYPE", width: Some(110.) },
+                TableColumn { label: "PROTECTED BY", width: None },
+                TableColumn { label: "HOSTS", width: Some(80.) },
+            ];
+            let sample = [
+                ("work-ed25519", "Ed25519", "Passphrase + Windows Hello", false, "4"),
+                ("home-rsa-4096", "RSA 4096", "Passphrase", false, "2"),
+                ("old-laptop", "ECDSA P-256", "No passphrase", true, "0"),
+            ];
+            let rows = sample
+                .iter()
+                .enumerate()
+                .map(|(i, (name, kind, protection, warn, hosts))| {
+                    let entity = entity.clone();
+                    let text = |t: &'static str, warn: bool| {
+                        div()
+                            .text_body()
+                            .text_color(if warn { theme::warn() } else { theme::ink() })
+                            .child(t)
+                            .into_any_element()
+                    };
+                    TableRow {
+                        id: SharedString::from(format!("g-key-{i}")),
+                        cells: vec![
+                            name_cell(*name, "SHA256:[FINGERPRINT]"),
+                            div().text_mono_small().text_color(theme::ink()).child(*kind).into_any_element(),
+                            text(protection, *warn),
+                            text(hosts, false),
+                        ],
+                        selected: self.kc_row == i,
+                        on_click: Some(Box::new(move |_, _, cx| {
+                            entity.update(cx, |g, cx| {
+                                g.kc_row = i;
+                                g.note(format!("key row {i}"), cx);
+                            })
+                        })),
+                    }
+                })
+                .collect();
+            let pick = |i: usize, title: &'static str, detail: &'static str, enabled: bool| {
+                let entity = entity.clone();
+                let checked = self.picks.get(i).copied().unwrap_or(false);
+                pick_row(format!("g-pick-{i}"), title, detail, checked, enabled, move |v, _, cx| {
+                    entity.update(cx, |g, cx| {
+                        if let Some(p) = g.picks.get_mut(i) {
+                            *p = v;
+                        }
+                        g.note(format!("pick {i}: {v}"), cx);
+                    })
+                })
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_4)
+                .child(table(&columns, rows))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(theme::SPACE_3)
+                        .child(identity_card("g-id-1", "deploy", "Key work-ed25519", "User deploy · 4 hosts"))
+                        .child(identity_card(
+                            "g-id-2",
+                            "home admin",
+                            "Password, asked on connect",
+                            "User admin · no hosts",
+                        ))
+                        .child(add_card("g-id-new", "New identity")),
+                )
+                .child(
+                    div()
+                        .p(theme::SPACE_4)
+                        .bg(theme::card())
+                        .rounded(theme::RADIUS_LG)
+                        .child(pick(0, "~/.ssh · id_ed25519", "Ed25519 · passphrase", true))
+                        .child(pick(1, "~/.ssh · id_rsa", "RSA 3072 · no passphrase", true))
+                        .child(pick(2, "~/.ssh · work.ppk", "Already in the vault", false)),
+                )
+                .child(
+                    div().h(px(220.)).flex().justify_end().bg(theme::ground()).child(
+                        side_panel(320., "Generate key")
+                            .child(div().text_body().text_color(theme::ink_muted()).child("Panel content goes here.")),
+                    ),
+                )
+        };
+
         let log = div()
             .text_mono_small()
             .text_color(theme::ink_dim())
@@ -381,6 +478,7 @@ impl Render for Gallery {
                 .child(Self::section("Tags", tags))
                 .child(Self::section("Display", display))
                 .child(Self::section("Dialogs", dialogs))
+                .child(Self::section("Keychain", keychain))
                 .child(Self::section("Events", log)),
         );
 
