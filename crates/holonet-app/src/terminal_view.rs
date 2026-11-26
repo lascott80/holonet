@@ -383,6 +383,10 @@ impl TerminalView {
         window.focus(&self.focus);
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         self.model.advance(bytes);
     }

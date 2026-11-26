@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Div, Entity, FontWeight, IntoElement, PathPromptOptions, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Div, Entity, IntoElement, PathPromptOptions, SharedString, Subscription,
+    Window, div, prelude::*, px,
 };
 use holonet_model::{Auth, HostId, Identity, IdentityId, KeyId, Secret, StoredKey, Timestamp, VaultData};
 use holonet_ssh::{
@@ -20,8 +20,9 @@ use super::{Workspace, short_path};
 use crate::key_import::{self, Found};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{
-    Button, ButtonKind, Checkbox, Segmented, Select, TextField, TextFieldEvent, callout, dialog, dialog_buttons, field,
-    icon, modal, section_label,
+    Button, ButtonKind, Checkbox, Segmented, Select, TableColumn, TableRow, TextField, TextFieldEvent, add_card,
+    callout, dialog, dialog_buttons, field, icon, identity_card, modal, name_cell, pick_row, section_label, side_panel,
+    table,
 };
 
 const ASIDE: f32 = 320.;
@@ -329,94 +330,52 @@ impl Workspace {
     fn kc_table(&self, data: &VaultData, keys: &[&StoredKey], cx: &mut Context<Self>) -> Div {
         let hello = data.settings.hello_unlock;
         // Name | Type 110 | Protected by | Hosts 80 (Keychain.dc.html).
-        let row = |d: Div| d.flex().items_center().gap(theme::SPACE_3).px(theme::SPACE_4);
-        let header = row(div().py(px(10.)))
-            .text_label()
-            .text_color(theme::ink_muted())
-            .border_b_1()
-            .border_color(theme::line())
-            .child(div().flex_grow().flex_basis(px(0.)).min_w_0().child("NAME"))
-            .child(div().w(px(110.)).flex_none().child("TYPE"))
-            .child(div().flex_1().min_w_0().child("PROTECTED BY"))
-            .child(div().w(px(80.)).flex_none().child("HOSTS"));
-        let count = keys.len();
-        let lines = keys.iter().enumerate().map(|(i, key)| {
-            let id = key.id;
-            let on = self.kc.selected == Some(id);
-            let (protection, warn) = protected_by(key, hello);
-            let fingerprint = holonet_ssh::fingerprint(&key.public_key).unwrap_or_default();
-            let users = data.key_users(id).0.len();
-            row(div())
-                .id(SharedString::from(format!("kc-key-{}", id.0)))
-                .py(px(14.))
-                .when(i + 1 < count, |d| d.border_b_1().border_color(theme::line()))
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::raised()))
-                .when(!on, |d| d.hover(|s| s.bg(theme::tab_hover())))
-                .child(
-                    div()
-                        .flex_grow()
-                        .flex_basis(px(0.))
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_body()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme::ink())
-                                .truncate()
-                                .child(SharedString::from(key.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_mono_small()
-                                .text_color(theme::ink_muted())
-                                .truncate()
-                                .child(SharedString::from(fingerprint)),
-                        ),
-                )
-                .child(
-                    div()
-                        .w(px(110.))
-                        .flex_none()
-                        .text_mono_small()
-                        .text_color(theme::ink())
-                        .child(SharedString::from(type_label(key))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_body()
-                        .text_color(if warn { theme::warn() } else { theme::ink() })
-                        .child(protection),
-                )
-                .child(
-                    div()
-                        .w(px(80.))
-                        .flex_none()
-                        .text_body()
-                        .text_color(theme::ink())
-                        .child(SharedString::from(users.to_string())),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.kc.selected = Some(id);
-                    this.kc.copied = None;
-                    cx.notify();
-                }))
-        });
-        div()
-            .flex()
-            .flex_col()
-            .bg(theme::card())
-            .border_1()
-            .border_color(theme::line())
-            .rounded(theme::RADIUS_LG)
-            .overflow_hidden()
-            .min_w(px(560.))
-            .child(header)
-            .children(lines)
+        let columns = [
+            TableColumn { label: "NAME", width: None },
+            TableColumn { label: "TYPE", width: Some(110.) },
+            TableColumn { label: "PROTECTED BY", width: None },
+            TableColumn { label: "HOSTS", width: Some(80.) },
+        ];
+        let rows = keys
+            .iter()
+            .map(|key| {
+                let id = key.id;
+                let (protection, warn) = protected_by(key, hello);
+                let fingerprint = holonet_ssh::fingerprint(&key.public_key).unwrap_or_default();
+                let users = data.key_users(id).0.len();
+                let this = cx.weak_entity();
+                TableRow {
+                    id: SharedString::from(format!("kc-key-{}", id.0)),
+                    cells: vec![
+                        name_cell(key.name.clone(), fingerprint),
+                        div()
+                            .text_mono_small()
+                            .text_color(theme::ink())
+                            .child(SharedString::from(type_label(key)))
+                            .into_any_element(),
+                        div()
+                            .text_body()
+                            .text_color(if warn { theme::warn() } else { theme::ink() })
+                            .child(protection)
+                            .into_any_element(),
+                        div()
+                            .text_body()
+                            .text_color(theme::ink())
+                            .child(SharedString::from(users.to_string()))
+                            .into_any_element(),
+                    ],
+                    selected: self.kc.selected == Some(id),
+                    on_click: Some(Box::new(move |_, _, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.kc.selected = Some(id);
+                            this.kc.copied = None;
+                            cx.notify();
+                        });
+                    })),
+                }
+            })
+            .collect();
+        table(&columns, rows)
     }
 
     fn kc_public_key(&self, data: &VaultData, key: &StoredKey, cx: &mut Context<Self>) -> Div {
@@ -519,20 +478,7 @@ impl Workspace {
     fn kc_generate_panel(&self, cx: &mut Context<Self>) -> Div {
         let kind = KeyKind::ALL[self.kc.gen_kind];
         let generating = self.kc.generating;
-        div()
-            .w(px(ASIDE))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            .px(theme::SPACE_5)
-            .py(px(28.))
-            .bg(theme::panel())
-            .border_l_1()
-            .border_color(theme::line())
-            .shadow(theme::shadow_panel())
-            .child(div().text_heading().text_color(theme::ink()).child("Generate key"))
+        side_panel(ASIDE, "Generate key")
             // flex_none: in this full-height column, field()'s flex_1 would
             // share out the spare height between the fields.
             .child(field("Name", self.kc.gen_name.clone(), self.kc.gen_problem.clone().map(|p| (p, true))).flex_none())
@@ -1023,19 +969,6 @@ impl Workspace {
     fn kc_identities(&self, data: &VaultData, cx: &mut Context<Self>) -> Div {
         let mut identities: Vec<&Identity> = data.identities.iter().collect();
         identities.sort_by_key(|i| i.name.to_lowercase());
-        let card = |id: SharedString| {
-            div()
-                .id(id)
-                .flex_grow()
-                .flex_basis(px(220.))
-                .min_w(px(220.))
-                .max_w(px(360.))
-                .px(theme::SPACE_4)
-                .py(px(14.))
-                .rounded(theme::RADIUS_LG)
-                .border_1()
-                .cursor_pointer()
-        };
         let cards = identities.iter().map(|identity| {
             let id = identity.id;
             let how = match &identity.auth {
@@ -1060,36 +993,10 @@ impl Workspace {
                     n => format!("{n} hosts"),
                 }
             );
-            card(SharedString::from(format!("kc-identity-{}", id.0)))
-                .bg(theme::card())
-                .border_color(theme::line())
-                .hover(|s| s.bg(theme::tab_hover()))
-                .flex()
-                .flex_col()
-                .gap(theme::SPACE_1)
-                .child(
-                    div()
-                        .text_body()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::ink())
-                        .truncate()
-                        .child(SharedString::from(identity.name.clone())),
-                )
-                .child(div().text_meta().text_color(theme::ink_muted()).truncate().child(SharedString::from(how)))
-                .child(div().text_meta().text_color(theme::ink_faint()).truncate().child(SharedString::from(meta)))
+            identity_card(format!("kc-identity-{}", id.0), identity.name.clone(), how, meta)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_identity(Some(id), window, cx)))
         });
-        let new_card = card("kc-identity-new".into())
-            .border_color(theme::line_strong())
-            .border_dashed()
-            .hover(|s| s.bg(theme::card()))
-            .flex()
-            .items_center()
-            .gap(theme::SPACE_2)
-            .text_body()
-            .text_color(theme::ink_muted())
-            .child(icon("plus", px(16.), theme::ink_muted()))
-            .child("New identity")
+        let new_card = add_card("kc-identity-new", "New identity")
             .on_click(cx.listener(|this, _, window, cx| this.open_identity(None, window, cx)));
         div()
             .flex()
@@ -1235,37 +1142,14 @@ impl Workspace {
                     };
                     let on = checked.get(i).copied().unwrap_or(false);
                     let this = cx.weak_entity();
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(theme::SPACE_3)
-                        .py(theme::SPACE_2)
-                        .child(Checkbox::new(SharedString::from(format!("kc-pick-{i}")), "", on).on_toggle(move |v, _, cx| {
-                            if !enabled {
-                                return;
+                    pick_row(format!("kc-pick-{i}"), format!("{} · {}", f.place, f.name()), detail, on, enabled, move |v, _, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(KcDialog::Pick { checked, .. }) = this.kc.dialog.as_mut() {
+                                checked[i] = v;
                             }
-                            let _ = this.update(cx, |this, cx| {
-                                if let Some(KcDialog::Pick { checked, .. }) = this.kc.dialog.as_mut() {
-                                    checked[i] = v;
-                                }
-                                cx.notify();
-                            });
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .when(!enabled, |d| d.opacity(0.6))
-                                .child(
-                                    div()
-                                        .text_body()
-                                        .text_color(theme::ink())
-                                        .child(SharedString::from(format!("{} · {}", f.place, f.name()))),
-                                )
-                                .child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(detail))),
-                        )
+                            cx.notify();
+                        });
+                    })
                 });
                 let body = if found.is_empty() {
                     div().text_body().text_color(theme::ink_muted()).child(empty.clone()).into_any_element()

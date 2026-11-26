@@ -58,6 +58,10 @@ pub struct HostForm {
     password: Entity<TextField>,
     passphrase: Entity<TextField>,
     key_select: Entity<Select>,
+    /// The host's key was deleted from the vault: the select starts on a
+    /// "Deleted key" placeholder (index 0) rather than quietly picking
+    /// another key.
+    key_missing: bool,
     /// 0 = SSH key, 1 = password, 2 = identity (offered once there is one).
     auth: usize,
     keys: Vec<StoredKey>,
@@ -115,6 +119,16 @@ pub fn route_label(route: holonet_model::Route) -> &'static str {
         holonet_model::Route::Primary => "Primary",
         holonet_model::Route::Tailscale => "Tailscale",
     }
+}
+
+const DELETED_KEY_PROBLEM: &str =
+    "The key this host used was deleted. Choose another key, import one, or sign in with a password.";
+
+/// The Key select's options, after a "Deleted key" placeholder when the
+/// host's own key is gone.
+fn key_options(keys: &[StoredKey], missing: bool) -> Vec<SharedString> {
+    let placeholder = missing.then(|| SharedString::from("Deleted key: choose another"));
+    placeholder.into_iter().chain(keys.iter().map(key_option)).collect()
 }
 
 fn key_option(key: &StoredKey) -> SharedString {
@@ -178,8 +192,11 @@ impl HostForm {
                 .password()
                 .with_text(saved_passphrase.as_ref().map(|s| s.expose().to_string()).unwrap_or_default())
         });
-        let selected = key_id.and_then(|id| keys.iter().position(|k| k.id == id)).unwrap_or(0);
-        let key_select = cx.new(|cx| Select::new(cx, keys.iter().map(key_option).collect(), selected).mono());
+        let found = key_id.and_then(|id| keys.iter().position(|k| k.id == id));
+        let key_missing = host.is_some() && auth == 0 && key_id.is_some() && found.is_none();
+        let options = key_options(&keys, key_missing);
+        let selected = found.map_or(0, |i| i + usize::from(key_missing));
+        let key_select = cx.new(|cx| Select::new(cx, options, selected).mono());
         // Hosts that already go through this one are left out: choosing one
         // would close a loop.
         let own = host.as_ref().map(|h| h.id);
@@ -252,6 +269,7 @@ impl HostForm {
             password,
             passphrase,
             key_select,
+            key_missing,
             auth,
             keys,
             identities,
@@ -273,7 +291,8 @@ impl HostForm {
     }
 
     fn selected_key(&self, cx: &Context<Self>) -> Option<&StoredKey> {
-        self.keys.get(self.key_select.read(cx).selected())
+        let index = self.key_select.read(cx).selected().checked_sub(usize::from(self.key_missing))?;
+        self.keys.get(index)
     }
 
     fn selected_identity(&self, cx: &Context<Self>) -> Option<&Identity> {
@@ -347,7 +366,11 @@ impl HostForm {
             problems.push("Use a port from 1 to 65535.".into());
         }
         if self.auth == 0 && self.selected_key(cx).is_none() {
-            problems.push("Import a key, or sign in with a password.".into());
+            problems.push(if self.key_missing {
+                DELETED_KEY_PROBLEM.into()
+            } else {
+                "Import a key, or sign in with a password.".into()
+            });
         }
         problems
     }
@@ -436,7 +459,8 @@ impl HostForm {
                 self.keys.len() - 1
             }
         };
-        let options = self.keys.iter().map(key_option).collect();
+        let options = key_options(&self.keys, self.key_missing);
+        let index = index + usize::from(self.key_missing);
         self.key_select.update(cx, |s, cx| s.set_options(options, index, cx));
         self.auth = 0;
         self.test = TestState::Idle;
@@ -550,6 +574,7 @@ impl HostForm {
         } else {
             match self.selected_key(cx) {
                 Some(k) => k.name.clone().into(),
+                None if self.key_missing => "Deleted key".into(),
                 None => "No key yet".into(),
             }
         }
@@ -695,7 +720,14 @@ impl Render for HostForm {
                         .flex_wrap()
                         .items_end()
                         .gap(theme::SPACE_3)
-                        .child(div().flex_grow().min_w(px(240.)).child(field("Key", self.key_select.clone(), None)))
+                        .child(
+                            div().flex_grow().min_w(px(240.)).child(field(
+                                "Key",
+                                self.key_select.clone(),
+                                (self.key_missing && self.selected_key(cx).is_none())
+                                    .then(|| (DELETED_KEY_PROBLEM.into(), true)),
+                            )),
+                        )
                         .child(import),
                 )
             };

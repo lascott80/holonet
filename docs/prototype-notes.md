@@ -1309,3 +1309,49 @@ fmt, clippy, and the unit tests (34, 15, 12, 7, 13 and 16) pass.
 - The prompt focus workaround was not needed; every prompt opened in front.
 
 fmt, clippy, and the unit tests (35, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 9: wrap-up (25 Nov 2026)
+
+**Removed:**
+- The phase 0 spikes: `holonet-app` examples `m4_hello`, `m4_lock`, `m4_tailscale`, and `holonet-ssh` examples `m4_jump`, `m4_keygen`, `m4_ppk` (the `.ppk` fixtures and their tests cover what `m4_ppk` checked).
+- The test seeders `m4_routes_seed`, `m4_jump_seed`, `m4_idle_seed`.
+- `holonet-app`'s dev-dependencies, which only the spikes used.
+- **Kept:** `holonet-net`'s `ts_relay` (the relay for testing routes) and `net_check`, both listed in `CLAUDE.md`.
+
+**Fixed:**
+- **A host whose key was deleted** opened in the form with the first key selected, and saving would quietly switch it to that key.
+  - The Key select now starts on "Deleted key: choose another".
+  - The field says "The key this host used was deleted. Choose another key, import one, or sign in with a password.", and saving is blocked until a key is chosen.
+  - The summary says "Deleted key".
+- **App shortcuts from a pane with nothing to focus** (connecting, a card, a failure): a pane now has its own focus handle on its root.
+  - It takes focus in those states, and when its terminal stops being drawn while focused.
+  - So Ctrl Shift T and the others dispatch from inside the pane. A focused terminal in a hidden tab, or one that is no longer drawn, could not dispatch them; this is the likely cause of phase 6's one-off "Ctrl Shift T did nothing".
+  - After the fix: a connected wsl-a tab, then a ts-skip tab failing with "Not reachable", then Ctrl Shift T opened the host picker. The original failure was never reproduced, so this checks the fix, not the cause.
+
+**Gallery:**
+- The Keychain controls moved into `ui/lists.rs`, which the Keychain page uses too: `table` with `TableColumn`/`TableRow` and `name_cell`, `identity_card` and `add_card`, `pick_row`, and `side_panel`.
+- `--gallery` has a Keychain section:
+  - a three-row table, with the row clicked selected and a "No passphrase" row in `warn`
+  - two identity cards and the dashed "New identity" card
+  - the import list with a checked, an unchecked and a disabled row
+  - the Generate key side panel
+
+**Done check, from a clean profile** (a new throwaway vault, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Generate an Ed25519 key, install it on a host, sign in with it | Generated `done-ed25519` with a passphrase saved in the vault. Added done-a (127.0.0.1:2222, password), connected once to trust its key, then Install on host: "Installed done-ed25519 on done-a." Switched done-a to the key: connected, status bar "Key done-ed25519". The line was removed from the test account's `authorized_keys` afterwards |
+| Import keys from a file, `~/.ssh`, and WSL | File: `.dev/holotest_rsa` imported ("RSA 3072, No passphrase"). `~/.ssh`: the picker said "No private keys in …\.ssh" (this profile has none now; phase 4 imported from it). WSL: the picker listed the Ubuntu distribution's `id_ed25519`, and was cancelled, because that is the owner's real key |
+| Tailscale fallback, and the pane says which route | done-ts (primary 192.0.2.1, this PC's Tailscale address through `ts_relay`, Automatic): "No answer from 192.0.2.1 after 3 s", "Opening TCP connection to …:2222 over Tailscale", then "Connected over Tailscale" |
+| Through a jump host, both host keys checked | done-behind (localhost, jump host done-a): "done-a: Host key verified against Known hosts", then the prompt for done-behind's own key. Connected, "Through done-a" |
+| The vault locks after the idle time and when Windows locks, and Hello unlocks it | Lock now with four sessions: "4 sessions are open…"; the password unlocked and the sessions were still connected. Idle lock, Windows lock and Hello unlock (also from a fresh start) were checked live in phase 8, with the owner, on this build's code |
+
+fmt, clippy, the unit tests (35, 15, 12, 7, 13 and 16) and the WSL integration tests (13) pass.
+
+**Milestone 4 is done.**
+
+Carried forward, not tested:
+- Hello on a PC without Hello set up (the disabled switch).
+- A jump host reached over Tailscale.
+- Chains of more than one jump host, live.
+- An identity whose key was deleted opens its form with the first key selected. This is the same issue fixed above for hosts; recorded for milestone 5.

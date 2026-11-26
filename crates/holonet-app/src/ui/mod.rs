@@ -2,6 +2,7 @@
 //! in docs/design/components. Stateless controls live here; the text field and
 //! select keep state and have their own modules.
 
+pub mod lists;
 pub mod select;
 pub mod slider;
 pub mod text_field;
@@ -14,6 +15,7 @@ use gpui::{
 use crate::assets;
 use crate::theme::{self, TypeStyles};
 
+pub use lists::{TableColumn, TableRow, add_card, identity_card, name_cell, pick_row, side_panel, table};
 pub use select::{Select, SelectEvent};
 pub use slider::{Slider, SliderEvent};
 pub use text_field::{TextField, TextFieldEvent};

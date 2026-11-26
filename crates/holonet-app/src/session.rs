@@ -315,6 +315,10 @@ pub struct Pane {
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
     focus_pending: bool,
+    /// Held while no field or terminal in the pane can take focus
+    /// (connecting, a card, a failure), so app shortcuts such as Ctrl Shift
+    /// T still dispatch from inside the pane.
+    focus_handle: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -394,6 +398,7 @@ impl Pane {
             info: SessionInfo::default(),
             attempt: 0,
             focus_pending: false,
+            focus_handle: cx.focus_handle(),
             active: true,
             alone: true,
             reconnect: None,
@@ -424,7 +429,7 @@ impl Pane {
         match &self.state {
             State::Connected | State::Ended(_) => self.terminal.read(cx).focus(window),
             State::Secret { field, .. } => field.read(cx).focus(window),
-            _ => {}
+            _ => window.focus(&self.focus_handle),
         }
     }
 
@@ -1909,6 +1914,12 @@ impl Render for Pane {
         if std::mem::take(&mut self.focus_pending) {
             self.focus(window, cx);
         }
+        // A terminal that is no longer drawn (the pane failed, or shows a
+        // card) cannot dispatch keys: hand its focus to the pane.
+        let terminal_shown = matches!(self.state, State::Connected | State::Ended(_)) || self.reconnect.is_some();
+        if !terminal_shown && self.terminal.read(cx).is_focused(window) {
+            window.focus(&self.focus_handle);
+        }
         let color = theme::no_group();
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
@@ -1980,6 +1991,7 @@ impl Render for Pane {
         };
 
         div()
+            .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .flex_col()

@@ -104,7 +104,7 @@ Each phase ends with a commit and a check.
 | 6 | **Routes** *(done; tested through a relay on this PC's Tailscale address)*: host form, detail and cards, the connecting, timed-out, reconnecting and Tailscale-not-running states, the fallback wait setting | Unreachable primary falls back to Tailscale; Primary-only shows "Try Tailscale"; Tailscale stopped is reported |
 | 7 | **Jump hosts in panes** *(done; tested through the WSL server as its own jump host)*: host form select, `-J` command, prompts per hop, reconnect through the chain | Connect through a jump host from a clean Known hosts: two key prompts, then a shell; drop and reconnect |
 | 8 | **Lock and Windows Hello** *(done; Hello unlock checked by the owner, also from a fresh start)*: idle and Windows-lock locking, the Locked screen, Hello unlock and the password fallback, the Settings switch | Idle lock, Windows lock (Win L) and Hello unlock, each with a session open that survives |
-| 9 | **Wrap-up:** notes, `CLAUDE.md`, the done check above from a clean profile, PR | Done check passes |
+| 9 | **Wrap-up** *(done; done check passed from a clean profile)*: notes, `CLAUDE.md`, the done check above from a clean profile, PR | Done check passes |
 
 ## Undrawn states I will draw in the design system's style
 
