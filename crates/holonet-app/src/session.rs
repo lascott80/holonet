@@ -338,6 +338,9 @@ pub struct Pane {
     reconnect: Option<Reconnect>,
     /// Waits for and starts the next reconnect attempt.
     reconnect_task: Option<gpui::Task<()>>,
+    /// The host's startup snippet has had its one chance: it is sent after
+    /// the shell first opens and never replayed (decisions.md).
+    startup_done: bool,
     /// The last sleep, wake or network change, and when.
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
@@ -448,6 +451,7 @@ impl Pane {
             alone: true,
             reconnect: None,
             reconnect_task: None,
+            startup_done: false,
             disturbance: None,
             _subscriptions: subscriptions,
         };
@@ -1157,6 +1161,39 @@ impl Pane {
         cx.notify();
     }
 
+    /// Send the host's startup snippet, once per pane: not after a
+    /// reconnect, since commands are never replayed (decisions.md).
+    fn run_startup_snippet(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.startup_done, true) {
+            return;
+        }
+        let Some(snippet) = self.app.upgrade().and_then(|app| app.read(cx).startup_snippet(self.host.id, cx)) else {
+            return;
+        };
+        let name = snippet.display_name().to_string();
+        let variables = snippet.variables();
+        // Values and the confirmation are asked in a popup, which a pane
+        // that just connected does not open by itself.
+        let skipped = if !variables.is_empty() {
+            Some(format!("it asks for {}", variables.join(", ")))
+        } else if snippet.confirm {
+            Some("it asks before running".to_string())
+        } else {
+            None
+        };
+        match skipped {
+            Some(why) => {
+                let line =
+                    format!("\x1b[2m-- The startup snippet \u{201c}{name}\u{201d} was not run: {why}. --\x1b[0m\r\n");
+                self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
+            }
+            None => {
+                let text = snippet.input(&Default::default());
+                self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+            }
+        }
+    }
+
     fn finish(&mut self, result: Result<(Session, Opened), ConnectError>, cx: &mut Context<Self>) {
         match result {
             Ok((session, opened)) => {
@@ -1181,7 +1218,10 @@ impl Pane {
                 );
                 self.session = Some(Arc::new(session));
                 match opened {
-                    Opened::Shell(shell) => self.terminal.update(cx, |t, cx| t.attach(shell, cx)),
+                    Opened::Shell(shell) => {
+                        self.terminal.update(cx, |t, cx| t.attach(shell, cx));
+                        self.run_startup_snippet(cx);
+                    }
                     Opened::Files(remote) => {
                         let files = match self.files.clone() {
                             Some(files) => files,

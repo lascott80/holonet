@@ -232,6 +232,12 @@ impl HolonetApp {
             .then(|| group.display_name().to_string().into())
     }
 
+    /// A host's startup snippet as the vault has it now.
+    pub fn startup_snippet(&self, host: holonet_model::HostId, cx: &App) -> Option<holonet_model::Snippet> {
+        let data = self.vault_data(cx)?;
+        data.host(host)?.startup_snippet.and_then(|id| data.snippet(id)).cloned()
+    }
+
     pub fn group_tag(&self, host: holonet_model::HostId, cx: &App) -> Option<crate::workspace::GroupTag> {
         let data = self.vault_data(cx)?;
         crate::workspace::GroupTag::of(data, data.host(host)?)

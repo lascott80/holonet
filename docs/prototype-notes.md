@@ -2037,3 +2037,52 @@ fmt and clippy `-D warnings` pass.
 One false alarm during the check: a rule stayed "Starting…" and was then refused. The server's `auth.log` showed a wrong password for holotest. The test harness had typed it before the field had focus, and the app had behaved correctly.
 
 fmt, clippy `-D warnings`, the workspace tests and the five WSL forward tests pass.
+
+## Milestone 6, phase 5: Snippets page and startup snippets (26 Nov 2026)
+
+**What was built:**
+
+- **`workspace/snippets.rs`: the Snippets page** (`Snippets.dc.html`), in the side navigation between Port forwarding and Known hosts.
+  - The library is a grid of cards, as many 260px columns as fit beside the editor. Each card shows the name, the command in a mono box, and the run note ("Runs immediately", "Inserts without running", or "Asks before running" in amber).
+  - A filter matches the name or the command, and Escape clears it. With nothing matching it says "No snippets match this filter."; with no snippets at all, a dashed box explains the first step.
+  - The editor has:
+    - Name and Command, with the drawn note ("Holonet asks for service each time this runs. Write a variable as ${name}." or "No variables. …")
+    - "Press Enter after inserting" and "Ask before running"
+    - the startup note ("Startup snippet for a, b and c." or "Not used as a startup snippet.")
+    - Save, Duplicate ("… copy", saved and opened) and Delete
+  - An empty name or command is caught with a message.
+  - Deleting a snippet that a host uses at startup says so ("It is the startup snippet for wsl-a. That host will no longer run a startup snippet."), and the model clears it from those hosts.
+- **Host form:** a Startup snippet select (None, then the library by name) sits between Jump host and Default SFTP folder, as `NewHost.dc.html` draws it. Its help says "Runs once when a terminal first connects." With an empty library it says "Add snippets on the Snippets page."
+- **Sending it:** `Pane::run_startup_snippet` runs when a terminal pane's shell opens. A `startup_done` flag means it runs once per pane:
+  - It is not sent again after a reconnect or a manual retry (`decisions.md`: commands are never replayed).
+  - A new pane, such as a split, is a new shell and runs it once.
+  - The snippet is read from the vault at that moment, so a change on the Snippets page applies to the next pane.
+  - `TerminalView::type_text` writes it as keyboard input, which phase 6's drawer will reuse.
+- **Variables and confirmations at startup:** a pane that has just connected does not open a popup by itself, so in this phase a startup snippet with variables or "Ask before running" is not sent. The pane shows a dim line instead: "The startup snippet "Restart service" was not run: it asks for service." Phase 6 brings the variable and confirmation popups, which can take this over.
+
+**Not as drawn:**
+
+- **Command is a single-line field.** Holonet's text field has no multi-line mode, and the drawn textarea would need one. A pasted line break becomes a space. The model already sends line breaks as Enter, so a multi-line field can be added later without changing the vault.
+- **"Run on" and its run button** are left out until phase 6, where running from a session and on several hosts arrives (no control that does nothing).
+
+**GPUI notes:**
+
+- `ui::field` is `flex_1` so it fills a row. In a short column editor that made each field take a share of the spare height, so the snippet editor's fields are `flex_none`.
+- Text cut with an ellipsis inside a padded block child of a grid item measured as empty and showed only "…". Making the box a flex row, with the text `flex_1().min_w_0().truncate()`, fixed it.
+- The side navigation is 220 logical pixels wide. Card columns are worked out from that, as on the Hosts page, not from screenshot pixels.
+
+**Live check** (WSL server, a copy of the test vault):
+
+| Check | Result |
+| --- | --- |
+| Create three snippets, one with `${service}` and "Ask before running" | Cards and run notes as drawn, two columns |
+| Set wsl-a's startup snippet to one that appends a line to a file, then Save and connect | The file had 1 line; the command shows at the prompt |
+| Kill the host's sshd session | The pane reconnected; still 1 line, and no command at the new prompt |
+| Split right to the same host | A new pane: 2 lines |
+| Startup snippet with a variable | Not sent; the dim note is written at the top of the pane |
+| Delete that snippet | The prompt names wsl-a; the host's startup snippet is cleared |
+| Filter "zzz", then "mark"; Duplicate | "No snippets match this filter."; one card; "Disk usage copy" saved and selected |
+
+The pane writes the note before the server's welcome text arrives, so it ends up above the welcome text. That is acceptable while phase 6 replaces the note with the value prompt.
+
+fmt, clippy `-D warnings` and the workspace tests pass, plus a new test for the startup note wording. The host's home has only its usual files afterwards.

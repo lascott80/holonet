@@ -86,6 +86,9 @@ pub struct HostForm {
     /// "Group": No group, then these groups.
     group_ids: Vec<GroupId>,
     group_select: Entity<Select>,
+    /// "Startup snippet": None, then the library by name.
+    snippet_ids: Vec<holonet_model::SnippetId>,
+    startup_select: Entity<Select>,
     /// Which fields follow the group. The host's own route (`route`), jump
     /// host (`own_jump`) and sign-in are kept either way.
     from_group: FromGroup,
@@ -250,6 +253,22 @@ impl HostForm {
             )
         });
 
+        // NewHost.dc.html: the Startup snippet comes from the library (decisions.md).
+        let mut snippets: Vec<&holonet_model::Snippet> = data.snippets.iter().collect();
+        snippets.sort_by_key(|s| s.display_name().to_lowercase());
+        let snippet_ids: Vec<holonet_model::SnippetId> = snippets.iter().map(|s| s.id).collect();
+        let startup_index =
+            h.startup_snippet.and_then(|s| snippet_ids.iter().position(|id| *id == s)).map_or(0, |i| i + 1);
+        let startup_select = cx.new(|cx| {
+            Select::new(
+                cx,
+                std::iter::once(SharedString::from("None"))
+                    .chain(snippets.iter().map(|s| SharedString::from(s.display_name().to_string())))
+                    .collect(),
+                startup_index,
+            )
+        });
+
         let mut subscriptions = Vec::new();
         for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase, &sftp_folder] {
             subscriptions.push(cx.subscribe_in(f, window, |this: &mut Self, _, e: &TextFieldEvent, window, cx| {
@@ -288,6 +307,7 @@ impl HostForm {
             this.test = TestState::Idle;
             cx.notify();
         }));
+        subscriptions.push(cx.observe(&startup_select, |_: &mut Self, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&key_select, |this: &mut Self, _, cx| {
             this.test = TestState::Idle;
             cx.notify();
@@ -300,6 +320,8 @@ impl HostForm {
         let mut form = Self {
             group_ids,
             group_select,
+            snippet_ids,
+            startup_select,
             from_group: h.from_group,
             own_jump: h.jump_host,
             vault: data.clone(),
@@ -478,6 +500,8 @@ impl HostForm {
         let folder = self.text(&self.sftp_folder, cx);
         host.sftp_folder = (!folder.is_empty()).then_some(folder);
         host.jump_host = self.own_jump;
+        host.startup_snippet =
+            self.startup_select.read(cx).selected().checked_sub(1).and_then(|i| self.snippet_ids.get(i)).copied();
         host.identity = self.selected_identity(cx).map(|i| i.id);
         if let Some(identity) = self.selected_identity(cx) {
             // The summary and equivalent command show who signs in.
@@ -1002,7 +1026,7 @@ impl Render for HostForm {
             self.selected_group(cx).map_or_else(|| "No group".into(), |g| g.display_name().to_string().into());
         let connection = fieldset("Connection")
             // NewHost.dc.html: None, or a saved host.
-            // NewHost.dc.html: Jump host and Default SFTP folder side by side.
+            // NewHost.dc.html: Jump host, Startup snippet and Default SFTP folder side by side.
             .child(
                 div()
                     .flex()
@@ -1019,6 +1043,18 @@ impl Render for HostForm {
                             .child(self.inherit_label("Jump host", FollowField::Jump, cx))
                             .child(self.jump_select.clone()),
                     )
+                    .child(div().flex_grow().flex_basis(px(220.)).max_w(px(360.)).child(field(
+                        "Startup snippet",
+                        self.startup_select.clone(),
+                        Some((
+                            if self.snippet_ids.is_empty() {
+                                "Add snippets on the Snippets page.".into()
+                            } else {
+                                "Runs once when a terminal first connects.".into()
+                            },
+                            false,
+                        )),
+                    )))
                     .child(div().flex_grow().flex_basis(px(220.)).child(field(
                         "Default SFTP folder",
                         self.sftp_folder.clone(),

@@ -457,6 +457,16 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Type text into the shell as if from the keyboard (snippets).
+    /// Returns false when no shell is open.
+    pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.input.is_none() {
+            return false;
+        }
+        self.send(text.as_bytes().to_vec(), cx);
+        true
+    }
+
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let Some(input) = &self.input else { return };
         if input.send(ShellInput::Data(bytes)).is_ok() {

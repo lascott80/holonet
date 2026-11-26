@@ -155,7 +155,7 @@ Each phase ends with a commit and a check.
 | 2 | **Groups** *(done)*: the Groups page, the Hosts page's group list and colours, the host form's Group and "from group" values, colours on tabs and panes | Two groups with different keys and jump hosts; hosts inherit, override and return to the default, and connect with what they show |
 | 3 | **Forwarding engine** *(done)* in `holonet-ssh`: local, remote, dynamic, status and errors | WSL tests for each kind, a port already in use, and a refused remote forward |
 | 4 | **Port forwarding page and background connections** *(done)*: cards, the form, switches, start with host, reconnect, the status bar | One rule of each kind used from this PC (a browser through SOCKS); a killed connection comes back with the rule still active |
-| 5 | **Snippets page and startup snippets:** library, editor, variables, the host form's Startup snippet | A startup snippet runs once on connect and not after a reconnect |
+| 5 | **Snippets page and startup snippets** *(done)*: library, editor, variables, the host form's Startup snippet | A startup snippet runs once on connect and not after a reconnect |
 | 6 | **Snippets in sessions and multi-host runs:** the drawer, the variable and confirmation popups, Run on n hosts, the warn-group question | A snippet with a variable runs in a pane, then on three hosts in one tab |
 | 7 | **Broadcast:** the button, the strip, amber edges, the warn question, Ctrl Shift B | Typing and a paste reach all four panes in order; a closed pane drops out |
 | 8 | **SSH agent, agent forwarding and compression** | Sign in with a key held only by the agent; `ssh-add -l` on the host lists it; compression is negotiated |
