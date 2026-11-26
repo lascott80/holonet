@@ -7,6 +7,10 @@
 //! a secret, [`UiPrompts`] sends the request over a channel to this entity and
 //! waits for the answer, so the network side and the interface never block
 //! each other.
+//!
+//! A host behind jump hosts connects through them ([`crate::hops`]). Each hop
+//! has its own prompts, sign-in state and host key check, and a failure says
+//! which hop it belongs to.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,15 +19,16 @@ use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render,
     SharedString, Subscription, Transformation, WeakEntity, Window, div, percentage, prelude::*, px,
 };
-use holonet_model::{Auth, Host, Route, Secret, StoredKey, Timestamp, UnknownHostKeys};
+use holonet_model::{Auth, Host, JumpProblem, Route, Secret, StoredKey, Timestamp, UnknownHostKeys};
 use holonet_net::{PlanNote, PlanProblem, Via};
 use holonet_ssh::{
-    BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KeyStatus, PresentedKey, Prompts, PtySize,
-    SecretRequest, Session, SessionInfo, Shell,
+    BoxFuture, ConnectError, ConnectOptions, HostKeyDecision, KeyStatus, PresentedKey, Prompts, PtySize, SecretRequest,
+    Session, SessionInfo, Shell,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::HolonetApp;
+use crate::hops::{self, Hop, RouteEvent, Routed};
 use crate::host_form::describe_error;
 use crate::shell::TabState;
 use crate::terminal::GridSize;
@@ -33,9 +38,11 @@ use crate::ui::{Button, ButtonKind, Checkbox, TextField, TextFieldEvent, icon};
 
 // ------------------------------------------------------------ the bridge --
 
+/// Requests carry the hop they belong to: an index into the pane's jump
+/// hosts, or their count for the pane's own host.
 enum UiRequest {
-    HostKey(PresentedKey, oneshot::Sender<HostKeyDecision>),
-    Secret(SecretRequest, oneshot::Sender<Option<Secret>>),
+    HostKey(usize, PresentedKey, oneshot::Sender<HostKeyDecision>),
+    Secret(usize, SecretRequest, oneshot::Sender<Option<Secret>>),
     /// The route plan for this attempt: how many addresses, and its notes.
     Plan {
         attempts: usize,
@@ -57,6 +64,12 @@ enum Done {
     Connect(Box<Result<(Session, Shell), ConnectError>>),
 }
 
+/// "the jump host x" at the start of a sentence.
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+}
+
 /// A sentence continued after "but": its first letter lowered, except
 /// when it starts with a name ("Tailscale …").
 fn lower_first(text: &str) -> String {
@@ -69,29 +82,49 @@ fn lower_first(text: &str) -> String {
     }
 }
 
-/// The address could not be reached at all, so the next address in the
-/// route plan is worth trying.
-fn unreachable(e: &ConnectError) -> bool {
-    matches!(
-        e,
-        ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) | ConnectError::TimedOut(_)
-    )
+/// [`Prompts`] that forwards each question to the session tab, naming the
+/// hop it comes from.
+struct UiPrompts {
+    tx: mpsc::UnboundedSender<UiRequest>,
+    hop: usize,
 }
-
-/// [`Prompts`] that forwards each question to the session tab.
-struct UiPrompts(mpsc::UnboundedSender<UiRequest>);
 
 impl Prompts for UiPrompts {
     fn host_key(&self, key: PresentedKey) -> BoxFuture<HostKeyDecision> {
         let (tx, rx) = oneshot::channel();
-        let sent = self.0.send(UiRequest::HostKey(key, tx)).is_ok();
+        let sent = self.tx.send(UiRequest::HostKey(self.hop, key, tx)).is_ok();
         Box::pin(async move { if sent { rx.await.unwrap_or(HostKeyDecision::Stop) } else { HostKeyDecision::Stop } })
     }
 
     fn secret(&self, request: SecretRequest) -> BoxFuture<Option<Secret>> {
         let (tx, rx) = oneshot::channel();
-        let sent = self.0.send(UiRequest::Secret(request, tx)).is_ok();
+        let sent = self.tx.send(UiRequest::Secret(self.hop, request, tx)).is_ok();
         Box::pin(async move { if sent { rx.await.ok().flatten() } else { None } })
+    }
+}
+
+/// One hop's sign-in state in a pane.
+#[derive(Default)]
+struct SignIn {
+    /// Ask for the password even if one is saved (after it was refused).
+    ask_password: bool,
+    /// Ask for the passphrase even if one is saved (after it was wrong).
+    ask_passphrase: bool,
+    /// A typed password (true) or passphrase to save after a successful sign-in.
+    pending_save: Option<(bool, Secret)>,
+    /// The attempt used a password saved in the vault (for the wording of
+    /// "The server refused the saved password").
+    used_saved_password: bool,
+    /// A password (true) or passphrase typed during this attempt, and the one
+    /// that worked, kept in memory so reconnecting does not ask again. Never
+    /// saved unless "Save in the encrypted vault" was ticked.
+    typed: Option<(bool, Secret)>,
+    remembered: Option<(bool, Secret)>,
+}
+
+impl SignIn {
+    fn remembered(&self, password: bool) -> Option<Secret> {
+        self.remembered.as_ref().filter(|(p, _)| *p == password).map(|(_, s)| s.clone())
     }
 }
 
@@ -201,16 +234,19 @@ enum Disturbance {
 enum State {
     Connecting,
     HostKey {
+        hop: usize,
         key: PresentedKey,
         reply: Option<oneshot::Sender<HostKeyDecision>>,
     },
     KeyChanged {
+        hop: usize,
         presented: PresentedKey,
         trusted_key: String,
         trusted_at: Option<Timestamp>,
         expected: bool,
     },
     Secret {
+        hop: usize,
         request: SecretRequest,
         field: Entity<TextField>,
         save: bool,
@@ -250,6 +286,14 @@ pub struct Pane {
     plan_notes: Vec<PlanNote>,
     tried: Vec<(Via, String)>,
     key: Option<StoredKey>,
+    /// The jump hosts in front of this host, first hop first, or why the
+    /// chain cannot be used.
+    jumps: Vec<Hop>,
+    jump_problem: Option<JumpProblem>,
+    /// Each hop's sign-in state: the jump hosts' in order, then this host's.
+    signs: Vec<SignIn>,
+    /// The hop the current failure belongs to.
+    failed_hop: usize,
     runtime: tokio::runtime::Handle,
     limits: Limits,
     state: State,
@@ -257,30 +301,16 @@ pub struct Pane {
     terminal: Entity<TerminalView>,
     session: Option<Arc<Session>>,
     info: SessionInfo,
-    /// Ask for the password even if one is saved (after it was refused).
-    ask_password: bool,
-    /// Ask for the passphrase even if one is saved (after it was wrong).
-    ask_passphrase: bool,
     /// Bumped on every attempt, so stale results are ignored.
     attempt: u64,
-    /// A typed password (true) or passphrase to save after a successful sign-in.
-    pending_save: Option<(bool, Secret)>,
     /// Drawn with the stronger border of the tab's active pane.
     active: bool,
     /// The only pane in its tab: "Close tab" instead of "Close pane".
     alone: bool,
-    /// The attempt used a password saved in the vault (for the wording of
-    /// "The server refused the saved password").
-    used_saved_password: bool,
     /// While reconnecting after a lost connection.
     reconnect: Option<Reconnect>,
     /// Waits for and starts the next reconnect attempt.
     reconnect_task: Option<gpui::Task<()>>,
-    /// A password (true) or passphrase typed during this attempt, and the one
-    /// that worked, kept in memory so reconnecting does not ask again. Never
-    /// saved unless "Save in the encrypted vault" was ticked.
-    typed_secret: Option<(bool, Secret)>,
-    session_secret: Option<(bool, Secret)>,
     /// The last sleep, wake or network change, and when.
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
@@ -313,6 +343,7 @@ impl Pane {
         app: WeakEntity<HolonetApp>,
         host: Host,
         key: Option<StoredKey>,
+        jumps: Result<Vec<Hop>, JumpProblem>,
         runtime: tokio::runtime::Handle,
         limits: Limits,
         size: GridSize,
@@ -335,20 +366,25 @@ impl Pane {
             }
             cx.notify();
         })];
-        let address = match host.effective_route() {
-            Route::Tailscale => host.tailscale().unwrap_or(host.address.trim()).to_string(),
-            _ => host.address.trim().to_string(),
+        let (jumps, jump_problem) = match jumps {
+            Ok(jumps) => (jumps, None),
+            Err(problem) => (Vec::new(), Some(problem)),
         };
         let mut tab = Self {
             app,
             host,
             route_override: None,
             via: None,
-            address,
+            // Set by `start`.
+            address: String::new(),
             plan_len: 0,
             plan_notes: Vec::new(),
             tried: Vec::new(),
             key,
+            signs: (0..=jumps.len()).map(|_| SignIn::default()).collect(),
+            failed_hop: jumps.len(),
+            jumps,
+            jump_problem,
             runtime,
             limits,
             state: State::Connecting,
@@ -356,18 +392,12 @@ impl Pane {
             terminal,
             session: None,
             info: SessionInfo::default(),
-            ask_password: false,
-            ask_passphrase: false,
             attempt: 0,
-            pending_save: None,
             focus_pending: false,
             active: true,
             alone: true,
-            used_saved_password: false,
             reconnect: None,
             reconnect_task: None,
-            typed_secret: None,
-            session_secret: None,
             disturbance: None,
             _subscriptions: subscriptions,
         };
@@ -400,24 +430,93 @@ impl Pane {
 
     fn note(&mut self, line: impl Into<SharedString>, warn: bool) {
         self.log.push((line.into(), warn));
-        if self.log.len() > 8 {
+        // Two more lines for each jump host's key check and sign-in.
+        if self.log.len() > 8 + 2 * self.jumps.len() {
             self.log.remove(0);
         }
     }
 
     /// "Offering password for root", once the host key is settled.
-    fn note_offer(&mut self) {
-        let user = if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
-        let line = match (&self.host.auth, &self.key) {
+    fn note_offer(&mut self, hop: usize) {
+        let host = self.hop_host(hop);
+        let user = if host.username.is_empty() { "this user".to_string() } else { host.username.clone() };
+        let line = match (&host.auth, self.hop_key(hop)) {
             (Auth::Key { .. }, Some(key)) => format!("Offering key {} for {user}", key.name),
             _ => format!("Offering password for {user}"),
         };
+        let line = format!("{}{line}", self.hop_prefix(hop));
         self.note(line, false);
+    }
+
+    // -------------------------------------------------------------- hops --
+
+    /// The hop index of this pane's own host (after its jump hosts).
+    fn target_hop(&self) -> usize {
+        self.jumps.len()
+    }
+
+    fn is_jump(&self, hop: usize) -> bool {
+        hop < self.jumps.len()
+    }
+
+    fn hop_host(&self, hop: usize) -> &Host {
+        self.jumps.get(hop).map(|j| &j.host).unwrap_or(&self.host)
+    }
+
+    fn hop_key(&self, hop: usize) -> Option<&StoredKey> {
+        match self.jumps.get(hop) {
+            Some(j) => j.key.as_ref(),
+            None => self.key.as_ref(),
+        }
+    }
+
+    fn hop_name(&self, hop: usize) -> String {
+        self.hop_host(hop).display_name().to_string()
+    }
+
+    /// "the jump host bastion-east" or "app-01".
+    fn hop_title(&self, hop: usize) -> String {
+        if self.is_jump(hop) { format!("the jump host {}", self.hop_name(hop)) } else { self.hop_name(hop) }
+    }
+
+    /// "bastion-east: " before a log line, when there are several hops.
+    fn hop_prefix(&self, hop: usize) -> String {
+        if self.jumps.is_empty() { String::new() } else { format!("{}: ", self.hop_name(hop)) }
+    }
+
+    /// The host the route plan applies to: the first jump host, or this one.
+    fn route_host(&self) -> &Host {
+        self.hop_host(0)
+    }
+
+    /// The pane's host was edited, or one of its jump hosts.
+    pub fn depends_on(&self, id: holonet_model::HostId) -> bool {
+        self.host.id == id || self.jumps.iter().any(|j| j.host.id == id)
+    }
+
+    /// The host to open from "Edit host": the hop that failed.
+    pub fn host_to_edit(&self) -> holonet_model::HostId {
+        match &self.state {
+            State::Failed { .. } => self.hop_host(self.failed_hop).id,
+            _ => self.host.id,
+        }
+    }
+
+    /// The Known hosts entry to review: the address whose key changed.
+    pub fn review_address(&self) -> (String, u16) {
+        match &self.state {
+            State::KeyChanged { presented, .. } => (presented.host.clone(), presented.port),
+            _ => (self.host.address.trim().to_string(), self.host.port),
+        }
     }
 
     /// The address a connection starts with: the Tailscale address when the
     /// route (or "Try Tailscale") is Tailscale, otherwise the primary one.
+    /// Behind jump hosts, the address they reach this host at.
     fn initial_address(&self) -> String {
+        if !self.jumps.is_empty() {
+            return hops::reach_address(&self.host);
+        }
         match self.route_override.unwrap_or(self.host.effective_route()) {
             Route::Tailscale => self.host.tailscale().unwrap_or(self.host.address.trim()).to_string(),
             _ => self.host.address.trim().to_string(),
@@ -458,10 +557,6 @@ impl Pane {
         }
     }
 
-    fn session_secret(&self, password: bool) -> Option<Secret> {
-        self.session_secret.as_ref().filter(|(p, _)| *p == password).map(|(_, s)| s.clone())
-    }
-
     /// Sleep, wake or a network change (from the app's system listener).
     pub fn on_system_event(&mut self, event: crate::platform::SystemEvent, cx: &mut Context<Self>) {
         use crate::platform::SystemEvent;
@@ -497,6 +592,15 @@ impl Pane {
             (Some(Disturbance::Network), _) => "Connection lost after a network change.".into(),
             (None, holonet_ssh::LostReason::NoResponse) => "The server stopped answering.".into(),
             (None, holonet_ssh::LostReason::ServerDisconnected(_)) => "The server closed the connection.".into(),
+            (None, holonet_ssh::LostReason::JumpHost { host, .. }) => {
+                let name = self
+                    .jumps
+                    .iter()
+                    .find(|j| j.host.address.trim() == host || j.host.tailscale() == Some(host.as_str()))
+                    .map(|j| j.name().to_string())
+                    .unwrap_or_else(|| host.clone());
+                format!("The connection to the jump host {name} was lost.").into()
+            }
             (None, _) => "The connection was lost.".into(),
         };
         self.reconnect =
@@ -563,11 +667,14 @@ impl Pane {
     /// anything else (a refused sign-in) ends reconnecting and shows the
     /// usual failure. Returns true when handled here.
     fn reconnect_failed(&mut self, e: &ConnectError, cx: &mut Context<Self>) -> bool {
-        let retry = matches!(
-            e,
-            ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) | ConnectError::TimedOut(_)
-        ) || (matches!(e, ConnectError::HostKeyRejected)
-            && self.app.upgrade().is_some_and(|a| !a.read(cx).is_unlocked()));
+        // A jump host's error is judged by what happened at that hop, and
+        // the banner names that hop.
+        let (e, wrappers) = e.innermost();
+        let prefix = self.hop_prefix(self.jumps.len().saturating_sub(wrappers.len()));
+        let retry = hops::unreachable(e)
+            || matches!(e, ConnectError::JumpCouldNotReach { .. })
+            || (matches!(e, ConnectError::HostKeyRejected)
+                && self.app.upgrade().is_some_and(|a| !a.read(cx).is_unlocked()));
         if !retry {
             self.reconnect = None;
             self.reconnect_task = None;
@@ -575,7 +682,7 @@ impl Pane {
         }
         let message: SharedString = match e {
             ConnectError::HostKeyRejected => "Unlock the vault so Holonet can check the host key.".into(),
-            other => describe_error(other).into(),
+            other => format!("{prefix}{}", describe_error(other)).into(),
         };
         if let Some(r) = self.reconnect.as_mut() {
             r.last_error = Some(message);
@@ -592,23 +699,36 @@ impl Pane {
 
     /// The host was edited from this pane's failure ("Edit host", then "Save
     /// and connect"): try again here with the new details.
-    pub fn retry_with(&mut self, host: Host, key: Option<StoredKey>, limits: Limits, cx: &mut Context<Self>) {
+    pub fn retry_with(
+        &mut self,
+        host: Host,
+        key: Option<StoredKey>,
+        jumps: Result<Vec<Hop>, JumpProblem>,
+        limits: Limits,
+        cx: &mut Context<Self>,
+    ) {
         self.host = host;
         self.route_override = None;
         self.key = key;
+        (self.jumps, self.jump_problem) = match jumps {
+            Ok(jumps) => (jumps, None),
+            Err(problem) => (Vec::new(), Some(problem)),
+        };
+        self.signs = (0..=self.jumps.len()).map(|_| SignIn::default()).collect();
         self.limits = limits;
-        self.ask_password = false;
-        self.ask_passphrase = false;
         self.start(cx);
         cx.notify();
     }
 
-    /// Start (or restart) the connection.
+    /// Start (or restart) the connection, through the jump hosts if any.
     fn start(&mut self, cx: &mut Context<Self>) {
         self.attempt += 1;
         let attempt = self.attempt;
-        self.pending_save = None;
-        self.typed_secret = None;
+        for sign in &mut self.signs {
+            sign.pending_save = None;
+            sign.typed = None;
+        }
+        self.failed_hop = self.target_hop();
         self.state = State::Connecting;
         self.session = None;
         // Each attempt starts a fresh log (ConnectStates.dc.html).
@@ -620,98 +740,93 @@ impl Pane {
         // `via` keeps the last attempt's, so a reconnect over Tailscale still
         // says so.
         self.address = self.initial_address();
-        self.used_saved_password = matches!(&self.host.auth, Auth::Password { saved: Some(_) }) && !self.ask_password;
+        if let Some(problem) = self.jump_problem {
+            let name = self.host.display_name().to_string();
+            let title = match problem {
+                JumpProblem::Loop => format!("The jump hosts for {name} lead back to it"),
+                JumpProblem::Missing => format!("A jump host for {name} was deleted"),
+            };
+            self.fail(Failure::Other, title, "Edit the host to choose another jump host, or None.");
+            return;
+        }
 
-        let credential = match (&self.host.auth, &self.key) {
-            (Auth::Password { saved }, _) => Credential::Password(if self.ask_password {
-                None
-            } else {
-                saved.clone().or_else(|| self.session_secret(true))
-            }),
-            (Auth::Key { .. }, Some(key)) => Credential::Key {
-                name: key.name.clone(),
-                private_key: key.private_key.clone(),
-                passphrase: if self.ask_passphrase {
-                    None
-                } else {
-                    key.saved_passphrase.clone().or_else(|| self.session_secret(false))
-                },
-            },
-            (Auth::Key { .. }, None) => {
-                self.fail(
-                    Failure::Other,
-                    "The key for this host is missing",
-                    "It is no longer in the vault. Edit the host to choose or import a key.",
-                );
-                return;
-            }
-        };
         // Not read from the app: `start` runs while the app creates this tab.
-        let limits = (self.limits.connect_timeout, self.limits.keep_alive);
+        let (connect_timeout, keep_alive) = (self.limits.connect_timeout, self.limits.keep_alive);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let opts = ConnectOptions {
-            host: self.host.address.trim().to_string(),
-            port: self.host.port,
-            user: self.host.username.clone(),
-            credential,
-            connect_timeout: limits.0,
-            keep_alive: limits.1,
-            prompts: Arc::new(UiPrompts(tx.clone())),
-            // Jump hosts join panes in milestone 4 phase 7.
-            jump: None,
-        };
-        let ui_tx = tx;
+        let target = Hop { host: self.host.clone(), key: self.key.clone(), keep_alive };
+        let mut steps = Vec::new();
+        let mut missing = None;
+        for (hop, step) in self.jumps.iter().chain(std::iter::once(&target)).enumerate() {
+            let sign = &mut self.signs[hop];
+            sign.used_saved_password =
+                matches!(&step.host.auth, Auth::Password { saved: Some(_) }) && !sign.ask_password;
+            let sign = &*sign;
+            let Some(credential) = step.credential(sign.ask_password, sign.ask_passphrase, |p| sign.remembered(p))
+            else {
+                let (title, body) = if hop == self.jumps.len() {
+                    (
+                        "The key for this host is missing".to_string(),
+                        "It is no longer in the vault. Edit the host to choose or import a key.".to_string(),
+                    )
+                } else {
+                    let name = step.name();
+                    (
+                        format!("The key for the jump host {name} is missing"),
+                        format!("It is no longer in the vault. Edit {name} to choose or import a key."),
+                    )
+                };
+                missing = Some((hop, title, body));
+                break;
+            };
+            steps.push(ConnectOptions {
+                // The first hop's address comes from the route plan.
+                host: hops::reach_address(&step.host),
+                port: step.host.port,
+                user: step.host.username.clone(),
+                credential,
+                connect_timeout,
+                keep_alive: step.keep_alive,
+                prompts: Arc::new(UiPrompts { tx: tx.clone(), hop }),
+                jump: None,
+            });
+        }
+        if let Some((hop, title, body)) = missing {
+            self.failed_hop = hop;
+            self.fail(Failure::Other, title, body);
+            return;
+        }
+        let opts = hops::link(steps);
         let size = self.terminal.read(cx).grid_size();
         let (done_tx, done_rx) = oneshot::channel::<Done>();
-        let (host, route_override, fallback_wait) = (self.host.clone(), self.route_override, self.limits.fallback_wait);
-        let ui = ui_tx;
+        let route_host = self.route_host().clone();
+        let (route_override, fallback_wait, jumps) = (self.route_override, self.limits.fallback_wait, self.jumps.len());
+        let ui = tx;
         self.runtime.spawn(async move {
-            // The route plan (decisions.md, Connection and Tailscale): which
-            // addresses to try, and how long to wait on each.
-            let tailscale = holonet_net::tailscale::status().await;
-            let skip = holonet_net::primary_unreachable(&host.address, tailscale.is_running());
-            let plan = match holonet_net::plan(&host, route_override, &tailscale, skip, fallback_wait) {
-                Ok(plan) => plan,
-                Err(problem) => {
-                    let _ = done_tx.send(Done::Plan(problem));
-                    return;
-                }
+            let routed = hops::connect_by_route(opts, &route_host, route_override, fallback_wait, jumps, |event| {
+                let _ = ui.send(match event {
+                    RouteEvent::Plan { attempts, notes } => UiRequest::Plan { attempts, notes },
+                    RouteEvent::Attempt { via, address } => UiRequest::Attempt { via, address },
+                    RouteEvent::Unreachable(line) => UiRequest::Note(line, true),
+                });
+            })
+            .await;
+            let done = match routed {
+                Routed::Plan(problem) => Done::Plan(problem),
+                Routed::Connect(result) => match *result {
+                    Err(e) => Done::Connect(Box::new(Err(e))),
+                    Ok(session) => {
+                        let shell = session.open_shell(PtySize::cells(size.cols as u16, size.rows as u16)).await;
+                        Done::Connect(Box::new(match shell {
+                            Ok(shell) => Ok((session, shell)),
+                            Err(e) => {
+                                let _ = session.close().await;
+                                Err(ConnectError::Protocol(format!("{e:#}")))
+                            }
+                        }))
+                    }
+                },
             };
-            let _ = ui.send(UiRequest::Plan { attempts: plan.attempts.len(), notes: plan.notes.clone() });
-            let count = plan.attempts.len();
-            for (i, attempt) in plan.attempts.into_iter().enumerate() {
-                let last = i + 1 == count;
-                let _ = ui.send(UiRequest::Attempt { via: attempt.via, address: attempt.address.clone() });
-                let mut opts = opts.clone();
-                opts.host = attempt.address.clone();
-                if let Some(wait) = attempt.give_up_after {
-                    // Only the TCP connection is limited: prompts can take as
-                    // long as the person needs.
-                    opts.connect_timeout = wait;
-                }
-                let result = async {
-                    let session = Session::connect(opts).await?;
-                    let shell = session
-                        .open_shell(PtySize::cells(size.cols as u16, size.rows as u16))
-                        .await
-                        .map_err(|e| ConnectError::Protocol(format!("{e:#}")))?;
-                    Ok((session, shell))
-                }
-                .await;
-                match result {
-                    Err(e) if !last && unreachable(&e) => {
-                        let why = match &e {
-                            ConnectError::TimedOut(s) => format!("No answer from {} after {s} s", attempt.address),
-                            other => format!("{}: {}", attempt.address, describe_error(other)),
-                        };
-                        let _ = ui.send(UiRequest::Note(why, true));
-                    }
-                    result => {
-                        let _ = done_tx.send(Done::Connect(Box::new(result)));
-                        return;
-                    }
-                }
-            }
+            let _ = done_tx.send(done);
         });
 
         // Questions from the connection while it runs.
@@ -747,26 +862,34 @@ impl Pane {
             UiRequest::Plan { attempts, notes } => {
                 self.plan_len = attempts;
                 if notes.contains(&PlanNote::PrimarySkipped) {
-                    self.note(
-                        format!("{} is a private address with no route from this network", self.host.address.trim()),
-                        false,
+                    let line = format!(
+                        "{}{} is a private address with no route from this network",
+                        self.hop_prefix(0),
+                        self.route_host().address.trim()
                     );
+                    self.note(line, false);
                 }
                 self.plan_notes = notes;
             }
             UiRequest::Attempt { via, address } => {
                 self.via = Some(via);
-                self.address = address.clone();
+                // Behind jump hosts the header keeps this host's own address.
+                if self.jumps.is_empty() {
+                    self.address = address.clone();
+                }
                 self.tried.push((via, address.clone()));
+                let prefix = self.hop_prefix(0);
                 if address.parse::<std::net::IpAddr>().is_err() {
-                    self.note(format!("Resolving {address} …"), false);
+                    self.note(format!("{prefix}Resolving {address} …"), false);
                 }
                 let over = if via == Via::Tailscale { " over Tailscale" } else { "" };
-                self.note(format!("Opening TCP connection to {}{over}", self.target()), false);
+                let port = self.route_host().port;
+                self.note(format!("{prefix}Opening TCP connection to {address}:{port}{over}"), false);
             }
             UiRequest::Note(line, warn) => self.note(line, warn),
-            UiRequest::HostKey(key, reply) => {
-                let aliases = holonet_model::VaultData::other_addresses(&self.host, &key.host);
+            UiRequest::HostKey(hop, key, reply) => {
+                let prefix = self.hop_prefix(hop);
+                let aliases = holonet_model::VaultData::other_addresses(self.hop_host(hop), &key.host);
                 let check =
                     self.app.upgrade().and_then(|app| app.update(cx, |app, cx| app.check_host_key(&key, &aliases, cx)));
                 let Some(check) = check else {
@@ -775,42 +898,51 @@ impl Pane {
                     return;
                 };
                 self.note(
-                    format!("Server host key type: {}", key.public_key.split_whitespace().next().unwrap_or("")),
+                    format!("{prefix}Server host key type: {}", key.public_key.split_whitespace().next().unwrap_or("")),
                     false,
                 );
                 match check.status {
                     KeyStatus::Trusted => {
                         match &check.from_alias {
                             Some(other) => self.note(
-                                format!("Host key matches the one trusted for {other}; trusted for this address too"),
+                                format!(
+                                    "{prefix}Host key matches the one trusted for {other}; trusted for this address too"
+                                ),
                                 false,
                             ),
-                            None => self.note("Host key verified against Known hosts", false),
+                            None => self.note(format!("{prefix}Host key verified against Known hosts"), false),
                         }
-                        self.note_offer();
+                        self.note_offer(hop);
                         let _ = reply.send(HostKeyDecision::Continue);
                     }
                     KeyStatus::Unknown if check.policy == UnknownHostKeys::Refuse => {
                         let _ = reply.send(HostKeyDecision::Stop);
+                        self.failed_hop = hop;
+                        let title = if self.is_jump(hop) {
+                            format!("Holonet refused the unknown host key of {}", self.hop_title(hop))
+                        } else {
+                            "Holonet refused an unknown host key".to_string()
+                        };
                         self.fail(
                             Failure::RefusedUnknown,
-                            "Holonet refused an unknown host key",
+                            title,
                             "Settings are set to refuse servers whose key is not already in Known hosts.",
                         );
                     }
                     KeyStatus::Unknown => {
-                        self.note("Paused: waiting for host key verification", true);
-                        self.state = State::HostKey { key, reply: Some(reply) };
+                        self.note(format!("{prefix}Paused: waiting for host key verification"), true);
+                        self.state = State::HostKey { hop, key, reply: Some(reply) };
                     }
                     KeyStatus::Changed { trusted_key } => {
                         // decisions.md: always stop; never send credentials.
                         let _ = reply.send(HostKeyDecision::Stop);
-                        self.note("Stopped: the host key has changed", true);
+                        self.note(format!("{prefix}Stopped: the host key has changed"), true);
                         if let Some(app) = self.app.upgrade() {
                             let entry = check.from_alias.clone();
                             app.update(cx, |app, cx| app.record_mismatch(&key, entry.as_deref(), cx));
                         }
                         self.state = State::KeyChanged {
+                            hop,
                             presented: key,
                             trusted_key,
                             trusted_at: check.trusted_at,
@@ -819,7 +951,7 @@ impl Pane {
                     }
                 }
             }
-            UiRequest::Secret(request, reply) => {
+            UiRequest::Secret(hop, request, reply) => {
                 let field = cx.new(|cx| TextField::new(cx, "").password());
                 self._subscriptions.push(cx.subscribe(&field, |this: &mut Self, _, e: &TextFieldEvent, cx| match e {
                     TextFieldEvent::Submitted => this.answer_secret(true, cx),
@@ -827,7 +959,7 @@ impl Pane {
                     TextFieldEvent::Changed => {}
                 }));
                 let save = !matches!(request, SecretRequest::Challenge { .. });
-                self.state = State::Secret { request, field, save, reply: Some(reply) };
+                self.state = State::Secret { hop, request, field, save, reply: Some(reply) };
                 self.focus_pending = true;
             }
         }
@@ -835,7 +967,8 @@ impl Pane {
     }
 
     fn answer_host_key(&mut self, decision: &'static str, cx: &mut Context<Self>) {
-        let State::HostKey { key, reply } = &mut self.state else { return };
+        let State::HostKey { hop, key, reply } = &mut self.state else { return };
+        let hop = *hop;
         let key = key.clone();
         let reply = reply.take();
         match decision {
@@ -843,16 +976,16 @@ impl Pane {
                 if let Some(app) = self.app.upgrade() {
                     app.update(cx, |app, cx| app.trust_host_key(&key, cx));
                 }
-                self.note("Trusted: the key is saved in Known hosts", false);
-                self.note_offer();
+                self.note(format!("{}Trusted: the key is saved in Known hosts", self.hop_prefix(hop)), false);
+                self.note_offer(hop);
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
                 self.state = State::Connecting;
             }
             "once" => {
-                self.note("Connecting once: the key is not saved", false);
-                self.note_offer();
+                self.note(format!("{}Connecting once: the key is not saved", self.hop_prefix(hop)), false);
+                self.note_offer(hop);
                 if let Some(r) = reply {
                     let _ = r.send(HostKeyDecision::Continue);
                 }
@@ -869,7 +1002,8 @@ impl Pane {
     }
 
     fn answer_secret(&mut self, ok: bool, cx: &mut Context<Self>) {
-        let State::Secret { request, field, save, reply } = &mut self.state else { return };
+        let State::Secret { hop, request, field, save, reply } = &mut self.state else { return };
+        let hop = *hop;
         let value = field.read(cx).text().to_string();
         let reply = reply.take();
         if !ok || value.is_empty() {
@@ -883,14 +1017,14 @@ impl Pane {
         }
         let secret = Secret::new(value);
         let is_password = matches!(request, SecretRequest::Password { .. });
-        if !matches!(request, SecretRequest::Challenge { .. }) {
-            self.typed_secret = Some((is_password, secret.clone()));
+        let (is_challenge, save) = (matches!(request, SecretRequest::Challenge { .. }), *save);
+        if !is_challenge {
+            self.signs[hop].typed = Some((is_password, secret.clone()));
         }
-        if *save {
+        if save {
             // Saved only once the server accepts it (see `finish`), so a
             // mistyped password never ends up in the vault.
-            let is_password = matches!(request, SecretRequest::Password { .. });
-            self.pending_save = Some((is_password, secret.clone()));
+            self.signs[hop].pending_save = Some((is_password, secret.clone()));
         }
         if let Some(r) = reply {
             let _ = r.send(Some(secret));
@@ -902,9 +1036,6 @@ impl Pane {
     fn finish(&mut self, result: Result<(Session, Shell), ConnectError>, cx: &mut Context<Self>) {
         match result {
             Ok((session, shell)) => {
-                if let Some(typed) = self.typed_secret.take() {
-                    self.session_secret = Some(typed);
-                }
                 if self.reconnect.take().is_some() {
                     self.reconnect_task = None;
                     let time = jiff::Timestamp::now()
@@ -917,25 +1048,43 @@ impl Pane {
                     self.terminal.update(cx, |t, _| t.feed(line.as_bytes()));
                 }
                 self.info = session.info().clone();
-                self.note(format!("Signed in ({})", self.info.auth_method), false);
+                self.note(
+                    format!("{}Signed in ({})", self.hop_prefix(self.target_hop()), self.info.auth_method),
+                    false,
+                );
                 self.session = Some(Arc::new(session));
-                self.ask_password = false;
-                self.ask_passphrase = false;
                 self.terminal.update(cx, |t, cx| t.attach(shell, cx));
                 self.state = State::Connected;
                 self.focus_pending = true;
-                let id = self.host.id;
-                self.host.last_connected_at = Some(Timestamp::now());
-                let save = self.pending_save.take();
-                if let Some((is_password, secret)) = &save {
-                    // Keep this tab's copies of the host and key in step with the vault.
-                    match (&mut self.host.auth, &mut self.key) {
-                        (Auth::Password { saved }, _) if *is_password => *saved = Some(secret.clone()),
-                        (Auth::Key { .. }, Some(key)) if !*is_password => key.saved_passphrase = Some(secret.clone()),
-                        _ => {}
+                // Each hop's typed secret is remembered for reconnecting, and
+                // saved when asked.
+                let mut saves = Vec::new();
+                for (hop, sign) in self.signs.iter_mut().enumerate() {
+                    if let Some(typed) = sign.typed.take() {
+                        sign.remembered = Some(typed);
+                    }
+                    sign.ask_password = false;
+                    sign.ask_passphrase = false;
+                    if let Some((is_password, secret)) = sign.pending_save.take() {
+                        saves.push((hop, is_password, secret));
                     }
                 }
-                let key_id = self.key.as_ref().map(|k| k.id);
+                let mut stored = Vec::new();
+                for (hop, is_password, secret) in saves {
+                    // Keep this tab's copies of the hosts and keys in step with the vault.
+                    let (auth, key) = match self.jumps.get_mut(hop) {
+                        Some(j) => (&mut j.host.auth, &mut j.key),
+                        None => (&mut self.host.auth, &mut self.key),
+                    };
+                    match (auth, key) {
+                        (Auth::Password { saved }, _) if is_password => *saved = Some(secret.clone()),
+                        (Auth::Key { .. }, Some(key)) if !is_password => key.saved_passphrase = Some(secret.clone()),
+                        _ => {}
+                    }
+                    stored.push((self.hop_host(hop).id, self.hop_key(hop).map(|k| k.id), is_password, secret));
+                }
+                let id = self.host.id;
+                self.host.last_connected_at = Some(Timestamp::now());
                 if let Some(app) = self.app.upgrade() {
                     app.update(cx, |app, cx| {
                         app.update_vault(
@@ -943,19 +1092,15 @@ impl Pane {
                                 if let Some(h) = d.host_mut(id) {
                                     h.last_connected_at = Some(Timestamp::now());
                                 }
-                                // A password belongs to the host's identity when it has one.
-                                match save {
-                                    Some((true, secret)) => {
-                                        if let Some(Auth::Password { saved }) = d.sign_in_auth_mut(id) {
+                                for (host, key, is_password, secret) in stored {
+                                    if is_password {
+                                        // A password belongs to the host's identity when it has one.
+                                        if let Some(Auth::Password { saved }) = d.sign_in_auth_mut(host) {
                                             *saved = Some(secret);
                                         }
+                                    } else if let Some(key) = key.and_then(|k| d.key_mut(k)) {
+                                        key.saved_passphrase = Some(secret);
                                     }
-                                    Some((false, secret)) => {
-                                        if let Some(key) = key_id.and_then(|k| d.key_mut(k)) {
-                                            key.saved_passphrase = Some(secret);
-                                        }
-                                    }
-                                    None => {}
                                 }
                             },
                             cx,
@@ -976,59 +1121,84 @@ impl Pane {
                     cx.notify();
                     return;
                 }
-                let name = self.host.display_name().to_string();
-                let user =
-                    if self.host.username.is_empty() { "this user".to_string() } else { self.host.username.clone() };
-                match &e {
+                // Which hop failed: each jump host wraps the error once.
+                let (e, wrappers) = e.innermost();
+                let hop = self.jumps.len().saturating_sub(wrappers.len());
+                self.failed_hop = hop;
+                let name = self.hop_name(hop);
+                let title_name = self.hop_title(hop);
+                let jump = self.is_jump(hop);
+                let host = self.hop_host(hop);
+                let user = if host.username.is_empty() { "this user".to_string() } else { host.username.clone() };
+                let prefix = self.hop_prefix(hop);
+                let key_name = self.hop_key(hop).map(|k| k.name.clone()).unwrap_or_default();
+                let server = if jump { title_name.clone() } else { "the server".to_string() };
+                match e {
                     ConnectError::Resolve { .. } | ConnectError::Refused | ConnectError::Network(_) => {
-                        self.note(describe_error(&e), true);
-                        self.fail(Failure::Network, format!("Holonet could not reach {name}"), describe_error(&e))
+                        self.note(format!("{prefix}{}", describe_error(e)), true);
+                        self.fail(Failure::Network, format!("Holonet could not reach {title_name}"), describe_error(e))
                     }
                     ConnectError::TimedOut(s) => {
-                        self.note(format!("No response after {s} seconds"), true);
-                        let body = self.unanswered_body();
-                        self.fail(Failure::TimedOut, format!("{name} did not answer"), body)
+                        self.note(format!("{prefix}No response after {s} seconds"), true);
+                        let body = if hop == 0 {
+                            self.unanswered_body()
+                        } else {
+                            format!(
+                                "{} got no answer from {name} within {s} seconds. {name} may be down.",
+                                self.hop_name(hop - 1)
+                            )
+                        };
+                        self.fail(Failure::TimedOut, format!("{} did not answer", upper_first(&title_name)), body)
+                    }
+                    ConnectError::JumpCouldNotReach { reason, .. } => {
+                        // Raised while reaching this hop, by the jump host before it.
+                        let via = self.hop_name(hop.saturating_sub(1));
+                        self.note(format!("{via}: could not reach {name}: {reason}"), true);
+                        self.fail(
+                            Failure::Network,
+                            format!("{via} could not reach {name}"),
+                            format!("The jump host {via} answered, but {reason}."),
+                        )
                     }
                     ConnectError::SignInRefused { method, remaining } => {
                         let offered = if remaining.is_empty() { method.to_string() } else { remaining.join(",") };
-                        self.note(format!("Server: Permission denied ({offered})"), true);
+                        self.note(format!("{prefix}Server: Permission denied ({offered})"), true);
                         if *method == "publickey" {
-                            let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
                             self.fail(
                                 Failure::KeyRefused,
-                                format!("The server refused the key {key}"),
+                                format!("{} refused the key {key_name}", upper_first(&server)),
                                 format!(
                                     "The key may not be in the server's authorized_keys for {user}, or the server may not allow key sign-in for this user."
                                 ),
                             )
                         } else {
-                            let title = if self.used_saved_password {
-                                "The server refused the saved password"
-                            } else {
-                                "The server refused the password"
-                            };
+                            let saved = if self.signs[hop].used_saved_password { "saved " } else { "" };
                             self.fail(
                                 Failure::Password,
-                                title,
+                                format!("{} refused the {saved}password", upper_first(&server)),
                                 format!("The password for {user} may have changed, or the server may no longer allow password sign-in."),
                             )
                         }
                     }
                     ConnectError::WrongPassphrase => {
-                        let key = self.key.as_ref().map(|k| k.name.clone()).unwrap_or_default();
-                        self.note(format!("The passphrase did not unlock {key}"), true);
+                        self.note(format!("{prefix}The passphrase did not unlock {key_name}"), true);
                         self.fail(
                             Failure::Passphrase,
                             "The key passphrase is wrong",
-                            "Enter the passphrase again. Holonet has not contacted the server with this key.",
+                            format!("Enter the passphrase for {key_name} again. Holonet has not contacted the server with this key."),
                         )
                     }
                     ConnectError::Cancelled | ConnectError::HostKeyRejected => {
                         cx.emit(SessionEvent::Close);
                     }
                     other => {
-                        self.note(other.to_string(), true);
-                        self.fail(Failure::Other, "The connection failed", other.to_string())
+                        self.note(format!("{prefix}{other}"), true);
+                        let title = if jump {
+                            format!("The connection to {title_name} failed")
+                        } else {
+                            "The connection failed".to_string()
+                        };
+                        self.fail(Failure::Other, title, other.to_string())
                     }
                 }
             }
@@ -1039,7 +1209,8 @@ impl Pane {
     /// Why the host did not answer, with what its routes mean
     /// (ConnectStates.dc.html, "Timed out").
     fn unanswered_body(&self) -> String {
-        let tailscale = self.host.tailscale().map(str::to_string);
+        let route_host = self.route_host();
+        let tailscale = route_host.tailscale().map(str::to_string);
         let tried_tailscale = self.tried.iter().any(|(v, _)| *v == Via::Tailscale);
         let tried_primary = self.tried.iter().any(|(v, _)| *v == Via::Primary);
         let offline = self.plan_notes.contains(&PlanNote::PeerOffline);
@@ -1050,7 +1221,7 @@ impl Pane {
         match (tried_primary, tried_tailscale, tailscale) {
             (true, true, Some(ts)) => format!(
                 "Neither {} nor its Tailscale address {ts} answered. The server may be down.",
-                self.host.address.trim()
+                route_host.address.trim()
             ),
             (_, true, Some(ts)) => {
                 let mut text = format!("{ts} did not answer over Tailscale. The device may be offline or asleep.");
@@ -1060,7 +1231,7 @@ impl Pane {
                 text
             }
             (_, _, Some(_)) => {
-                let mut text = unanswered_reason(self.host.address.trim());
+                let mut text = unanswered_reason(route_host.address.trim());
                 match no_fallback {
                     Some(why) => {
                         text.push_str(&format!(" This host also has a Tailscale address, but {}", lower_first(why)))
@@ -1069,14 +1240,18 @@ impl Pane {
                 }
                 text
             }
-            _ => unanswered_reason(self.host.address.trim()),
+            _ => unanswered_reason(route_host.address.trim()),
         }
     }
 
     /// "Try Tailscale" applies: the host has a Tailscale address this
     /// attempt did not use.
     fn can_try_tailscale(&self) -> Option<String> {
-        let ts = self.host.tailscale()?;
+        // The route plan is the first hop's: only its failure can use it.
+        if self.failed_hop != 0 {
+            return None;
+        }
+        let ts = self.route_host().tailscale()?;
         // Not when Tailscale is known to be off: the failure already says so.
         let off = self.plan_notes.iter().any(|n| matches!(n, PlanNote::NoFallback(_)));
         (!off && !self.tried.iter().any(|(v, _)| *v == Via::Tailscale)).then(|| ts.to_string())
@@ -1084,7 +1259,8 @@ impl Pane {
 
     /// The route plan allowed no attempt.
     fn plan_failed(&mut self, problem: PlanProblem, cx: &mut Context<Self>) {
-        let name = self.host.display_name().to_string();
+        self.failed_hop = 0;
+        let name = upper_first(&self.hop_title(0));
         let reason = match &problem {
             PlanProblem::TailscaleUnavailable(why) => why.to_string(),
             PlanProblem::NoTailscaleAddress => "This host has no Tailscale address.".to_string(),
@@ -1212,11 +1388,20 @@ impl Pane {
 
     /// The connecting card's line (ConnectStates.dc.html).
     fn trying_text(&self) -> String {
-        let ts = self.host.tailscale().unwrap_or_default();
+        let route_host = self.route_host();
+        let ts = route_host.tailscale().unwrap_or_default();
+        if !self.jumps.is_empty() {
+            // "Connecting to bastion-east, then app-01" (milestone 4 plan).
+            let over = if self.via == Some(Via::Tailscale) { " over Tailscale" } else { "" };
+            let mut names: Vec<String> = self.jumps.iter().map(|j| j.name().to_string()).collect();
+            names[0].push_str(over);
+            names.push(self.host.display_name().to_string());
+            return format!("Connecting to {}.", names.join(", then "));
+        }
         match self.via {
             Some(Via::Tailscale) if self.plan_notes.contains(&PlanNote::PrimarySkipped) => format!(
                 "{} is not reachable from this network, so Holonet is using Tailscale ({ts}).",
-                self.host.address.trim()
+                route_host.address.trim()
             ),
             Some(Via::Tailscale) if self.tried.len() > 1 => {
                 format!("The primary address did not answer. Trying Tailscale ({ts}).")
@@ -1310,9 +1495,11 @@ impl Pane {
             .into_any_element()
     }
 
-    fn host_key_view(&self, key: &PresentedKey, cx: &mut Context<Self>) -> AnyElement {
-        let name = self.name();
-        let user = if self.host.username.is_empty() { String::new() } else { format!(" · {}", self.host.username) };
+    fn host_key_view(&self, hop: usize, key: &PresentedKey, cx: &mut Context<Self>) -> AnyElement {
+        let name = self.hop_title(hop);
+        let host = self.hop_host(hop);
+        let user = if host.username.is_empty() { String::new() } else { format!(" · {}", host.username) };
+        let address = format!("{}:{}", key.host, key.port);
         let fingerprint = key.fingerprint.clone();
         let card = div()
             .w_full()
@@ -1377,7 +1564,7 @@ impl Pane {
                         div()
                             .text_mono_small()
                             .text_color(theme::ink_muted())
-                            .child(SharedString::from(format!("{}{user}", self.target()))),
+                            .child(SharedString::from(format!("{address}{user}"))),
                     ),
             )
             .child(
@@ -1409,13 +1596,14 @@ impl Pane {
 
     fn key_changed_view(
         &self,
+        hop: usize,
         presented: &PresentedKey,
         trusted_key: &str,
         trusted_at: Option<Timestamp>,
         expected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let name = self.name();
+        let name = self.hop_title(hop);
         let fp_card = |label: &str, fp: String, meta: String, warn: bool| {
             div()
                 .flex_1()
@@ -1478,7 +1666,7 @@ impl Pane {
                     .child(fp_card(
                         "Presented now",
                         presented.fingerprint.clone(),
-                        format!("{} · {}", presented.key_type_label(), self.target()),
+                        format!("{} · {}:{}", presented.key_type_label(), presented.host, presented.port),
                         true,
                     )),
             )
@@ -1531,6 +1719,7 @@ impl Pane {
 
     fn secret_view(
         &self,
+        hop: usize,
         request: &SecretRequest,
         field: &Entity<TextField>,
         save: bool,
@@ -1556,6 +1745,13 @@ impl Pane {
                 },
                 None,
             ),
+        };
+        // A jump host's prompt names it (milestone 4 plan).
+        let body: SharedString = if self.is_jump(hop) {
+            let body = body.replace("This host has", "It has");
+            format!("{} is the jump host for {}. {body}", self.hop_name(hop), self.name()).into()
+        } else {
+            body
         };
         let card = crate::ui::dialog(false, title, body)
             .max_w(px(460.))
@@ -1591,13 +1787,15 @@ impl Pane {
         buttons = match kind {
             Failure::Password => buttons.child(Button::primary("enter-password", "Enter password").on_click(
                 cx.listener(|this, _, _, cx| {
-                    this.ask_password = true;
+                    let hop = this.failed_hop;
+                    this.signs[hop].ask_password = true;
                     this.start(cx)
                 }),
             )),
             Failure::Passphrase => buttons.child(Button::primary("enter-passphrase", "Enter passphrase").on_click(
                 cx.listener(|this, _, _, cx| {
-                    this.ask_passphrase = true;
+                    let hop = this.failed_hop;
+                    this.signs[hop].ask_passphrase = true;
                     this.start(cx)
                 }),
             )),
@@ -1627,8 +1825,14 @@ impl Pane {
         };
         buttons = buttons
             .when(!matches!(kind, Failure::RefusedUnknown), |d| {
+                // A jump host's failure edits that host.
+                let label = if self.is_jump(self.failed_hop) {
+                    format!("Edit {}", self.hop_name(self.failed_hop))
+                } else {
+                    "Edit host".to_string()
+                };
                 d.child(
-                    Button::secondary("edit-host", "Edit host")
+                    Button::secondary("edit-host", label)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::EditHost))),
                 )
             })
@@ -1674,6 +1878,10 @@ impl Pane {
         if !auth.is_empty() {
             items.push(auth.into());
         }
+        if !self.jumps.is_empty() && matches!(self.state, State::Connected) {
+            let names: Vec<&str> = self.jumps.iter().map(|j| j.name()).collect();
+            items.push(format!("Through {}", names.join(", ")).into());
+        }
         div()
             .flex()
             .flex_wrap()
@@ -1714,17 +1922,17 @@ impl Render for Pane {
         let content: AnyElement = match &self.state {
             State::Connecting if self.reconnect.is_some() => self.reconnecting_view(cx),
             State::Connecting => self.connecting_view(cx),
-            State::HostKey { key, .. } => {
-                let key = key.clone();
-                self.host_key_view(&key, cx)
+            State::HostKey { hop, key, .. } => {
+                let (hop, key) = (*hop, key.clone());
+                self.host_key_view(hop, &key, cx)
             }
-            State::KeyChanged { presented, trusted_key, trusted_at, expected } => {
-                let (p, t, at, e) = (presented.clone(), trusted_key.clone(), *trusted_at, *expected);
-                self.key_changed_view(&p, &t, at, e, cx)
+            State::KeyChanged { hop, presented, trusted_key, trusted_at, expected } => {
+                let (h, p, t, at, e) = (*hop, presented.clone(), trusted_key.clone(), *trusted_at, *expected);
+                self.key_changed_view(h, &p, &t, at, e, cx)
             }
-            State::Secret { request, field, save, .. } => {
-                let (r, f, s) = (request.clone(), field.clone(), *save);
-                self.secret_view(&r, &f, s, cx)
+            State::Secret { hop, request, field, save, .. } => {
+                let (h, r, f, s) = (*hop, request.clone(), field.clone(), *save);
+                self.secret_view(h, &r, &f, s, cx)
             }
             State::Failed { kind, title, body } => {
                 let (title, body) = (title.clone(), body.clone());

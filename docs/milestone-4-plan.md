@@ -102,7 +102,7 @@ Each phase ends with a commit and a check.
 | 4 | **Keychain** *(done)*: table, generate, three imports, copy, rename, delete, install on host, side navigation | Generate, install and sign in end to end; import from a file, `~/.ssh` and WSL |
 | 5 | **Identities** *(done)*: cards, create, edit, delete, choosing one on the host form | Two hosts share an identity; editing it changes both |
 | 6 | **Routes** *(done; tested through a relay on this PC's Tailscale address)*: host form, detail and cards, the connecting, timed-out, reconnecting and Tailscale-not-running states, the fallback wait setting | Unreachable primary falls back to Tailscale; Primary-only shows "Try Tailscale"; Tailscale stopped is reported |
-| 7 | **Jump hosts in panes:** host form select, `-J` command, prompts per hop, reconnect through the chain | Connect through a jump host from a clean Known hosts: two key prompts, then a shell; drop and reconnect |
+| 7 | **Jump hosts in panes** *(done; tested through the WSL server as its own jump host)*: host form select, `-J` command, prompts per hop, reconnect through the chain | Connect through a jump host from a clean Known hosts: two key prompts, then a shell; drop and reconnect |
 | 8 | **Lock and Windows Hello:** idle and Windows-lock locking, the Locked screen, Hello unlock and the password fallback, the Settings switch | Idle lock, Windows lock (Win L) and Hello unlock, each with a session open that survives |
 | 9 | **Wrap-up:** notes, `CLAUDE.md`, the done check above from a clean profile, PR | Done check passes |
 

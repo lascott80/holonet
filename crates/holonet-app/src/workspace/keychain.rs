@@ -11,8 +11,8 @@ use gpui::{
 };
 use holonet_model::{Auth, HostId, Identity, IdentityId, KeyId, Secret, StoredKey, Timestamp, VaultData};
 use holonet_ssh::{
-    BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, InstallOutcome, KeyKind, KeyStatus,
-    PresentedKey, Prompts, SecretRequest, Session, algorithm_label,
+    BoxFuture, ConnectError, ConnectOptions, HostKeyDecision, InstallOutcome, KeyKind, KeyStatus, PresentedKey,
+    Prompts, SecretRequest, algorithm_label,
 };
 
 use super::hosts::format_date;
@@ -190,25 +190,52 @@ fn name_list(names: &[String]) -> String {
     }
 }
 
-/// Prompts for Install on host: only an already-trusted host key is
-/// accepted (a new or changed key is verified by connecting from Hosts),
-/// and a secret that is not saved comes from the dialog's field.
+/// What stopped an Install on host connection at a hop.
+#[derive(Default)]
+struct InstallStops {
+    /// A host key that is not trusted, and the hop's name.
+    key: Option<(String, KeyStatus)>,
+    /// A hop that needed a secret Holonet does not have.
+    secret: Option<String>,
+}
+
+/// Prompts for one hop of Install on host: only an already-trusted host key
+/// is accepted (a new or changed key is verified by connecting from Hosts),
+/// trusted under this address or the host's other one, as panes do. A
+/// secret that is not saved comes from the dialog's field, for the host
+/// itself only.
 struct InstallPrompts {
-    trusted: Option<holonet_model::KnownHost>,
+    name: String,
+    known: Vec<holonet_model::KnownHost>,
+    /// The host's other addresses, which share a matching key.
+    host: holonet_model::Host,
     secret: Option<Secret>,
-    status: Mutex<Option<KeyStatus>>,
+    stops: Arc<Mutex<InstallStops>>,
 }
 
 impl Prompts for InstallPrompts {
     fn host_key(&self, key: PresentedKey) -> BoxFuture<HostKeyDecision> {
-        let status = holonet_ssh::classify(self.trusted.as_ref(), &key);
-        let decision = if status == KeyStatus::Trusted { HostKeyDecision::Continue } else { HostKeyDecision::Stop };
-        *self.status.lock().unwrap() = Some(status);
+        let aliases = VaultData::other_addresses(&self.host, &key.host);
+        let trusted = self
+            .known
+            .iter()
+            .find(|k| k.matches(&key.host, key.port))
+            .or_else(|| aliases.iter().find_map(|a| self.known.iter().find(|k| k.matches(a, key.port))));
+        let status = holonet_ssh::classify(trusted, &key);
+        let decision = if status == KeyStatus::Trusted {
+            HostKeyDecision::Continue
+        } else {
+            self.stops.lock().unwrap().key = Some((self.name.clone(), status));
+            HostKeyDecision::Stop
+        };
         Box::pin(async move { decision })
     }
 
     fn secret(&self, _request: SecretRequest) -> BoxFuture<Option<Secret>> {
         let secret = self.secret.clone().filter(|s| !s.is_empty());
+        if secret.is_none() {
+            self.stops.lock().unwrap().secret = Some(self.name.clone());
+        }
         Box::pin(async move { secret })
     }
 }
@@ -867,67 +894,77 @@ impl Workspace {
         let Some(host) = hosts.get(select.read(cx).selected()).and_then(|id| data.host(*id)).cloned() else { return };
         let Some(stored) = data.key(*key).cloned() else { return };
         let typed = secret.read(cx).text().to_string();
-        let (user, auth) = data.sign_in(&host);
-        let credential = match auth {
-            Auth::Password { saved } => {
-                Credential::Password(saved.clone().or_else(|| (!typed.is_empty()).then(|| Secret::new(typed.clone()))))
+        let typed = (!typed.is_empty()).then(|| Secret::new(typed));
+        let name = host.display_name().to_string();
+        // Through the host's jump hosts and route, as a pane connects.
+        let jumps = match crate::hops::jumps(&data, &host) {
+            Ok(jumps) => jumps,
+            Err(problem) => {
+                *state = InstallState::Failed(format!("{name} cannot be reached: {}", problem.message()).into());
+                cx.notify();
+                return;
             }
-            Auth::Key { key_id, .. } => match data.key(*key_id) {
-                Some(k) => Credential::Key {
-                    name: k.name.clone(),
-                    private_key: k.private_key.clone(),
-                    passphrase: k
-                        .saved_passphrase
-                        .clone()
-                        .or_else(|| (!typed.is_empty()).then(|| Secret::new(typed.clone()))),
-                },
-                None => {
-                    *state = InstallState::Failed(
-                        format!(
-                            "{} signs in with a key that is no longer in the vault. Edit the host first.",
-                            host.display_name()
-                        )
-                        .into(),
-                    );
-                    cx.notify();
-                    return;
-                }
-            },
         };
+        let target = crate::hops::Hop::of(&data, &host);
+        let stops = Arc::new(Mutex::new(InstallStops::default()));
+        let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
+        let mut steps = Vec::new();
+        for (i, hop) in jumps.iter().chain(std::iter::once(&target)).enumerate() {
+            let own = i == jumps.len();
+            // The dialog's field is for the host itself.
+            let field = if own { typed.clone() } else { None };
+            let Some(credential) = hop.credential(false, false, |_| field.clone()) else {
+                *state = InstallState::Failed(
+                    format!("{} signs in with a key that is no longer in the vault. Edit it first.", hop.name()).into(),
+                );
+                cx.notify();
+                return;
+            };
+            steps.push(ConnectOptions {
+                host: crate::hops::reach_address(&hop.host),
+                port: hop.host.port,
+                user: hop.host.username.clone(),
+                credential,
+                connect_timeout: timeout,
+                keep_alive: None,
+                prompts: Arc::new(InstallPrompts {
+                    name: hop.name().to_string(),
+                    known: data.known_hosts.clone(),
+                    host: hop.host.clone(),
+                    secret: field,
+                    stops: stops.clone(),
+                }),
+                jump: None,
+            });
+        }
         *state = InstallState::Running;
-        let address = host.address.trim().to_string();
-        let prompts = Arc::new(InstallPrompts {
-            trusted: data.known_host(&address, host.port).cloned(),
-            secret: (!typed.is_empty()).then(|| Secret::new(typed.clone())),
-            status: Mutex::new(None),
-        });
-        let opts = ConnectOptions {
-            host: address,
-            port: host.port,
-            user: user.to_string(),
-            credential,
-            connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
-            keep_alive: None,
-            prompts: prompts.clone(),
-            jump: None,
-        };
+        let opts = crate::hops::link(steps);
+        let route_host = jumps.first().map_or(&target.host, |j| &j.host).clone();
+        let fallback = data.settings.connection.fallback_wait.duration();
+        let hop_count = jumps.len();
         let line = public_line(&stored);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let result = match Session::connect(opts).await {
-                Ok(session) => {
-                    let outcome = session.install_public_key(&line).await.map_err(|e| e.to_string());
-                    let _ = session.close().await;
-                    Ok(outcome)
-                }
-                Err(e) => Err(e),
+            let routed = crate::hops::connect_by_route(opts, &route_host, None, fallback, hop_count, |_| {}).await;
+            let result = match routed {
+                crate::hops::Routed::Plan(problem) => Err(Err(problem)),
+                crate::hops::Routed::Connect(result) => match *result {
+                    Ok(session) => {
+                        let outcome = session.install_public_key(&line).await.map_err(|e| e.to_string());
+                        let _ = session.close().await;
+                        Ok(outcome)
+                    }
+                    Err(e) => Err(Ok(e)),
+                },
             };
-            let _ = tx.send((result, prompts.status.lock().unwrap().take()));
+            let _ = tx.send(result);
         });
-        let (name, key_name) = (host.display_name().to_string(), stored.name.clone());
-        let uses_key = auth.key_id() == Some(stored.id);
+        let key_name = stored.name.clone();
+        let uses_key = data.sign_in(&host).1.key_id() == Some(stored.id);
+        let hop_names: Vec<String> = jumps.iter().map(|j| j.name().to_string()).chain([name.clone()]).collect();
         cx.spawn(async move |this, cx| {
-            let Ok((result, status)) = rx.await else { return };
+            let Ok(result) = rx.await else { return };
+            let stops = std::mem::take(&mut *stops.lock().unwrap());
             let _ = this.update(cx, |this, cx| {
                 let message = match result {
                     Ok(Ok(InstallOutcome::Added)) => Ok(if uses_key {
@@ -937,14 +974,36 @@ impl Workspace {
                     }),
                     Ok(Ok(InstallOutcome::AlreadyPresent)) => Ok(format!("{name} already accepts {key_name}. Nothing was changed.")),
                     Ok(Err(e)) => Err(format!("{name} did not accept the change: {e}")),
-                    Err(ConnectError::HostKeyRejected) => Err(match status {
-                        Some(KeyStatus::Changed { .. }) => format!("The host key for {name} has changed. Holonet stopped before signing in. Check it in Known hosts."),
-                        _ => format!("Holonet has not verified {name}'s host key yet. Connect to it once from Hosts, then install the key."),
+                    Err(Err(problem)) => Err(match problem {
+                        holonet_net::PlanProblem::TailscaleUnavailable(why) => {
+                            format!("{} connects over Tailscale. {why}", hop_names[0])
+                        }
+                        holonet_net::PlanProblem::NoTailscaleAddress => {
+                            format!("{} has no Tailscale address. Edit it first.", hop_names[0])
+                        }
                     }),
-                    Err(ConnectError::Cancelled) => Err("Enter the password or passphrase above, then install again.".into()),
-                    Err(ConnectError::SignInRefused { .. }) => Err(format!("{name} refused the sign-in. Check the password or key, then try again.")),
-                    Err(ConnectError::WrongPassphrase) => Err("That passphrase did not unlock the host's key.".into()),
-                    Err(e) => Err(format!("Holonet could not connect to {name}: {e}")),
+                    Err(Ok(e)) => {
+                        // Name the hop the error belongs to.
+                        let (e, wrappers) = e.innermost();
+                        let hop = hop_names[hop_count.saturating_sub(wrappers.len())].clone();
+                        Err(match e {
+                            ConnectError::HostKeyRejected => match stops.key {
+                                Some((at, KeyStatus::Changed { .. })) => format!("The host key for {at} has changed. Holonet stopped before signing in. Check it in Known hosts."),
+                                Some((at, _)) => format!("Holonet has not verified {at}'s host key yet. Connect to {name} once from Hosts, then install the key."),
+                                None => format!("{hop} did not accept the connection."),
+                            },
+                            ConnectError::Cancelled => match stops.secret {
+                                Some(at) if at != name => format!("The jump host {at} needs a password or passphrase that is not saved. Connect to {name} once from Hosts and save it, then install again."),
+                                _ => "Enter the password or passphrase above, then install again.".into(),
+                            },
+                            ConnectError::SignInRefused { .. } => format!("{hop} refused the sign-in. Check the password or key, then try again."),
+                            ConnectError::WrongPassphrase => format!("That passphrase did not unlock {hop}'s key."),
+                            ConnectError::JumpCouldNotReach { jump: _, target: _, reason } => {
+                                format!("A jump host on the way could not reach {hop}: {reason}.")
+                            }
+                            e => format!("Holonet could not connect to {hop}: {}", crate::host_form::describe_error(e)),
+                        })
+                    }
                 };
                 if let Some(KcDialog::Install { state, .. }) = this.kc.dialog.as_mut() {
                     *state = match message {

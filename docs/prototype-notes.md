@@ -1185,3 +1185,63 @@ fmt, clippy, and the unit tests (32, 14, 12, 7, 13 and 16) pass.
 The relay and seeder stay in the tree with the other milestone 4 test programs until the wrap-up.
 
 fmt, clippy, and the unit tests (32, 15, 12, 7, 13 and 16) pass.
+
+## Milestone 4, phase 7: jump hosts in panes (25 Nov 2026)
+
+**Shared connection code** (`crates/holonet-app/src/hops.rs`), used by panes and Install on host:
+- `Hop` holds a host with its identity applied, its key and its keep-alive.
+- `jumps()` returns the jump hosts in front of a host, first hop first.
+- `link()` nests each hop's `ConnectOptions` as the next one's jump host.
+- `connect_by_route()` runs the route plan for the **first hop**, the only one this PC connects to.
+  - Hosts further along are reached at their primary address, or at their Tailscale address when their route is Tailscale. They get no fallback.
+  - Only the first hop's own failure to answer moves on to its next address.
+
+**Panes:**
+- **Per hop:** each hop has its own prompts, sign-in state (ask again, typed and remembered secrets, pending save) and host key check, with shared trust across that host's own addresses.
+  - Log lines are prefixed with the hop's name ("jump-a: Host key verified against Known hosts").
+  - Prompts name the hop:
+    - "This is the first time Holonet has connected to the jump host jump-a."
+    - "jump-a is the jump host for behind-a. It has no saved password."
+  - A typed secret saved from a jump host's prompt goes to that host's (or its identity's) entry.
+- **Failures** belong to the hop that failed: each jump host wraps an error once, so the depth gives the hop.
+  - Titles name it: "Holonet could not reach the jump host jump-a", "The jump host jump-a refused the key …", "jump-a could not reach behind-a".
+  - "Edit host" becomes "Edit jump-a" and opens that host. "Save and connect" there retries the pane it came from, because the pane checks whether it uses that host.
+  - "Try Tailscale" applies only to a first-hop failure.
+  - A deleted jump host or a loop fails before connecting, with "Edit the host to choose another jump host, or None."
+- **Display:**
+  - The connecting card reads "Connecting to jump-a, then behind-a." ("jump-a over Tailscale" when it applies).
+  - The header keeps the host's own address.
+  - The status bar adds "Through jump-a".
+- **Reconnect** restarts the whole chain from the first hop:
+  - A lost jump host reads "The connection to the jump host jump-a was lost."
+  - A failed attempt's error line names the hop ("jump-a: The host refused the connection…").
+
+**Screens:**
+- **Host form, Connection:**
+  - A "Jump host" select: None, then the other saved hosts by name.
+  - Hosts that already go through this one are left out, so a loop cannot be chosen.
+  - The summary gains "Jump host", and the equivalent command gains `-J jump-a`.
+  - With a jump host set, **Test connection tests the first hop** and says so ("This tested the jump host jump-a. The host itself is checked when you connect through it."), because this PC usually cannot reach the host directly.
+- **Host detail:** a "Jump host" row ("None", the name, or "Deleted host").
+- **Install on host** connects the way panes do, through the jump hosts and the route plan. Every hop's host key must already be trusted (under either of its addresses).
+  - A failure names the hop.
+  - A jump host whose password or passphrase is not saved stops with "Connect to … once from Hosts and save it".
+
+**Checked live** (the phase 4 test vault; `examples/m4_jump_seed.rs` added jump-a at 127.0.0.1:2222, and behind-a at localhost:2222 through jump-a, and cleared Known hosts; from WSL, localhost is the same server under another Known hosts name):
+
+| Check | Result |
+| --- | --- |
+| Connect behind-a from a clean Known hosts | Prompt for the jump host jump-a (127.0.0.1:2222), trusted. Prompt for behind-a (localhost:2222), trusted. Shell; status bar "Through jump-a" |
+| `kill -9` the jump host's `sshd-session` (the one without a terminal) | Reconnected through both hops within a second, with no prompts; "-- Reconnected at 21:04 …" in scrollback |
+| Same with sshd's listener stopped, then started | "The connection to the jump host jump-a was lost. Attempt 1 of 5 failed. Trying again in 2 s.", "The host refused the connection…"; reconnected by itself once the listener was back |
+| jump-a's port set to 2223 | "Holonet could not reach the jump host jump-a" with Retry, **Edit jump-a**, Close tab. Edit jump-a, port back to 2222, Save and connect: the same pane connected |
+| Host form for behind-a | Command `ssh -J jump-a holotest@localhost -p 2222`; summary "Jump host jump-a"; Test connection tested jump-a. jump-a's own select leaves out behind-a |
+| jump-a's saved password removed, new behind-a tab | "Enter the password for holotest@127.0.0.1", naming jump-a as the jump host for behind-a. Typed with Save ticked: connected, and jump-a shows "Password, saved" again |
+| Install on host: holonet-test-import on behind-a | "Installed holonet-test-import on behind-a." sshd logged two password sign-ins back to back (jump-a, then behind-a through it). The added line was removed from the test account's `authorized_keys` afterwards |
+
+**Not checked:**
+- The hop name on a reconnect attempt's error line was added after the live run. It is one line and is covered by clippy only.
+- A jump host over Tailscale (the first hop's route plan) was not run live. It uses the same code as phase 6, with the first hop's host.
+- Chains of more than one jump host are covered by the `link` unit test, not live.
+
+fmt, clippy, and the unit tests (34, 15, 12, 7, 13 and 16) pass.

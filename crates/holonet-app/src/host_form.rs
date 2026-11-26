@@ -1,7 +1,8 @@
 //! New host and Edit host (NewHost.dc.html, EditHost.dc.html), with the
 //! milestone 2 fields: label, address, port, tags, username, SSH key or
-//! password, keep-alive. Later milestones add group, Tailscale, jump host,
-//! startup snippet, SFTP folder and logging.
+//! password, keep-alive. Milestone 4 adds identities, the Tailscale address
+//! and route, and the jump host. Later milestones add group, startup snippet,
+//! SFTP folder and logging.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -70,6 +71,13 @@ pub struct HostForm {
     /// only cleared when asked.
     forget_passphrase: bool,
     keep_alive: bool,
+    /// "Jump host": None, then these saved hosts (by name).
+    jump_options: Vec<(HostId, String)>,
+    jump_select: Entity<Select>,
+    /// The vault's hosts, to find a jump host's own jump hosts for the test.
+    all_hosts: Vec<Host>,
+    /// The last test reached this jump host rather than the host itself.
+    test_via: Option<String>,
     /// Show problems once Save has been tried.
     show_problems: bool,
     import_message: Option<(SharedString, bool)>,
@@ -172,6 +180,28 @@ impl HostForm {
         });
         let selected = key_id.and_then(|id| keys.iter().position(|k| k.id == id)).unwrap_or(0);
         let key_select = cx.new(|cx| Select::new(cx, keys.iter().map(key_option).collect(), selected).mono());
+        // Hosts that already go through this one are left out: choosing one
+        // would close a loop.
+        let own = host.as_ref().map(|h| h.id);
+        let mut jump_options: Vec<(HostId, String)> = data
+            .hosts
+            .iter()
+            .filter(|c| Some(c.id) != own)
+            .filter(|c| own.is_none_or(|id| data.jump_chain(c).is_ok_and(|chain| !chain.contains(&id))))
+            .map(|c| (c.id, c.display_name().to_string()))
+            .collect();
+        jump_options.sort_by_key(|(_, name)| name.to_lowercase());
+        let jump_index =
+            h.jump_host.and_then(|id| jump_options.iter().position(|(j, _)| *j == id)).map_or(0, |i| i + 1);
+        let jump_select = cx.new(|cx| {
+            Select::new(
+                cx,
+                std::iter::once(SharedString::from("None"))
+                    .chain(jump_options.iter().map(|(_, n)| SharedString::from(n.clone())))
+                    .collect(),
+                jump_index,
+            )
+        });
 
         let mut subscriptions = Vec::new();
         for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase] {
@@ -188,6 +218,10 @@ impl HostForm {
             }));
         }
         subscriptions.push(cx.observe(&identity_select, |_: &mut Self, _, cx| cx.notify()));
+        subscriptions.push(cx.observe(&jump_select, |this: &mut Self, _, cx| {
+            this.test = TestState::Idle;
+            cx.notify();
+        }));
         subscriptions.push(cx.observe(&key_select, |this: &mut Self, _, cx| {
             this.test = TestState::Idle;
             cx.notify();
@@ -202,6 +236,10 @@ impl HostForm {
             save_passphrase: host.is_none() || saved_passphrase.is_some(),
             forget_passphrase: false,
             keep_alive: h.keep_alive,
+            jump_options,
+            jump_select,
+            all_hosts: data.hosts.clone(),
+            test_via: None,
             original: host,
             label,
             address,
@@ -245,6 +283,11 @@ impl HostForm {
         self.identities.get(self.identity_select.read(cx).selected())
     }
 
+    /// The chosen jump host, by id and name.
+    fn selected_jump(&self, cx: &Context<Self>) -> Option<&(HostId, String)> {
+        self.jump_select.read(cx).selected().checked_sub(1).and_then(|i| self.jump_options.get(i))
+    }
+
     fn port(&self, cx: &Context<Self>) -> Option<u16> {
         let text = self.text(&self.port, cx);
         if text.is_empty() { Some(22) } else { text.parse::<u16>().ok().filter(|p| *p > 0) }
@@ -263,6 +306,7 @@ impl HostForm {
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         host.keep_alive = self.keep_alive;
+        host.jump_host = self.selected_jump(cx).map(|(id, _)| *id);
         host.identity = self.selected_identity(cx).map(|i| i.id);
         if let Some(identity) = self.selected_identity(cx) {
             // The summary and equivalent command show who signs in.
@@ -406,6 +450,24 @@ impl HostForm {
             cx.notify();
             return;
         }
+        // Behind a jump host, this PC reaches only the first hop: test that.
+        let first_hop = self.selected_jump(cx).and_then(|(id, _)| {
+            let mut hop = self.all_hosts.iter().find(|h| h.id == *id)?;
+            let mut seen = vec![hop.id];
+            while let Some(next) = hop.jump_host.and_then(|j| self.all_hosts.iter().find(|h| h.id == j)) {
+                if seen.contains(&next.id) {
+                    break;
+                }
+                seen.push(next.id);
+                hop = next;
+            }
+            Some(hop.clone())
+        });
+        self.test_via = first_hop.as_ref().map(|h| h.display_name().to_string());
+        let (address, port) = match &first_hop {
+            Some(h) => (crate::hops::reach_address(h), h.port),
+            None => (address, port),
+        };
         self.test = TestState::Running;
         let timeout = self.connect_timeout;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -431,6 +493,18 @@ impl HostForm {
     }
 
     fn test_result(&self) -> Option<gpui::Div> {
+        let result = self.test_state_callout()?;
+        Some(match (&self.test_via, &self.test) {
+            (Some(jump), TestState::Reachable { .. } | TestState::Failed(_)) => {
+                result.child(div().text_meta().text_color(theme::ink_muted()).child(SharedString::from(format!(
+                    "This tested the jump host {jump}. The host itself is checked when you connect through it."
+                ))))
+            }
+            _ => result,
+        })
+    }
+
+    fn test_state_callout(&self) -> Option<gpui::Div> {
         Some(match &self.test {
             TestState::Idle => return None,
             TestState::Running => callout(CalloutKind::Info).child("Testing the connection…"),
@@ -684,8 +758,11 @@ impl Render for HostForm {
             );
         }
 
-        let connection = fieldset("Connection").child(
-            Checkbox::new("keep-alive", "Keep connection alive", self.keep_alive).on_toggle({
+        let jump_name = self.selected_jump(cx).map(|(_, name)| name.clone());
+        let connection = fieldset("Connection")
+            // NewHost.dc.html: None, or a saved host.
+            .child(div().max_w(px(360.)).child(field("Jump host", self.jump_select.clone(), None)))
+            .child(Checkbox::new("keep-alive", "Keep connection alive", self.keep_alive).on_toggle({
                 let entity = entity.clone();
                 move |v, _, cx| {
                     entity.update(cx, |f, cx| {
@@ -693,8 +770,7 @@ impl Render for HostForm {
                         cx.notify()
                     })
                 }
-            }),
-        );
+            }));
 
         // --------------------------------------------------------- aside --
         let mut aside = div()
@@ -713,10 +789,14 @@ impl Render for HostForm {
                     .flex_col()
                     .gap(theme::SPACE_2)
                     .child(section_label("Equivalent command"))
-                    .child(code_box(host.ssh_command())),
+                    .child(code_box(host.ssh_command_via(jump_name.as_deref()))),
             )
             .child(key_values(vec![
                 ("Authentication".into(), self.auth_summary(cx).into_any_element()),
+                (
+                    "Jump host".into(),
+                    SharedString::from(jump_name.clone().unwrap_or_else(|| "None".into())).into_any_element(),
+                ),
                 (
                     "Tailscale address".into(),
                     SharedString::from(host.tailscale().unwrap_or("Not set").to_string()).into_any_element(),

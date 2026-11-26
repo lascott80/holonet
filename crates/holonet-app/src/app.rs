@@ -278,21 +278,20 @@ impl HolonetApp {
             terminal: data.settings.terminal.clone(),
             fallback_wait: data.settings.connection.fallback_wait.duration(),
         };
-        let pane = cx.new(|cx| Pane::new(app, host, key, runtime, limits, size, window, cx));
+        let jumps = crate::hops::jumps(data, &host);
+        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, window, cx));
         cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_pane(pane, window, cx),
             SessionEvent::ReviewKnownHost => {
-                let (host, port) = {
-                    let t = pane.read(cx);
-                    (t.host.address.trim().to_string(), t.host.port)
-                };
+                let (host, port) = pane.read(cx).review_address();
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.show_known_host(&host, port, cx));
                 }
             }
             SessionEvent::EditHost => {
-                let id = pane.read(cx).host.id;
+                // The failed hop: a jump host's failure edits the jump host.
+                let id = pane.read(cx).host_to_edit();
                 this.edit_origin = Some(pane.downgrade());
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
@@ -308,12 +307,14 @@ impl HolonetApp {
     /// the host was edited from.
     pub fn connect(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.edit_origin.take().and_then(|p| p.upgrade())
-            && pane.read(cx).host.id == id
+            && pane.read(cx).depends_on(id)
             && pane.read(cx).is_stopped()
             && let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(&pane))
             && let Some(data) = self.vault_data(cx)
-            && let Some(host) = data.host(id).map(|h| data.resolved(h))
+            // The pane's own host, with an edited jump host's new details.
+            && let Some(host) = data.host(pane.read(cx).host.id).map(|h| data.resolved(h))
         {
+            let jumps = crate::hops::jumps(data, &host);
             let key = match &host.auth {
                 holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
                 holonet_model::Auth::Password { .. } => None,
@@ -324,7 +325,7 @@ impl HolonetApp {
                 terminal: data.settings.terminal.clone(),
                 fallback_wait: data.settings.connection.fallback_wait.duration(),
             };
-            pane.update(cx, |p, cx| p.retry_with(host, key, limits, cx));
+            pane.update(cx, |p, cx| p.retry_with(host, key, jumps, limits, cx));
             self.select(Some(index), window, cx);
             return;
         }

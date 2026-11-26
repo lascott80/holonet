@@ -16,6 +16,7 @@ mod assets;
 mod boxdraw;
 mod font_check;
 mod gallery;
+mod hops;
 mod host_form;
 mod host_picker;
 mod input;

@@ -499,6 +499,17 @@ impl Workspace {
                 ("Port".into(), port.into_any_element()),
                 ("Username".into(), username.into_any_element()),
                 ("Authentication".into(), sign_in(host, data).into_any_element()),
+                // Main.dc.html: the jump host by name, or None.
+                (
+                    "Jump host".into(),
+                    SharedString::from(
+                        host.jump_host
+                            .map(|id| data.host(id).map_or("Deleted host", |j| j.display_name()))
+                            .unwrap_or("None")
+                            .to_string(),
+                    )
+                    .into_any_element(),
+                ),
             ]))
             .child(div().flex().flex_col().gap(theme::SPACE_2).child(section_label("Host key")).child(host_key))
             .when(!host.tags.is_empty(), |d| {
