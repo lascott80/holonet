@@ -158,7 +158,7 @@ Each phase ends with a commit and a check.
 | 5 | **Snippets page and startup snippets** *(done)*: library, editor, variables, the host form's Startup snippet | A startup snippet runs once on connect and not after a reconnect |
 | 6 | **Snippets in sessions and multi-host runs** *(done)*: the drawer, the variable and confirmation popups, Run on n hosts, the warn-group question | A snippet with a variable runs in a pane, then on three hosts in one tab |
 | 7 | **Broadcast** *(done)*: the button, the strip, amber edges, the warn question, Ctrl Shift B | Typing and a paste reach all four panes in order; a closed pane drops out |
-| 8 | **SSH agent, agent forwarding and compression** | Sign in with a key held only by the agent; `ssh-add -l` on the host lists it; compression is negotiated |
+| 8 | **SSH agent, agent forwarding and compression** *(done)* | Sign in with a key held only by the agent; `ssh-add -l` on the host lists it; compression is negotiated |
 | 9 | **Wrap-up:** notes, `CLAUDE.md`, gallery, the done check from a clean profile, PR | Done check passes |
 
 ## States to design

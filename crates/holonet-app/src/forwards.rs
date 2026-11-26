@@ -353,6 +353,9 @@ impl Forwarder {
                 connect_timeout: link.connect_timeout,
                 keep_alive: hop.keep_alive,
                 prompts: Arc::new(BackgroundPrompts { tx: tx.clone(), host: host_id, hop: index }),
+                // No shell here, so nothing to forward the agent to.
+                agent_forwarding: false,
+                compression: hop.host.compression,
                 jump: None,
             });
         }

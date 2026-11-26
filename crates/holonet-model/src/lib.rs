@@ -132,6 +132,8 @@ pub enum Auth {
         #[serde(default, rename = "passphrase", skip_serializing)]
         legacy_passphrase: Option<Secret>,
     },
+    /// The keys in Windows' OpenSSH agent. Nothing is stored for the host.
+    Agent,
 }
 
 impl Default for Auth {
@@ -148,7 +150,7 @@ impl Auth {
     pub fn key_id(&self) -> Option<KeyId> {
         match self {
             Auth::Key { key_id, .. } => Some(*key_id),
-            Auth::Password { .. } => None,
+            Auth::Password { .. } | Auth::Agent => None,
         }
     }
 }
@@ -321,7 +323,14 @@ impl Host {
         let jump = jump.map(|j| format!("-J {j} ")).unwrap_or_default();
         let user = if self.username.is_empty() { String::new() } else { format!("{}@", self.username) };
         let port = if self.port == 22 { String::new() } else { format!(" -p {}", self.port) };
-        format!("ssh {jump}{user}{address}{port}")
+        // Agent forwarding and compression, as `ssh -A` and `ssh -C`.
+        let flags = match (self.agent_forwarding, self.compression) {
+            (true, true) => "-A -C ",
+            (true, false) => "-A ",
+            (false, true) => "-C ",
+            (false, false) => "",
+        };
+        format!("ssh {flags}{jump}{user}{address}{port}")
     }
 
     /// Problems that stop the host from being saved, in form order.
@@ -1178,6 +1187,10 @@ mod tests {
         assert_eq!(h.target(), "admin@10.0.0.5:2222");
         assert_eq!(h.ssh_command(), "ssh admin@10.0.0.5 -p 2222");
         assert_eq!(Host::new("").ssh_command(), "ssh [address]");
+        let mut forwarded = h.clone();
+        forwarded.agent_forwarding = true;
+        forwarded.compression = true;
+        assert_eq!(forwarded.ssh_command(), "ssh -A -C admin@10.0.0.5 -p 2222");
     }
 
     #[test]
@@ -1512,6 +1525,10 @@ mod tests {
         // New fields and lists take their defaults; old values are kept.
         let b = &d.hosts[1];
         assert_eq!((b.group, b.startup_snippet, b.agent_forwarding, b.compression), (None, None, false, false));
+        // "SSH agent" stores nothing, and reads back as itself.
+        let json = serde_json::to_string(&Auth::Agent).unwrap();
+        assert_eq!(json, r#"{"method":"agent"}"#);
+        assert_eq!(serde_json::from_str::<Auth>(&json).unwrap(), Auth::Agent);
         assert_eq!((b.route, b.sftp_folder.as_deref()), (Route::Primary, Some("/srv")));
         assert!(d.groups.is_empty() && d.snippets.is_empty() && d.forward_rules.is_empty());
         // Without a group, nothing changes how a host connects.

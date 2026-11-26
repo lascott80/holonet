@@ -2171,3 +2171,60 @@ fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only
 One Ctrl Shift B press was lost to the harness's focus timing and had to be sent again. stderr stayed empty after the fix.
 
 fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 8: SSH agent, agent forwarding and compression (26 Nov 2026)
+
+**What was built:**
+
+- **`holonet-ssh`:**
+  - **`Credential::Agent`** connects to Windows' OpenSSH agent at `AGENT_PIPE` (`\\.\pipe\openssh-ssh-agent`), as spike (b) did.
+    - It offers each of the agent's keys with `authenticate_publickey_with`. Holonet never holds them.
+    - New errors: `AgentUnavailable` (the pipe cannot be opened: the service is stopped), `AgentEmpty` (no keys) and `AgentFailed` (the agent could not sign).
+    - A server that refuses every key gives `SignInRefused { method: "publickey" }`, as a stored key does.
+    - `SessionInfo::auth_method` is `"agent"`.
+  - **Agent forwarding:** `ConnectOptions::agent_forwarding`.
+    - The handler bridges the host's `auth-agent@openssh.com` channels to a new pipe connection each (`copy_bidirectional`), only when the connection asked for forwarding. Otherwise it rejects them as administratively prohibited.
+    - `Session::open_shell` sends `agent_forward(true)` before the shell.
+    - The app sets it on the target hop only, never on a jump host. Background forwarding connections never set it, since they have no shell.
+  - **Compression:** `ConnectOptions::compression` puts `zlib@openssh.com`, then `zlib`, then `none` first in `Preferred::compression`. Off keeps russh's default (`none` first). `kex_done` records what was negotiated in `SessionInfo::compression`.
+- **Model:**
+  - `Auth::Agent`, stored as `{"method":"agent"}` with nothing else, which a unit test checks.
+  - `Host::ssh_command_via` adds `-A` and `-C` for the two switches, also unit-tested.
+- **Host form** (`NewHost.dc.html`):
+  - Authentication reads SSH key, Password, SSH agent, then Identity when the vault has one. Each segment carries its `auth` code (`AUTH_AGENT` is 3), so the order no longer depends on which options are shown.
+  - "SSH agent" shows the drawn note: "Holonet will offer the keys loaded in the Windows OpenSSH agent. Nothing is stored for this host."
+  - Agent forwarding, Keep connection alive and Compression sit in one row, as drawn. Agent forwarding on adds a line: "The host can use the keys in this PC's agent while the terminal is open. Forward it only to hosts you trust."
+  - The summary says "SSH agent".
+- **Elsewhere:**
+  - Host cards and the Keychain say "SSH agent".
+  - The pane notes "Offering the agent's keys for holotest".
+  - The failure screens are:
+    - "Windows' OpenSSH agent is not running"
+    - "The SSH agent holds no keys", which says to add one with ssh-add
+    - "… refused the agent's keys"
+  - The status bar adds "SSH agent", "Compressed" when compression was negotiated, and "Agent forwarding on" or "off", as drawn.
+  - Identities still sign in with a key or a password.
+
+**Tests:** `tests/agent.rs` is one WSL test, so nothing else changes the agent while it runs. It needs the `ssh-agent` service running.
+
+- With the agent empty, sign-in gives `AgentEmpty`.
+- It adds the `.dev` Ed25519 test key.
+- With forwarding and compression on: sign-in reports `agent` and `zlib@openssh.com`, and the host's `ssh-add -l` lists the key's SHA-256 fingerprint.
+- With both off: compression is `none`, and `ssh-add -l` exits 2 with no fingerprint.
+- It removes `~/.ssh/agent`, which OpenSSH creates for forwarded sockets.
+- The key is always removed from the agent at the end, and the test checks the agent is back to what it held before.
+
+It passes, as do the other 25 WSL tests.
+
+**Live check** (a copy of the test vault; wsl-a set to SSH agent with forwarding and compression on):
+
+| Check | Result |
+| --- | --- |
+| The form | "SSH agent" after Password, the drawn note, the switches in one row, and the equivalent command `ssh -A -C holotest@127.0.0.1 -p 2222` |
+| Save and connect with the agent empty | "The SSH agent holds no keys" with Retry, Edit host and Close tab. Its body then repeated the title, so it now says how to fix it instead |
+| `ssh-add` the `.dev` test key, then Retry | Connected. The status bar read "SSH agent · Compressed · Agent forwarding on", and the host's `ssh-add -l` listed the test key's fingerprint |
+| Afterwards | `ssh-add -d` removed the key, so the agent has no identities. The host's `~/.ssh` holds only `authorized_keys` |
+
+"Windows' OpenSSH agent is not running" was not checked live: that needs the service stopped, and Holonet's work never changes Windows services. Spike (b) showed that a missing pipe fails to open, and that is the case this message covers.
+
+fmt, clippy `-D warnings`, the workspace tests and every WSL test pass.

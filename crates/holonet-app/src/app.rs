@@ -415,7 +415,7 @@ impl HolonetApp {
         let host = data.resolved(data.host(id)?);
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
-            holonet_model::Auth::Password { .. } => None,
+            holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
         };
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
@@ -465,7 +465,7 @@ impl HolonetApp {
             let jumps = crate::hops::jumps(data, &host);
             let key = match &host.auth {
                 holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
-                holonet_model::Auth::Password { .. } => None,
+                holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
             };
             let limits = Limits {
                 connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),

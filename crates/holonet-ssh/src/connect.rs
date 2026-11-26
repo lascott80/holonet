@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use holonet_model::Secret;
 use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
+use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, decode_secret_key};
 use russh::{ChannelOpenFailure, MethodKind, MethodSet};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -64,9 +65,15 @@ pub trait Prompts: Send + Sync + 'static {
     fn secret(&self, request: SecretRequest) -> BoxFuture<Option<Secret>>;
 }
 
+/// Windows' OpenSSH agent.
+pub const AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
 /// How to sign in.
 #[derive(Clone, Debug)]
 pub enum Credential {
+    /// The keys in Windows' OpenSSH agent, each offered in turn. Holonet
+    /// never holds them.
+    Agent,
     /// `None`: ask on connect.
     Password(Option<Secret>),
     /// An OpenSSH private key as stored in the vault, possibly encrypted.
@@ -85,6 +92,11 @@ pub struct ConnectOptions {
     /// end the connection as lost.
     pub keep_alive: Option<Duration>,
     pub prompts: Arc<dyn Prompts>,
+    /// Let the host use this PC's agent (`ssh -A`). Only the target host's
+    /// shell asks for it, never a jump host.
+    pub agent_forwarding: bool,
+    /// Prefer `zlib@openssh.com` compression (`ssh -C`).
+    pub compression: bool,
     /// Connect through this host first. `host` and `port` above are then as
     /// the jump host sees them, and the host key is checked against them. A
     /// jump host may have its own jump host.
@@ -117,6 +129,12 @@ pub enum ConnectError {
     WrongPassphrase,
     #[error("the key could not be read: {0}")]
     BadKey(String),
+    #[error("Windows' OpenSSH agent is not running")]
+    AgentUnavailable,
+    #[error("the agent holds no keys")]
+    AgentEmpty,
+    #[error("the agent could not sign: {0}")]
+    AgentFailed(String),
     #[error("SSH error: {0}")]
     Protocol(String),
     /// Connecting to a jump host failed; `error` says how.
@@ -164,8 +182,10 @@ pub struct SessionInfo {
     pub kex: String,
     pub cipher: String,
     pub host_key_type: String,
-    /// "password", "publickey" or "keyboard-interactive".
+    /// "password", "publickey", "keyboard-interactive" or "agent".
     pub auth_method: String,
+    /// The negotiated compression: "none", "zlib" or "zlib@openssh.com".
+    pub compression: String,
     /// The host key the server presented (and that was accepted).
     pub host_key: Option<PresentedKey>,
 }
@@ -180,6 +200,9 @@ pub(crate) struct Handler {
     lost: Arc<Mutex<Option<LostReason>>>,
     /// Where the host's `forwarded-tcpip` channels go (remote forwards).
     routes: crate::forward::Routes,
+    /// Agent channels from the host are bridged to this PC's agent only
+    /// when this connection asked to forward it.
+    agent_forwarding: bool,
 }
 
 /// Why an established connection ended without the shell exiting.
@@ -255,6 +278,32 @@ impl client::Handler for Handler {
         let mut info = self.info.lock().unwrap();
         info.kex = names.kex.as_ref().to_string();
         info.cipher = names.cipher.as_ref().to_string();
+        info.compression = compression_name(&names.client_compression).to_string();
+        Ok(())
+    }
+
+    /// The host's `ssh-add`, or a further `ssh` from the host, talks to this
+    /// PC's agent: each channel gets its own pipe connection.
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if !self.agent_forwarding {
+            reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        }
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(AGENT_PIPE) {
+            Ok(mut pipe) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut pipe).await;
+                });
+            }
+            Err(_) => reply.reject(ChannelOpenFailure::ConnectFailed).await,
+        }
         Ok(())
     }
 
@@ -346,8 +395,16 @@ async fn handshake<R>(opts: &ConnectOptions, stream: R) -> Result<Connected, Con
 where
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let config =
-        Arc::new(client::Config { keepalive_interval: opts.keep_alive, keepalive_max: 3, ..Default::default() });
+    let mut preferred = russh::Preferred::default();
+    if opts.compression {
+        preferred.compression = std::borrow::Cow::Borrowed(COMPRESSED);
+    }
+    let config = Arc::new(client::Config {
+        keepalive_interval: opts.keep_alive,
+        keepalive_max: 3,
+        preferred,
+        ..Default::default()
+    });
     let lost = Arc::new(Mutex::new(None));
     let info = Arc::new(Mutex::new(SessionInfo::default()));
     let rejected = Arc::new(Mutex::new(false));
@@ -360,6 +417,7 @@ where
         rejected: rejected.clone(),
         lost: lost.clone(),
         routes: routes.clone(),
+        agent_forwarding: opts.agent_forwarding,
     };
     let mut handle = match client::connect_stream(config, stream, handler).await {
         Ok(handle) => handle,
@@ -402,12 +460,25 @@ async fn open_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream,
     }
 }
 
+/// Compression first when the host asks for it; `none` stays acceptable.
+const COMPRESSED: &[russh::compression::Name] =
+    &[russh::compression::ZLIB_LEGACY, russh::compression::ZLIB, russh::compression::NONE];
+
+fn compression_name(c: &russh::compression::Compression) -> &'static str {
+    match c {
+        russh::compression::Compression::None => "none",
+        russh::compression::Compression::Zlib => "zlib",
+        russh::compression::Compression::ZlibOpenSSH => "zlib@openssh.com",
+    }
+}
+
 fn names(methods: &MethodSet) -> Vec<String> {
     methods.iter().map(String::from).collect()
 }
 
 async fn sign_in(handle: &mut Handle, opts: &ConnectOptions) -> Result<&'static str, ConnectError> {
     match &opts.credential {
+        Credential::Agent => sign_in_with_agent(handle, &opts.user).await,
         Credential::Password(saved) => {
             let password = match saved {
                 Some(p) if !p.is_empty() => p.clone(),
@@ -453,6 +524,29 @@ async fn sign_in(handle: &mut Handle, opts: &ConnectOptions) -> Result<&'static 
             }
         }
     }
+}
+
+/// Offer each of the agent's keys until the server takes one.
+async fn sign_in_with_agent(handle: &mut Handle, user: &str) -> Result<&'static str, ConnectError> {
+    let mut agent = AgentClient::connect_named_pipe(AGENT_PIPE).await.map_err(|_| ConnectError::AgentUnavailable)?;
+    let identities = agent.request_identities().await.map_err(|_| ConnectError::AgentUnavailable)?;
+    if identities.is_empty() {
+        return Err(ConnectError::AgentEmpty);
+    }
+    let hash = handle.best_supported_rsa_hash().await?.flatten();
+    let mut remaining = Vec::new();
+    for identity in identities {
+        let key = identity.public_key().into_owned();
+        match handle
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+            .map_err(|e| ConnectError::AgentFailed(format!("{e:?}")))?
+        {
+            AuthResult::Success => return Ok("agent"),
+            AuthResult::Failure { remaining_methods, .. } => remaining = names(&remaining_methods),
+        }
+    }
+    Err(ConnectError::SignInRefused { method: "publickey", remaining })
 }
 
 /// Answer keyboard-interactive rounds: hidden prompts get the password the
@@ -529,6 +623,7 @@ pub async fn probe(host: &str, port: u16, timeout: Duration) -> Result<Presented
         rejected: Arc::new(Mutex::new(false)),
         lost: Arc::new(Mutex::new(None)),
         routes: Default::default(),
+        agent_forwarding: false,
     };
     let config = Arc::new(client::Config::default());
     let handshake = client::connect_stream(config, stream, handler);

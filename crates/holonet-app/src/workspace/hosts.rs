@@ -63,6 +63,7 @@ fn sign_in(host: &Host, data: &VaultData) -> SharedString {
     let how: SharedString = match &host.auth {
         Auth::Password { saved: Some(_) } => "Password".into(),
         Auth::Password { saved: None } => "Password, asked".into(),
+        Auth::Agent => "SSH agent".into(),
         Auth::Key { key_id, .. } => {
             data.key(*key_id).map(|k| k.name.clone()).unwrap_or_else(|| "Missing key".into()).into()
         }

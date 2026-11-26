@@ -53,6 +53,7 @@ impl Hop {
                 },
             },
             (Auth::Key { .. }, None) => return None,
+            (Auth::Agent, _) => Credential::Agent,
         })
     }
 }
@@ -190,6 +191,8 @@ mod tests {
             connect_timeout: Duration::from_secs(1),
             keep_alive: None,
             prompts: Arc::new(NoPrompts),
+            agent_forwarding: false,
+            compression: false,
             jump: None,
         }
     }

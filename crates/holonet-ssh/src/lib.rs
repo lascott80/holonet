@@ -31,7 +31,7 @@ use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc;
 
 pub use connect::{
-    BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KEEPALIVE, LostReason, Prompts,
+    AGENT_PIPE, BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KEEPALIVE, LostReason, Prompts,
     SecretRequest, SessionInfo, probe,
 };
 pub use forward::{Forward, ForwardError, ForwardSpec, ForwardStatus};
@@ -71,6 +71,8 @@ pub struct Session {
     host: String,
     /// The jump host this session runs through. Kept open while this one is.
     via: Option<Box<Session>>,
+    /// Its shell asks the host to forward this PC's agent.
+    agent_forwarding: bool,
 }
 
 /// One hop's lost-connection record, for the shell's watcher.
@@ -96,8 +98,17 @@ impl Session {
     /// through `opts.prompts`, and sign in.
     pub async fn connect(opts: ConnectOptions) -> Result<Self, ConnectError> {
         let host = opts.host.clone();
+        let agent_forwarding = opts.agent_forwarding;
         let c = connect::connect(&opts).await?;
-        Ok(Self { handle: Arc::new(c.handle), routes: c.routes, info: c.info, lost: c.lost, host, via: c.via })
+        Ok(Self {
+            handle: Arc::new(c.handle),
+            routes: c.routes,
+            info: c.info,
+            lost: c.lost,
+            host,
+            via: c.via,
+            agent_forwarding,
+        })
     }
 
     /// The jump host session this one runs through, if any.
@@ -230,6 +241,9 @@ impl Session {
                 &[],
             )
             .await?;
+        if self.agent_forwarding {
+            channel.agent_forward(true).await?;
+        }
         channel.request_shell(true).await?;
 
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ShellInput>();

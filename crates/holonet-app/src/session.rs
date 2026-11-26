@@ -569,6 +569,7 @@ impl Pane {
         let user = if host.username.is_empty() { "this user".to_string() } else { host.username.clone() };
         let line = match (&host.auth, self.hop_key(hop)) {
             (Auth::Key { .. }, Some(key)) => format!("Offering key {} for {user}", key.name),
+            (Auth::Agent, _) => format!("Offering the agent's keys for {user}"),
             _ => format!("Offering password for {user}"),
         };
         let line = format!("{}{line}", self.hop_prefix(hop));
@@ -916,6 +917,9 @@ impl Pane {
                 connect_timeout,
                 keep_alive: step.keep_alive,
                 prompts: Arc::new(UiPrompts { tx: tx.clone(), hop }),
+                // Only this pane's own host gets the agent (`ssh -A` on the last hop).
+                agent_forwarding: hop == self.jumps.len() && step.host.agent_forwarding,
+                compression: step.host.compression,
                 jump: None,
             });
         }
@@ -1423,7 +1427,15 @@ impl Pane {
                     ConnectError::SignInRefused { method, remaining } => {
                         let offered = if remaining.is_empty() { method.to_string() } else { remaining.join(",") };
                         self.note(format!("{prefix}Server: Permission denied ({offered})"), true);
-                        if *method == "publickey" {
+                        if *method == "publickey" && matches!(self.hop_host(hop).auth, Auth::Agent) {
+                            self.fail(
+                                Failure::KeyRefused,
+                                format!("{} refused the agent's keys", upper_first(&server)),
+                                format!(
+                                    "None of the keys in Windows' OpenSSH agent are in the server's authorized_keys for {user}. Add the right key to the agent with ssh-add, or choose another sign-in."
+                                ),
+                            )
+                        } else if *method == "publickey" {
                             self.fail(
                                 Failure::KeyRefused,
                                 format!("{} refused the key {key_name}", upper_first(&server)),
@@ -1447,6 +1459,21 @@ impl Pane {
                             "The key passphrase is wrong",
                             format!("Enter the passphrase for {key_name} again. Holonet has not contacted the server with this key."),
                         )
+                    }
+                    ConnectError::AgentUnavailable | ConnectError::AgentEmpty | ConnectError::AgentFailed(_) => {
+                        self.note(format!("{prefix}{e}"), true);
+                        let (title, body) = match e {
+                            ConnectError::AgentUnavailable => (
+                                "Windows' OpenSSH agent is not running",
+                                "Start the ssh-agent service in Windows, then retry, or edit the host to choose another sign-in.".to_string(),
+                            ),
+                            ConnectError::AgentEmpty => (
+                                "The SSH agent holds no keys",
+                                "Add a key to Windows' OpenSSH agent with ssh-add, then retry, or edit the host to choose another sign-in.".to_string(),
+                            ),
+                            _ => ("The SSH agent could not sign in", describe_error(e)),
+                        };
+                        self.fail(Failure::KeyRefused, title, body)
                     }
                     ConnectError::Cancelled | ConnectError::HostKeyRejected => {
                         cx.emit(SessionEvent::Close);
@@ -2148,6 +2175,7 @@ impl Pane {
         let auth = match self.info.auth_method.as_str() {
             "publickey" => self.key.as_ref().map(|k| format!("Key {}", k.name)).unwrap_or_else(|| "Key".into()),
             "password" | "keyboard-interactive" => "Password".into(),
+            "agent" => "SSH agent".into(),
             _ => String::new(),
         };
         let mut items: Vec<SharedString> = Vec::new();
@@ -2161,6 +2189,13 @@ impl Pane {
         if !self.jumps.is_empty() && matches!(self.state, State::Connected) {
             let names: Vec<&str> = self.jumps.iter().map(|j| j.name()).collect();
             items.push(format!("Through {}", names.join(", ")).into());
+        }
+        if matches!(self.state, State::Connected) && self.mode == PaneMode::Terminal {
+            if !matches!(self.info.compression.as_str(), "" | "none") {
+                items.push("Compressed".into());
+            }
+            // Terminal.dc.html: "Agent forwarding off".
+            items.push(if self.host.agent_forwarding { "Agent forwarding on" } else { "Agent forwarding off" }.into());
         }
         // The host's running port forwards (Terminal.dc.html: "Forward L 5432 → db-primary:5432").
         if matches!(self.state, State::Connected)

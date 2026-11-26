@@ -80,6 +80,9 @@ pub struct HostForm {
     /// only cleared when asked.
     forget_passphrase: bool,
     keep_alive: bool,
+    /// Connection: "Agent forwarding" and "Compression".
+    agent_forwarding: bool,
+    compression: bool,
     /// "Jump host": None, then these saved hosts (by name).
     jump_options: Vec<(HostId, String)>,
     jump_select: Entity<Select>,
@@ -185,6 +188,7 @@ impl HostForm {
         let username = text(cx, "e.g. root", h.username.clone(), true);
         let (auth, saved_password, key_id, saved_passphrase) = match &h.auth {
             Auth::Password { saved } => (1, saved.clone(), None, None),
+            Auth::Agent => (AUTH_AGENT, None, None, None),
             Auth::Key { key_id, .. } => {
                 let saved = keys.iter().find(|k| k.id == *key_id).and_then(|k| k.saved_passphrase.clone());
                 (0, None, Some(*key_id), saved)
@@ -329,6 +333,8 @@ impl HostForm {
             save_passphrase: host.is_none() || saved_passphrase.is_some(),
             forget_passphrase: false,
             keep_alive: h.keep_alive,
+            agent_forwarding: h.agent_forwarding,
+            compression: h.compression,
             jump_options,
             jump_select,
             all_hosts: data.hosts.clone(),
@@ -497,6 +503,8 @@ impl HostForm {
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         host.keep_alive = self.keep_alive;
+        host.agent_forwarding = self.agent_forwarding;
+        host.compression = self.compression;
         let folder = self.text(&self.sftp_folder, cx);
         host.sftp_folder = (!folder.is_empty()).then_some(folder);
         host.jump_host = self.own_jump;
@@ -511,6 +519,8 @@ impl HostForm {
             // The identity signs in; the host's own sign-in is kept as it was,
             // and comes back if the identity is ever deleted.
             self.original.as_ref().map(|h| h.auth.clone()).unwrap_or_default()
+        } else if self.auth == AUTH_AGENT {
+            Auth::Agent
         } else if self.auth == 1 {
             let password = self.password.read(cx).text().to_string();
             Auth::Password { saved: (self.save_password && !password.is_empty()).then(|| Secret::new(password)) }
@@ -571,7 +581,7 @@ impl HostForm {
             // Only keys this host uses, among the ones imported here, are kept.
             let used = match &host.auth {
                 Auth::Key { key_id, .. } => Some(*key_id),
-                Auth::Password { .. } => None,
+                Auth::Password { .. } | Auth::Agent => None,
             };
             let new_keys = self.new_keys.iter().filter(|k| Some(k.id) == used).cloned().collect();
             let passphrase = self.key_passphrase(cx);
@@ -767,7 +777,9 @@ impl HostForm {
                 },
             };
         }
-        if self.auth == 1 {
+        if self.auth == AUTH_AGENT {
+            "SSH agent".into()
+        } else if self.auth == 1 {
             let saved = self.save_password && !self.password.read(cx).text().is_empty();
             if saved { "Password, saved".into() } else { "Password, asked on connect".into() }
         } else {
@@ -780,6 +792,9 @@ impl HostForm {
     }
 }
 
+/// `auth` for "SSH agent" (0 is SSH key, 1 Password, 2 Identity).
+const AUTH_AGENT: usize = 3;
+
 /// Interface text for a failed connection or test.
 pub fn describe_error(e: &ConnectError) -> String {
     match e {
@@ -787,6 +802,13 @@ pub fn describe_error(e: &ConnectError) -> String {
         ConnectError::Refused => "The host refused the connection. Check the port, and that SSH is running.".into(),
         ConnectError::TimedOut(s) => format!("No answer after {s} seconds."),
         ConnectError::Network(d) => format!("Network error: {d}"),
+        ConnectError::AgentUnavailable => {
+            "Windows' OpenSSH agent is not running. Start the ssh-agent service, or choose another sign-in.".into()
+        }
+        ConnectError::AgentEmpty => {
+            "The SSH agent holds no keys. Add one with ssh-add, or choose another sign-in.".into()
+        }
+        ConnectError::AgentFailed(d) => format!("The SSH agent could not sign in: {d}"),
         other => other.to_string(),
     }
 }
@@ -864,17 +886,29 @@ impl Render for HostForm {
             .child(field("Tags", self.tags.clone(), None));
 
         let entity = cx.entity();
-        // "Identity" takes the place the design gives "SSH agent", which
-        // comes in milestone 6. It is offered once the vault has an identity.
-        let mut auth_options: Vec<SharedString> = vec!["SSH key".into(), "Password".into()];
+        // NewHost.dc.html: SSH key, Password, SSH agent; then Identity once
+        // the vault has one. Each option carries its `auth` code.
+        let mut auth_codes = vec![0, 1, AUTH_AGENT];
         if !self.identities.is_empty() {
-            auth_options.push("Identity".into());
+            auth_codes.push(2);
         }
-        let auth_choice = Segmented::new("auth", auth_options, self.auth).on_change({
+        let auth_options: Vec<SharedString> = auth_codes
+            .iter()
+            .map(|c| match *c {
+                0 => "SSH key",
+                1 => "Password",
+                2 => "Identity",
+                _ => "SSH agent",
+            })
+            .map(SharedString::from)
+            .collect();
+        let auth_index = auth_codes.iter().position(|c| *c == self.auth).unwrap_or(0);
+        let auth_choice = Segmented::new("auth", auth_options, auth_index).on_change({
             let entity = entity.clone();
             move |i, _, cx| {
+                let code = auth_codes.get(i).copied().unwrap_or(0);
                 entity.update(cx, |f, cx| {
-                    f.auth = i;
+                    f.auth = code;
                     f.test = TestState::Idle;
                     cx.notify()
                 })
@@ -906,10 +940,23 @@ impl Render for HostForm {
                         cx.notify()
                     }),
                 )));
+        } else if self.auth == AUTH_AGENT {
+            credentials = credentials.child(
+                div()
+                    .p(theme::SPACE_3)
+                    .rounded(theme::RADIUS_MD)
+                    .bg(theme::card())
+                    .border_1()
+                    .border_color(theme::line())
+                    .text_body()
+                    .text_color(theme::ink_soft())
+                    .child("Holonet will offer the keys loaded in the Windows OpenSSH agent. Nothing is stored for this host."),
+            );
         } else if self.auth == 2 {
             let how = identity.as_ref().map(|i| match &i.auth {
                 Auth::Password { saved: Some(_) } => "a password stored in the vault".to_string(),
                 Auth::Password { saved: None } => "a password asked on connect".to_string(),
+                Auth::Agent => "the SSH agent's keys".to_string(),
                 Auth::Key { key_id, .. } => match self.keys.iter().find(|k| &k.id == key_id) {
                     Some(k) => format!("the key {}", k.name),
                     None => "a key that is no longer in the vault".to_string(),
@@ -1061,15 +1108,47 @@ impl Render for HostForm {
                         None,
                     ))),
             )
-            .child(Checkbox::new("keep-alive", "Keep connection alive", self.keep_alive).on_toggle({
-                let entity = entity.clone();
-                move |v, _, cx| {
-                    entity.update(cx, |f, cx| {
-                        f.keep_alive = v;
-                        cx.notify()
-                    })
-                }
-            }));
+            // NewHost.dc.html: Agent forwarding, Keep connection alive, Compression in a row.
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(28.))
+                    .gap_y(px(4.))
+                    .child(Checkbox::new("agent-forwarding", "Agent forwarding", self.agent_forwarding).on_toggle({
+                        let entity = entity.clone();
+                        move |v, _, cx| {
+                            entity.update(cx, |f, cx| {
+                                f.agent_forwarding = v;
+                                cx.notify()
+                            })
+                        }
+                    }))
+                    .child(Checkbox::new("keep-alive", "Keep connection alive", self.keep_alive).on_toggle({
+                        let entity = entity.clone();
+                        move |v, _, cx| {
+                            entity.update(cx, |f, cx| {
+                                f.keep_alive = v;
+                                cx.notify()
+                            })
+                        }
+                    }))
+                    .child(Checkbox::new("compression", "Compression", self.compression).on_toggle({
+                        let entity = entity.clone();
+                        move |v, _, cx| {
+                            entity.update(cx, |f, cx| {
+                                f.compression = v;
+                                cx.notify()
+                            })
+                        }
+                    })),
+            )
+            .when(self.agent_forwarding, |d| {
+                d.child(crate::ui::field_help(
+                    "The host can use the keys in this PC's agent while the terminal is open. Forward it only to hosts you trust.",
+                    false,
+                ))
+            });
 
         // --------------------------------------------------------- aside --
         let mut aside = div()
