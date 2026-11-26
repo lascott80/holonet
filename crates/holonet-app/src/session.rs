@@ -520,6 +520,12 @@ impl Pane {
     }
 
     /// Each hop's typed secret, for a pane opened from this one.
+    /// A restored pane: its startup snippet already ran before Holonet
+    /// closed, and commands are never replayed (decisions.md).
+    pub fn skip_startup(&mut self) {
+        self.startup_done = true;
+    }
+
     /// Whether a hop's host is saved in the vault (a quick connect's is not).
     fn hop_saved(&self, hop: usize, cx: &gpui::App) -> bool {
         let id = self.hop_host(hop).id;

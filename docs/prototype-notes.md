@@ -2716,3 +2716,63 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 **Not clicked:** "View release on GitHub", which would open the browser.
 
 The spike program `m7_update.rs` is gone, replaced by `updates.rs`. `serde_json` (already in the lockfile) reads the answer. fmt, clippy `-D warnings` and the workspace tests pass; `holonet-app` has 52.
+
+## Milestone 7, phase 8: restore, accent, key and vault export (26 Nov 2026)
+
+**Restore open sessions on launch:**
+
+- **Saving the layout:**
+  - `VaultData.open_tabs` holds a `SavedTab` (terminal or SFTP) per tab. Each tab's layout is a `SavedLayout` tree: a pane by saved host, or a split with its axis, its share in thousandths, and two parts.
+  - It is saved only while the setting is on. Turning it off clears it.
+  - It is saved when a tab opens, a pane splits, a pane or tab closes, and on WM_CLOSE, through `Window::on_window_should_close`.
+  - Quick connects' panes are left out.
+- **Restoring:**
+  - At the first unlock of a start, the saved tabs are kept for hosts that still exist (`SavedLayout::keep` collapses a split that lost one side) and rebuilt at the next render, which has the window.
+  - Each split adds a pane for its second part's first host beside or below the pane of its first part (`Tab::restore_pane`), with the saved ratio.
+  - Restored panes skip their startup snippet (`Pane::skip_startup`), since commands are never replayed (`decisions.md`). The vault view stays in front.
+- **Settings, Connection:** "Restore open sessions on launch".
+
+**Use Windows accent color:**
+
+- **Where the colour comes from:** AccentPalette in `HKCU\…\Explorer\Accent` (`windows-sys` gains `Win32_System_Registry`). Holonet takes its second entry, the lighter shade Windows uses on dark backgrounds.
+- **How it applies:**
+  - `theme::accent()`, `accent_alpha()` and `on_accent()` read an override set by `platform::apply_accent`.
+  - Text on the accent turns white when the accent is dark (relative luminance under 0.25).
+  - The Cyan group colour stays Holonet's own, so groups do not change with Windows.
+  - It applies at unlock and when switched, and redraws every window.
+- **Settings:** a new Appearance section with that one row. "Follow Windows" is not built.
+
+**Export private key (Keychain):**
+
+- **`holonet_ssh::export_private_key`:** opens the stored key with its own passphrase if it has one (saved, or asked for in the dialog), then protects it with a new one, or none.
+- **The dialog:**
+  - Asks for the key's passphrase when none is saved, then "Passphrase for the file" and "Confirm passphrase".
+  - When both are empty, the amber question: "Without a passphrase, anyone who gets the file can sign in wherever this key is accepted." The button becomes "Export without a passphrase".
+- **Saving:** in Windows' file dialog, starting in `~/.ssh` when it exists.
+- **Test:** the export unit test covers a wrong passphrase, a new passphrase and none.
+
+**Vault backup (Settings, Vault and security):** "Export encrypted file" writes `export_backup` (phase 1) to a file you choose.
+
+**Live check** (a copy of the test vault):
+
+- **Restore:**
+  - With Restore on, I opened wsl-a with wsl-b split beside it, then behind-a (through jump-a), and started again. Both tabs came back: the split with both panes, behind-a through its jump host, all connected again.
+  - I closed behind-a's tab, then sent WM_CLOSE (`CloseMainWindow`). The process exited, and the next start brought back only the split tab.
+- **The accent:**
+  - Windows' light-2 accent on this PC is #4CC2FF.
+  - Sampled from screenshots, a checked box went from #5CC8FF to #4CC2FF when switched on, and back when off.
+- **Export:**
+  - The ECDSA test key (no passphrase of its own) was exported with "export pass", then without one after the amber question.
+  - In WSL, `ssh-keygen -y` opened the first with its passphrase (and refused a wrong one), and both were the same key.
+  - With that key in the test account's `authorized_keys` for the moment, OpenSSH signed in with each file (the passphrase given through `SSH_ASKPASS`).
+- **Backup:** the export starts with `HOLONETV` and opened with the vault password. It also restored its saved tab.
+
+**Problems found:**
+
+- **The caption X button:** my synthetic clicks (move, press, release) on the window's X, and on Minimize, do nothing. GPUI handles these buttons through non-client messages, which this harness's clicks do not seem to produce. WM_CLOSE, which the X sends, works. The owner should check the X by hand at the done check.
+- **A test started on the real vault path:** one test call started Holonet without `HOLONET_VAULT`, so it opened on the default `%APPDATA%` path at the Create screen. Nothing was created, because the screen needs the password twice. Every call that starts Holonet now sets the variable itself.
+- **Restoring `authorized_keys`:** copying it back as root left it owned by root with mode 644. It was put back to the test account, 600.
+
+**Cleanup and checks:**
+- The test vault, the exported keys and the backup were removed. The test account's `authorized_keys` is its original 3 lines, mode 600, and nothing was left in `/tmp`.
+- fmt, clippy `-D warnings` and the workspace tests pass: `holonet-model` 29, `holonet-ssh` 8 unit tests, `holonet-app` 52.

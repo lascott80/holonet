@@ -17,6 +17,47 @@ pub fn reduced_motion() -> bool {
     false
 }
 
+/// Windows' accent color as `0xRRGGBB`: the lighter shade Windows itself
+/// uses on dark backgrounds (AccentPalette's second entry), so it reads on
+/// Holonet's dark surfaces.
+#[cfg(windows)]
+pub fn windows_accent() -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, value) = (wide(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"), wide("AccentPalette"));
+    let mut palette = [0u8; 32];
+    let mut len = palette.len() as u32;
+    // SAFETY: reads at most `len` bytes into `palette`; strings are NUL-terminated.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_BINARY,
+            std::ptr::null_mut(),
+            palette.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if status != 0 || len < 8 {
+        return None;
+    }
+    // Entries are R, G, B, A; the second is "light 2".
+    let [r, g, b] = [palette[4], palette[5], palette[6]];
+    Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+}
+
+#[cfg(not(windows))]
+pub fn windows_accent() -> Option<u32> {
+    None
+}
+
+/// "Use Windows accent color": switch the accent and redraw.
+pub fn apply_accent(on: bool, cx: &mut gpui::App) {
+    crate::theme::set_accent(if on { windows_accent() } else { None });
+    cx.refresh_windows();
+}
+
 /// Something about this PC changed that can break connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemEvent {

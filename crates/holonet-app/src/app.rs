@@ -98,6 +98,8 @@ pub struct HolonetApp {
     picker: Option<Entity<HostPicker>>,
     /// The command palette, while open.
     palette: Option<Entity<crate::palette::CommandPalette>>,
+    /// Tabs to reopen at the next render ("Restore open sessions on launch").
+    pending_restore: Vec<holonet_model::SavedTab>,
     /// An SFTP tab waiting for "Close anyway?" (transfers still running).
     closing: Option<Entity<Tab>>,
     /// Where the "+" button was drawn, to place the picker under it.
@@ -140,6 +142,12 @@ const IDLE_CHECK: Duration = Duration::from_secs(10);
 impl HolonetApp {
     pub fn new(path: PathBuf, runtime: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app = cx.entity().downgrade();
+        // Closing the window keeps the open tabs for the next start.
+        let closing = app.clone();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = closing.update(cx, |app, cx| app.save_layout(cx));
+            true
+        });
         let stage = if holonet_vault::exists(&path) {
             let p = path.clone();
             Stage::Locked(cx.new(|cx| Locked::new(app, p, LockReason::Startup, 0, window, cx)))
@@ -189,6 +197,7 @@ impl HolonetApp {
             last_session: None,
             logs: None,
             palette: None,
+            pending_restore: Vec::new(),
             pending_history: Vec::new(),
             history_cleaned: false,
         }
@@ -218,10 +227,100 @@ impl HolonetApp {
                     w.check_updates(cx);
                 }
             }
+            if let Some(d) = w.vault_data() {
+                crate::platform::apply_accent(d.settings.appearance.windows_accent, cx);
+            }
         });
+        // The tabs open when Holonet last closed, once per start.
+        if clean
+            && let Some(d) = workspace.read(cx).vault_data()
+            && d.settings.connection.restore_sessions
+        {
+            let exists = |h: HostId| d.host(h).is_some();
+            self.pending_restore = d
+                .open_tabs
+                .iter()
+                .filter_map(|t| {
+                    t.layout.clone().keep(&exists).map(|layout| holonet_model::SavedTab { layout, ..t.clone() })
+                })
+                .collect();
+        }
         self.stage = Stage::Open(workspace);
         self.last_input.set(Instant::now());
         cx.notify();
+    }
+
+    /// The open tabs as they are now, by saved host.
+    fn current_layout(&self, cx: &App) -> Vec<holonet_model::SavedTab> {
+        let Some(d) = self.vault_data(cx) else { return Vec::new() };
+        let saved = |h: HostId| d.host(h).is_some();
+        self.tabs
+            .iter()
+            .filter_map(|t| {
+                let tab = t.read(cx);
+                let layout = tab.layout(&saved, cx)?;
+                Some(holonet_model::SavedTab { files: tab.is_files(cx), layout })
+            })
+            .collect()
+    }
+
+    /// Keep the open tabs in the vault while "Restore open sessions on
+    /// launch" is on (only then: otherwise nothing about them is kept).
+    fn save_layout(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.vault_data(cx) else { return };
+        let tabs = if d.settings.connection.restore_sessions { self.current_layout(cx) } else { Vec::new() };
+        if tabs != d.open_tabs
+            && let Some(w) = self.workspace().cloned()
+        {
+            w.update(cx, |w, cx| w.save(move |d| d.open_tabs = tabs, cx));
+        }
+    }
+
+    /// Reopen saved tabs: each pane connects again, without its startup
+    /// snippet.
+    fn restore_tabs(&mut self, tabs: Vec<holonet_model::SavedTab>, window: &mut Window, cx: &mut Context<Self>) {
+        use holonet_model::{SavedLayout, SplitAxis};
+        let active = self.active;
+        for saved in tabs {
+            let hosts = saved.layout.hosts();
+            let Some(&first) = hosts.first() else { continue };
+            if saved.files {
+                self.open_files(first, Vec::new(), window, cx);
+                continue;
+            }
+            let size = Self::tab_grid(window);
+            let Some(pane) = self.new_pane(first, size, (PaneMode::Terminal, Vec::new()), window, cx) else { continue };
+            pane.update(cx, |p, _| p.skip_startup());
+            let tab = self.open_tab_with(pane.clone(), window, cx);
+            // Each split: a pane for the second part's first host beside
+            // or below the pane holding the first part's first host.
+            fn rebuild(
+                app: &mut HolonetApp,
+                tab: &Entity<Tab>,
+                node: &SavedLayout,
+                at: Entity<Pane>,
+                size: GridSize,
+                window: &mut Window,
+                cx: &mut Context<HolonetApp>,
+            ) {
+                let SavedLayout::Split { axis, permille, first, second } = node else { return };
+                let Some(&host) = second.hosts().first() else { return };
+                let Some(pane) = app.new_pane(host, size, (PaneMode::Terminal, Vec::new()), window, cx) else { return };
+                pane.update(cx, |p, _| p.skip_startup());
+                let axis = match axis {
+                    SplitAxis::Right => Axis::Right,
+                    SplitAxis::Down => Axis::Down,
+                };
+                let ratio = f32::from(*permille) / 1000.0;
+                tab.update(cx, |t, cx| t.restore_pane(&at, axis, pane.clone(), ratio, cx));
+                rebuild(app, tab, first, at, size, window, cx);
+                rebuild(app, tab, second, pane, size, window, cx);
+            }
+            rebuild(self, &tab, &saved.layout, pane, size, window, cx);
+        }
+        // The vault view stays in front; the restored tabs are in the bar.
+        self.select(active, window, cx);
+        self.save_layout(cx);
     }
 
     /// Change History: saved now, or at the next unlock while locked.
@@ -765,6 +864,7 @@ impl HolonetApp {
         .detach();
         self.tabs.push(tab.clone());
         self.select(Some(self.tabs.len() - 1), window, cx);
+        self.save_layout(cx);
         tab
     }
 
@@ -802,6 +902,7 @@ impl HolonetApp {
         };
         let Some(pane) = pane else { return };
         tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
+        self.save_layout(cx);
         cx.notify();
     }
 
@@ -841,6 +942,7 @@ impl HolonetApp {
         } else {
             tab.update(cx, |t, cx| t.focus(window, cx));
         }
+        self.save_layout(cx);
     }
 
     /// Close a whole tab and every pane in it, asking first while an SFTP
@@ -877,6 +979,7 @@ impl HolonetApp {
             other => other,
         };
         self.select(next, window, cx);
+        self.save_layout(cx);
     }
 
     fn select(&mut self, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1273,6 +1376,11 @@ impl Render for HolonetApp {
                 )
         });
         // Palette.dc.html: the palette over a dimmed window, near the top.
+        if !self.pending_restore.is_empty() {
+            let tabs = std::mem::take(&mut self.pending_restore);
+            let app = cx.entity();
+            window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.restore_tabs(tabs, window, cx)));
+        }
         let palette = self.palette.clone().map(|palette| {
             div()
                 .id("palette-layer")

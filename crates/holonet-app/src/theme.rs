@@ -30,8 +30,6 @@ colors! {
     ink_soft = 0xCFCFCF;
     ink_muted = 0xA3A3A3;
     ink_dim = 0x8A8A8A;
-    accent = 0x5CC8FF;
-    on_accent = 0x06202E;
     group_violet = 0xB9A5FF;
     group_mint = 0x7FD6B5;
     group_gray = 0xA3A3A3;
@@ -42,10 +40,45 @@ colors! {
     warn_ink = 0xD9CDBB;
 }
 
+/// Holonet's own accent (tokens.json).
+const ACCENT: u32 = 0x5CC8FF;
+
+/// Windows' accent color while "Use Windows accent color" is on, as
+/// `0x1RRGGBB`; 0 for Holonet's own.
+static WINDOWS_ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Use another accent (`0xRRGGBB`), or Holonet's own with `None`.
+pub fn set_accent(color: Option<u32>) {
+    let v = color.map_or(0, |c| 0x0100_0000 | (c & 0x00FF_FFFF));
+    WINDOWS_ACCENT.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn accent_hex() -> u32 {
+    match WINDOWS_ACCENT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => ACCENT,
+        v => v & 0x00FF_FFFF,
+    }
+}
+
+pub fn accent() -> Rgba {
+    rgb(accent_hex())
+}
+
+/// Text on an accent fill: Holonet's dark ink, or white on a dark accent.
+pub fn on_accent() -> Rgba {
+    let c = accent_hex();
+    let channel = |shift: u32| {
+        let v = ((c >> shift) & 0xFF) as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let luminance = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+    if luminance > 0.25 { rgb(0x06202E) } else { rgb(0xFFFFFF) }
+}
+
 /// `accent` at a given opacity (selection fills, icon tiles).
 pub fn accent_alpha(alpha: f32) -> Rgba {
     let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
-    rgba(0x5CC8FF00 | a)
+    rgba((accent_hex() << 8) | a)
 }
 
 /// Any token color at a given opacity.
@@ -197,7 +230,8 @@ pub fn no_group() -> Rgba {
 pub fn group_color(color: holonet_model::GroupColor) -> Rgba {
     use holonet_model::GroupColor;
     match color {
-        GroupColor::Cyan => accent(),
+        // Fixed, so a group's colour does not change with Windows' accent.
+        GroupColor::Cyan => rgb(ACCENT),
         GroupColor::Violet => group_violet(),
         GroupColor::Mint => group_mint(),
         GroupColor::Gray => group_gray(),

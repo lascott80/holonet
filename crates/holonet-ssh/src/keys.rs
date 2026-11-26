@@ -153,6 +153,29 @@ pub fn convert_ppk(text: &str, passphrase: Option<&str>) -> Result<Secret, KeyFi
     Ok(Secret::new(text.as_str()))
 }
 
+/// A stored private key as an OpenSSH file for export: opened with its own
+/// passphrase if it has one, then protected with `new_passphrase`, or left
+/// unprotected when that is `None` or empty.
+pub fn export_private_key(
+    text: &str,
+    passphrase: Option<&str>,
+    new_passphrase: Option<&str>,
+) -> Result<Secret, KeyFileError> {
+    let key = PrivateKey::from_openssh(text).map_err(|_| KeyFileError::NotAKey)?;
+    let key = if key.is_encrypted() {
+        let p = passphrase.filter(|p| !p.is_empty()).ok_or(KeyFileError::NeedsPassphrase)?;
+        key.decrypt(p).map_err(|_| KeyFileError::WrongPassphrase)?
+    } else {
+        key
+    };
+    let key = match new_passphrase.filter(|p| !p.is_empty()) {
+        Some(p) => key.encrypt(&mut rand::rng(), p).map_err(|_| KeyFileError::NotAKey)?,
+        None => key,
+    };
+    let text = key.to_openssh(LineEnding::LF).map_err(|_| KeyFileError::NotAKey)?;
+    Ok(Secret::new(text.as_str()))
+}
+
 /// Key types offered by "Generate key" (Keychain.dc.html).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyKind {
@@ -328,5 +351,21 @@ mod tests {
         // A damaged file is refused.
         let damaged = fixture("putty-ed25519-v3-plain-1.ppk").replace("Public-Lines: 2", "Public-Lines: 9");
         assert_eq!(inspect_private_key(&damaged), Err(KeyFileError::NotAKey));
+    }
+
+    #[test]
+    fn export_rewraps_the_passphrase() {
+        let key = generate_key(KeyKind::Ed25519, "export test", Some("old pass")).unwrap();
+        let text = key.private_key.expose();
+        assert_eq!(export_private_key(text, None, None).err(), Some(KeyFileError::NeedsPassphrase));
+        assert_eq!(export_private_key(text, Some("wrong"), None).err(), Some(KeyFileError::WrongPassphrase));
+        // A new passphrase, then none: the same key either way.
+        let out = export_private_key(text, Some("old pass"), Some("new pass")).unwrap();
+        let info = inspect_private_key(out.expose()).unwrap();
+        assert!(info.encrypted && info.public_key == key.info.public_key);
+        assert!(decode_secret_key(out.expose(), Some("new pass")).is_ok());
+        let plain = export_private_key(text, Some("old pass"), Some("")).unwrap();
+        assert!(!inspect_private_key(plain.expose()).unwrap().encrypted);
+        assert!(plain.expose().starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
     }
 }

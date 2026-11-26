@@ -66,8 +66,15 @@ const LICENCES: &[(&str, &str)] = &[
 ];
 
 /// Sections, in page order: (chip label, child index in the scroll container).
-const SECTIONS: &[(&str, usize)] =
-    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("SFTP", 4), ("Keyboard", 5), ("Updates", 6)];
+const SECTIONS: &[(&str, usize)] = &[
+    ("Terminal", 1),
+    ("Appearance", 2),
+    ("Vault and security", 3),
+    ("Connection", 4),
+    ("SFTP", 5),
+    ("Keyboard", 6),
+    ("Updates", 7),
+];
 
 /// Settings, SFTP, "When a file already exists" and "Transfers at once"
 /// options in order.
@@ -448,6 +455,7 @@ impl Workspace {
                     .children(self.update_notice(cx)),
             ))
             .child(page_block(width, self.terminal_section(&settings, &installed, preview, cx)))
+            .child(page_block(width, self.appearance_section(cx)))
             .child(page_block(width, self.security_section(cx)))
             .child(page_block(width, self.connection_section(&connection, cx)))
             .child(page_block(width, self.sftp_section(cx)))
@@ -775,6 +783,16 @@ impl Workspace {
                 }),
             )
             .into_any_element(),
+            setting_row(
+                "Vault backup",
+                Some(
+                    "An encrypted copy of the vault, opened with the vault password. Session logs are not included."
+                        .into(),
+                ),
+                Button::secondary("export-backup", "Export encrypted file")
+                    .on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))),
+            )
+            .into_any_element(),
         ]))
     }
 
@@ -810,6 +828,24 @@ impl Workspace {
                     cx.notify();
                 }),
             ),
+            check_row(
+                "restore-sessions",
+                "Restore open sessions on launch",
+                Some("Reopens the tabs and splits open when Holonet closed, each connecting again. Startup snippets do not run again."),
+                connection.restore_sessions,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| {
+                        let c = &mut d.settings.connection;
+                        c.restore_sessions = !c.restore_sessions;
+                        // Off keeps nothing about open tabs.
+                        if !c.restore_sessions {
+                            d.open_tabs.clear();
+                        }
+                    }, cx);
+                    cx.notify();
+                }),
+            ),
             // Settings.dc.html's wording; the help is amber while it is on.
             check_row_with(
                 "log-default",
@@ -835,6 +871,53 @@ impl Workspace {
             )
             .into_any_element(),
         ]))
+    }
+
+    /// Settings.dc.html, Appearance: the accent. The app theme stays dark
+    /// gray ("Follow Windows" needs a light theme that is not designed).
+    fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.vault_data().is_some_and(|d| d.settings.appearance.windows_accent);
+        let available = crate::platform::windows_accent().is_some();
+        section("Appearance").child(setting_card(vec![check_row(
+            "windows-accent",
+            "Use Windows accent color",
+            Some(if available {
+                "Buttons, links and highlights use the accent color chosen in Windows' Personalization settings."
+            } else {
+                "Windows did not report an accent color, so Holonet's own is used."
+            }),
+            on,
+            available,
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.save(|d| d.settings.appearance.windows_accent = !d.settings.appearance.windows_accent, cx);
+                let on = this.vault_data().is_some_and(|d| d.settings.appearance.windows_accent);
+                crate::platform::apply_accent(on, cx);
+            }),
+        )]))
+    }
+
+    /// "Vault backup: Export encrypted file".
+    fn export_backup(&mut self, cx: &mut Context<Self>) {
+        let dir = std::env::var_os("USERPROFILE")
+            .map(|p| std::path::PathBuf::from(p).join("Documents"))
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let answer = cx.prompt_for_new_path(&dir, Some("holonet-backup.holonet"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = answer.await else { return };
+            let _ = this.update(cx, |w: &mut Workspace, cx| {
+                let Some(vault) = w.vault.as_ref() else { return };
+                match vault.export_backup(&path) {
+                    Ok(()) => {
+                        let shown = super::short_path(&path.display().to_string(), 80);
+                        w.notice = Some(format!("Saved an encrypted copy of the vault to {shown}.").into())
+                    }
+                    Err(e) => w.save_error = Some(format!("Holonet could not export the vault: {e}").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Settings.dc.html, SFTP.

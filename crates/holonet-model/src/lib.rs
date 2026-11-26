@@ -928,6 +928,10 @@ pub struct VaultData {
     /// Session records, oldest first.
     #[serde(default)]
     pub history: Vec<SessionRecord>,
+    /// The tabs open when Holonet last closed, for "Restore open sessions
+    /// on launch".
+    #[serde(default)]
+    pub open_tabs: Vec<SavedTab>,
     #[serde(default)]
     pub settings: Settings,
 }
@@ -944,9 +948,73 @@ impl Default for VaultData {
             snippets: Vec::new(),
             forward_rules: Vec::new(),
             history: Vec::new(),
+            open_tabs: Vec::new(),
             settings: Settings::default(),
         }
     }
+}
+
+/// How a split divides its space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitAxis {
+    /// Side by side.
+    Right,
+    /// One above the other.
+    Down,
+}
+
+/// A tab's panes as they were laid out, by saved host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SavedLayout {
+    Pane {
+        host: HostId,
+    },
+    Split {
+        axis: SplitAxis,
+        /// The first part's share, in thousandths.
+        permille: u16,
+        first: Box<SavedLayout>,
+        second: Box<SavedLayout>,
+    },
+}
+
+impl SavedLayout {
+    /// The hosts, first pane first.
+    pub fn hosts(&self) -> Vec<HostId> {
+        match self {
+            SavedLayout::Pane { host } => vec![*host],
+            SavedLayout::Split { first, second, .. } => {
+                let mut out = first.hosts();
+                out.extend(second.hosts());
+                out
+            }
+        }
+    }
+
+    /// Without the panes whose host fails `keep` (deleted since): a split
+    /// that loses one side becomes its other side.
+    pub fn keep(self, keep: &impl Fn(HostId) -> bool) -> Option<Self> {
+        match self {
+            SavedLayout::Pane { host } => keep(host).then_some(self),
+            SavedLayout::Split { axis, permille, first, second } => match (first.keep(keep), second.keep(keep)) {
+                (Some(a), Some(b)) => {
+                    Some(SavedLayout::Split { axis, permille, first: Box::new(a), second: Box::new(b) })
+                }
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+}
+
+/// An open tab to restore: a terminal tab's layout, or an SFTP tab's host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTab {
+    #[serde(default)]
+    pub files: bool,
+    pub layout: SavedLayout,
 }
 
 /// Why a host's jump host cannot be used.
@@ -2003,5 +2071,33 @@ mod tests {
         d.known_hosts.push(a.clone());
         assert_eq!(d.known_host("localhost", 22).map(|k| k.host.as_str()), Some(a.host.as_str()));
         assert!(!entry("|1|bad").matches("localhost", 22));
+    }
+
+    #[test]
+    fn saved_layouts_drop_deleted_hosts() {
+        let (a, b, c) = (HostId::new(), HostId::new(), HostId::new());
+        let pane = |host| Box::new(SavedLayout::Pane { host });
+        let layout = SavedLayout::Split {
+            axis: SplitAxis::Right,
+            permille: 400,
+            first: pane(a),
+            second: Box::new(SavedLayout::Split {
+                axis: SplitAxis::Down,
+                permille: 500,
+                first: pane(b),
+                second: pane(c),
+            }),
+        };
+        assert_eq!(layout.hosts(), [a, b, c]);
+        // b is gone: its split becomes c alone, under the same outer split.
+        let kept = layout.clone().keep(&|h| h != b).unwrap();
+        assert_eq!(kept, SavedLayout::Split { axis: SplitAxis::Right, permille: 400, first: pane(a), second: pane(c) });
+        assert_eq!(layout.clone().keep(&|h| h == c), Some(SavedLayout::Pane { host: c }));
+        assert_eq!(layout.keep(&|_| false), None);
+        // Saved as written.
+        let tab = SavedTab { files: false, layout: SavedLayout::Pane { host: a } };
+        let json = serde_json::to_string(&tab).unwrap();
+        assert!(json.contains(r#""kind":"pane""#), "{json}");
+        assert_eq!(serde_json::from_str::<SavedTab>(&json).unwrap(), tab);
     }
 }
