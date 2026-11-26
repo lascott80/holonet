@@ -27,6 +27,7 @@ icons![
     "hosts",
     "terminal",
     "folder",
+    "folder-plus",
     "key",
     "settings",
     "forwarding",

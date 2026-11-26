@@ -470,6 +470,18 @@ impl Pane {
         }
     }
 
+    /// Transfers in this pane's SFTP view that closing it would stop.
+    pub fn unfinished_transfers(&self, cx: &gpui::App) -> usize {
+        self.files.as_ref().map_or(0, |f| f.read(cx).unfinished())
+    }
+
+    /// Closing: stop this pane's transfers (before [`Self::disconnect`]).
+    pub fn stop_transfers(&mut self, cx: &mut Context<Self>) {
+        if let Some(files) = self.files.clone() {
+            files.update(cx, |f, _| f.stop_all());
+        }
+    }
+
     pub fn is_files(&self) -> bool {
         self.mode == PaneMode::Files
     }

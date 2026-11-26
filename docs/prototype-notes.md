@@ -1668,3 +1668,53 @@ fmt, clippy and all workspace tests pass.
 **Still to come:** closing an SFTP tab with transfers still running should ask "n transfers are still running. Close anyway?" (milestone 5 plan, "States to design"). It is added to phase 7.
 
 fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 7: rename, delete, permissions and new folder (25 Nov 2026)
+
+**Where they open:**
+- The action bar has, in the design's order: Upload or Download, Rename (one item only), Permissions (host only), Copy path, Delete (amber outline), and Clear.
+- Each pane's navigation row has New folder after Refresh. The icon is `folder-plus`, the folder icon with the `plus` cross; New folder is not drawn in the design.
+- Each is disabled when it cannot act: "This PC" itself, or the host while reconnecting.
+
+**The popups** are drawn from Sftp.dc.html. They share a 460 px card (the phase 6 width lesson) and open inside the SFTP tab.
+- **Rename and New folder:**
+  - "Rename on wsl-a" or "New folder on This PC", with a mono name field. Enter applies it and Escape cancels.
+  - **The note under the field** says "Renames a.txt" or "Creates it in C:\…".
+  - **Problems, shown in amber as you type:**
+    - "Enter a name without a slash."
+    - "Windows cannot use this name." (this PC: `\`, reserved characters, `CON`-style names).
+    - "Something with this name already exists in this folder."
+- **Delete:**
+  - A warning card: "Delete 2 items from This PC?" or "… from wsl-a?".
+  - The note: "These are moved to the Recycle Bin on this PC." or "Files deleted over SFTP do not go to a recycle bin. This cannot be undone."
+  - The names, then Cancel and the amber Delete.
+  - On the host, folders go with their contents.
+- **Permissions (host only):**
+  - "Permissions for y.sh" with its path, or "for n items" with "The same permissions are applied to every selected item."
+  - The Read / Write / Run grid for Owner, Group and Everyone else, the octal and symbolic values, and Cancel / Apply.
+  - The grid starts from the first item's mode. Applying sets the nine bits on every selected item and keeps each item's setuid, setgid and sticky bits.
+  - **The drawn Owner and Group fields are left out.** SFTP v3 only gives numeric ids, and the plan's default is to set the mode only.
+- **While waiting:** the work runs off the UI thread and the buttons are disabled. A refusal shows in the popup in amber, and the popup stays open. Success closes it, clears the selection, refreshes the side, and puts a note in the transfers header ("Changed the permissions of 1 item.").
+
+**Closing an SFTP tab with transfers** (plan, "States to design"):
+- The tab's ×, Ctrl Shift W and closing its pane now ask first, in a warning dialog: "1 transfer is still running" / "n transfers are still running", "Closing wsl-a stops it, and the queue goes with the tab. Close anyway?", with Keep the tab and Close tab.
+- Paused, queued and interrupted transfers count too.
+- **Close tab** removes every unfinished job before disconnecting. The engine cancels active copies, and a cancelled download's part file is deleted when the copy stops.
+
+**Check (WSL server, release build, throwaway folders, removed afterwards):**
+
+| Test | Result |
+| --- | --- |
+| New folder on this PC: `a.txt`, then `bad:name`, then `made here` + Enter | "Something with this name already exists in this folder.", then "Windows cannot use this name.", then the folder was created |
+| Rename `a.txt` to `renamed.txt` on this PC | Renamed |
+| Delete `made here` and `b.txt` on this PC | Both in the Recycle Bin, original location the test folder. Those two `$R`/`$I` entries were then removed by path |
+| New folder `newdir` on the host | Created |
+| Rename `x.txt` to `x2.txt` on the host | Renamed |
+| Permissions on `y.sh`: 644 → owner and group run, others no read | Grid showed 750 `rwxr-x---`; `stat` on the server: 750 |
+| Delete `d/` (with `d/e/z`) and `newdir/` on the host | Both gone |
+| Download a 3 GB file, then click the tab's × | "1 transfer is still running"; Keep the tab kept it |
+| Pause it at 73%, then Ctrl Shift W, then Close tab | Asked again (paused counts); the tab closed and the 2.3 GB part file was deleted |
+
+**A test-harness problem, not Holonet's:** the phase 5 Shift click test left Shift held down in Windows. The unlock field then got "CORRECT HORSE BATTERYWSL_A", and the next runs looked like a broken unlock. Releasing the key with `keybd_event` fixed it.
+
+fmt, clippy and all workspace tests pass.

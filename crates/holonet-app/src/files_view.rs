@@ -15,7 +15,9 @@
 //! Pause, Resume, Retry and remove, and the finished ones on request. A
 //! transfer that meets names already there asks once, in the conflict
 //! popup, unless Settings chose Overwrite or Keep both.
-//! Rename, delete, permissions and new folder come in milestone 5 phase 7.
+//! The action bar's Rename, Permissions (on the host) and Delete, and each
+//! pane's New folder, open popups; Delete sends this PC's files to the
+//! Recycle Bin and deletes the host's for good, after saying so.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -37,7 +39,7 @@ use holonet_model::{Host, HostId, OnConflict, SftpSettings};
 
 use crate::app::HolonetApp;
 use crate::theme::{self, TypeStyles};
-use crate::ui::{Button, TextField, TextFieldEvent, icon, modal};
+use crate::ui::{Button, ButtonKind, TextField, TextFieldEvent, icon, modal};
 
 /// Column widths (Sftp.dc.html's grid).
 const CHECK_W: f32 = 28.;
@@ -237,6 +239,89 @@ impl Render for DragChip {
     }
 }
 
+/// An open popup: rename, new folder, delete or permissions.
+struct Dialog {
+    side: Side,
+    kind: DialogKind,
+    /// The host's or this PC's answer when it refused.
+    error: Option<SharedString>,
+    /// Waiting for that answer; the buttons are disabled.
+    busy: bool,
+}
+
+enum DialogKind {
+    /// Rename `old`, or New folder when `None`.
+    Name {
+        old: Option<Entry>,
+        field: Entity<TextField>,
+        _subscription: Subscription,
+    },
+    Delete {
+        entries: Vec<Entry>,
+    },
+    /// Read, write and run for owner, group and everyone else.
+    Permissions {
+        entries: Vec<Entry>,
+        bits: [bool; 9],
+    },
+}
+
+/// What a confirmed popup does, run off the UI thread.
+enum Op {
+    LocalRename(PathBuf, PathBuf),
+    RemoteRename(RemotePath, RemotePath),
+    LocalFolder(PathBuf),
+    RemoteFolder(RemotePath),
+    /// To the Recycle Bin (`decisions.md`).
+    LocalRecycle(Vec<PathBuf>),
+    /// Permanently, folders with their contents.
+    RemoteRemove(Vec<RemotePath>),
+    /// Each path's new mode: the grid, keeping setuid, setgid and sticky.
+    RemoteMode(Vec<(RemotePath, u32)>),
+}
+
+impl Op {
+    fn remote(&self) -> bool {
+        matches!(self, Op::RemoteRename(..) | Op::RemoteFolder(_) | Op::RemoteRemove(_) | Op::RemoteMode(_))
+    }
+
+    /// Run it; the text is the note to show afterwards.
+    async fn run(self, remote: Option<Arc<Remote>>) -> Result<Option<String>, FileError> {
+        let blocking = |f: Box<dyn FnOnce() -> Result<Option<String>, FileError> + Send>| async move {
+            tokio::task::spawn_blocking(f).await.map_err(|e| FileError::Other(e.to_string()))?
+        };
+        match self {
+            Op::LocalRename(from, to) => blocking(Box::new(move || local::rename(&from, &to).map(|_| None))).await,
+            Op::LocalFolder(path) => blocking(Box::new(move || local::create_folder(&path).map(|_| None))).await,
+            Op::LocalRecycle(paths) => {
+                let n = paths.len();
+                blocking(Box::new(move || {
+                    local::recycle(&paths)
+                        .map(|_| Some(format!("Moved {} to the Recycle Bin.", plural(n, "item", "items"))))
+                }))
+                .await
+            }
+            Op::RemoteRename(from, to) => remote.expect("checked by the caller").rename(&from, &to).await.map(|_| None),
+            Op::RemoteFolder(path) => remote.expect("checked by the caller").create_folder(&path).await.map(|_| None),
+            Op::RemoteRemove(paths) => {
+                let remote = remote.expect("checked by the caller");
+                let mut removed = 0;
+                for path in &paths {
+                    removed += remote.remove(path).await?;
+                }
+                Ok(Some(format!("Deleted {}.", plural(removed, "file or folder", "files and folders"))))
+            }
+            Op::RemoteMode(changes) => {
+                let remote = remote.expect("checked by the caller");
+                for (path, mode) in &changes {
+                    remote.set_mode(path, *mode).await?;
+                }
+                Ok(Some(format!("Changed the permissions of {}.", plural(changes.len(), "item", "items"))))
+            }
+        }
+    }
+}
+
 /// A planned transfer waiting for the conflict popup's answer.
 struct Pending {
     plan: Plan,
@@ -266,6 +351,8 @@ pub struct FilesView {
     queue_scroll: UniformListScrollHandle,
     /// The conflict popup's transfer.
     pending: Option<Pending>,
+    /// Rename, New folder, Delete or Permissions, while open.
+    dialog: Option<Dialog>,
     refresh_pending: bool,
     /// The last thing to report (skipped items, a copied path, a failure).
     note: Option<SharedString>,
@@ -436,6 +523,7 @@ impl FilesView {
             show_finished: false,
             queue_scroll: UniformListScrollHandle::new(),
             pending: None,
+            dialog: None,
             refresh_pending: false,
             note: None,
             dragging: None,
@@ -904,6 +992,447 @@ impl FilesView {
         cx.notify();
     }
 
+    // ------------------------------------------------------------ dialogs --
+
+    /// Where a side is, for dialog titles: "This PC" or the host's name.
+    fn side_name(&self, side: Side) -> SharedString {
+        match side {
+            Side::Local => "This PC".into(),
+            Side::Remote => self.host_name.clone(),
+        }
+    }
+
+    /// Whether this side can change files now (a folder, and for the host a
+    /// connection).
+    fn can_edit(&self, side: Side) -> bool {
+        (side == Side::Local || self.remote.is_some()) && self.side(side).place.as_ref().is_some_and(Place::is_folder)
+    }
+
+    /// Rename (one selected item) or New folder: a name popup.
+    fn open_name(&mut self, side: Side, rename: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let old = if rename {
+            match self.side(side).selection().as_slice() {
+                [one] => Some((*one).clone()),
+                _ => return,
+            }
+        } else {
+            None
+        };
+        let field = cx.new(|cx| {
+            TextField::new(cx, if rename { "" } else { "New folder" })
+                .mono()
+                .with_text(old.as_ref().map(|e| e.name.clone()).unwrap_or_default())
+        });
+        let subscription = cx.subscribe(&field, |this: &mut Self, _, event: &TextFieldEvent, cx| match event {
+            TextFieldEvent::Submitted => this.apply_dialog(cx),
+            TextFieldEvent::Cancelled => this.close_dialog(cx),
+            TextFieldEvent::Changed => {
+                if let Some(Dialog { error, .. }) = &mut this.dialog {
+                    *error = None;
+                }
+                cx.notify();
+            }
+        });
+        field.read(cx).focus(window);
+        self.dialog = Some(Dialog {
+            side,
+            kind: DialogKind::Name { old, field, _subscription: subscription },
+            error: None,
+            busy: false,
+        });
+        cx.notify();
+    }
+
+    fn open_delete(&mut self, side: Side, cx: &mut Context<Self>) {
+        let entries: Vec<Entry> = self.side(side).selection().into_iter().cloned().collect();
+        if entries.is_empty() {
+            return;
+        }
+        self.dialog = Some(Dialog { side, kind: DialogKind::Delete { entries }, error: None, busy: false });
+        cx.notify();
+    }
+
+    fn open_permissions(&mut self, cx: &mut Context<Self>) {
+        let entries: Vec<Entry> = self.remote_side.selection().into_iter().cloned().collect();
+        let Some(first) = entries.first() else { return };
+        let mode = first.mode.unwrap_or(0o644);
+        let bits = std::array::from_fn(|i| mode & (0o400 >> i) != 0);
+        self.dialog = Some(Dialog {
+            side: Side::Remote,
+            kind: DialogKind::Permissions { entries, bits },
+            error: None,
+            busy: false,
+        });
+        cx.notify();
+    }
+
+    fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.as_ref().is_some_and(|d| !d.busy) {
+            self.dialog = None;
+        }
+        cx.notify();
+    }
+
+    /// Why the name popup's name cannot be used, or `None` when it can.
+    fn name_problem(&self, side: Side, old: Option<&Entry>, name: &str) -> Option<&'static str> {
+        if name.is_empty() {
+            return Some("Enter a name.");
+        }
+        if name.contains('/') || name == "." || name == ".." {
+            return Some("Enter a name without a slash.");
+        }
+        if side == Side::Local && (name.contains('\\') || plan::windows_unsafe(name)) {
+            return Some("Windows cannot use this name.");
+        }
+        let same = old.is_some_and(|o| o.name == name);
+        if !same && self.side(side).entries().iter().any(|e| e.name == name) {
+            return Some("Something with this name already exists in this folder.");
+        }
+        None
+    }
+
+    /// The dialog's confirming button: Rename, Create, Delete or Apply.
+    fn apply_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.dialog else { return };
+        if dialog.busy {
+            return;
+        }
+        let side = dialog.side;
+        let Some(place) = self.side(side).place.clone() else { return };
+        let remote = self.remote.clone();
+        let op: Op = match &dialog.kind {
+            DialogKind::Name { old, field, .. } => {
+                let name = field.read(cx).text().trim().to_string();
+                if let Some(problem) = self.name_problem(side, old.as_ref(), &name) {
+                    if let Some(d) = &mut self.dialog {
+                        d.error = Some(problem.into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                match (old, &place) {
+                    (Some(old), _) if old.name == name => {
+                        self.dialog = None;
+                        cx.notify();
+                        return;
+                    }
+                    (Some(old), Place::Local(dir)) => Op::LocalRename(dir.join(&old.name), dir.join(&name)),
+                    (Some(old), Place::Remote(dir)) => {
+                        Op::RemoteRename(dir.join(&old.raw_name), dir.join(name.as_bytes()))
+                    }
+                    (None, Place::Local(dir)) => Op::LocalFolder(dir.join(&name)),
+                    (None, Place::Remote(dir)) => Op::RemoteFolder(dir.join(name.as_bytes())),
+                    _ => return,
+                }
+            }
+            DialogKind::Delete { entries } => match &place {
+                Place::Local(dir) => Op::LocalRecycle(entries.iter().map(|e| dir.join(&e.name)).collect()),
+                Place::Remote(dir) => Op::RemoteRemove(entries.iter().map(|e| dir.join(&e.raw_name)).collect()),
+                Place::Drives => return,
+            },
+            DialogKind::Permissions { entries, bits } => {
+                let Place::Remote(dir) = &place else { return };
+                let grid = bits.iter().enumerate().fold(0u32, |m, (i, on)| if *on { m | (0o400 >> i) } else { m });
+                Op::RemoteMode(
+                    entries.iter().map(|e| (dir.join(&e.raw_name), (e.mode.unwrap_or(0) & 0o7000) | grid)).collect(),
+                )
+            }
+        };
+        if op.remote() && remote.is_none() {
+            return;
+        }
+        if let Some(d) = &mut self.dialog {
+            d.busy = true;
+            d.error = None;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _ = tx.send(op.run(remote).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(note) => {
+                        this.dialog = None;
+                        this.note = note.map(SharedString::from);
+                        this.clear_selection(side, cx);
+                    }
+                    Err(e) => {
+                        if let Some(d) = &mut this.dialog {
+                            d.busy = false;
+                            d.error = Some(e.to_string().into());
+                        }
+                    }
+                }
+                this.refresh(side, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_bit(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(Dialog { kind: DialogKind::Permissions { bits, .. }, .. }) = &mut self.dialog {
+            bits[i] = !bits[i];
+        }
+        cx.notify();
+    }
+
+    /// The dialog card (Sftp.dc.html's popups); a warning card for Delete.
+    fn card(warning: bool) -> gpui::Div {
+        div()
+            .w(px(CONFLICT_W))
+            .flex()
+            .flex_col()
+            .gap(theme::SPACE_4)
+            .p(theme::SPACE_5)
+            .rounded(theme::RADIUS_2XL)
+            .border_1()
+            .shadow(theme::shadow_dialog())
+            .when(warning, |d| d.bg(theme::warn_surface()).border_color(theme::warn()))
+            .when(!warning, |d| d.bg(theme::card()).border_color(theme::line_strong()))
+    }
+
+    /// The names a popup acts on, in a mono box.
+    fn names_box(names: impl Iterator<Item = String>) -> impl IntoElement {
+        div()
+            .id("dialog-names")
+            .w_full()
+            .flex_none()
+            .max_h(px(180.))
+            .overflow_y_scroll()
+            .px(px(14.))
+            .py(theme::SPACE_3)
+            .rounded(theme::RADIUS_MD)
+            .border_1()
+            .border_color(theme::line())
+            .bg(theme::ground())
+            .text_mono()
+            .text_color(theme::ink())
+            .children(names.map(|n| div().child(SharedString::from(n))))
+    }
+
+    /// Cancel and the confirming button, side by side.
+    fn dialog_buttons(&self, confirm: Button, busy: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            .flex()
+            .gap(theme::SPACE_2)
+            .child(
+                div().flex_1().min_w_0().child(
+                    Button::secondary("dialog-cancel", "Cancel")
+                        .full_width()
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.close_dialog(cx))),
+                ),
+            )
+            .child(div().flex_1().min_w_0().child(
+                confirm.full_width().disabled(busy).on_click(cx.listener(|this, _, _, cx| this.apply_dialog(cx))),
+            ))
+    }
+
+    fn dialog_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let dialog = self.dialog.as_ref()?;
+        let side = dialog.side;
+        let place = self.side(side).place.as_ref().map(Place::display).unwrap_or_default();
+        let error = dialog.error.clone();
+        let busy = dialog.busy;
+        let card = match &dialog.kind {
+            DialogKind::Name { old, field, .. } => {
+                let name = field.read(cx).text().trim().to_string();
+                let problem = error.clone().or_else(|| {
+                    // Show a problem once something is typed; an empty
+                    // field only says so on Rename or Create.
+                    (!name.is_empty()).then(|| self.name_problem(side, old.as_ref(), &name)).flatten().map(Into::into)
+                });
+                let (title, label, confirm, note) = match old {
+                    Some(old) => (
+                        format!("Rename on {}", self.side_name(side)),
+                        "New name",
+                        "Rename",
+                        format!("Renames {}", old.name),
+                    ),
+                    None => (
+                        format!("New folder on {}", self.side_name(side)),
+                        "Name",
+                        "Create folder",
+                        format!("Creates it in {place}"),
+                    ),
+                };
+                Self::card(false)
+                    .child(div().w_full().text_heading().text_color(theme::ink()).child(title))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(div().text_meta().text_color(theme::ink_muted()).child(label))
+                            .child(field.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_meta()
+                            .text_color(if problem.is_some() { theme::warn() } else { theme::ink_muted() })
+                            .child(problem.unwrap_or_else(|| note.into())),
+                    )
+                    .child(self.dialog_buttons(Button::primary("dialog-confirm", confirm), busy, cx))
+            }
+            DialogKind::Delete { entries } => {
+                let title = match entries.as_slice() {
+                    [one] => format!("Delete {} from {}?", one.name, self.side_name(side)),
+                    many => format!("Delete {} items from {}?", many.len(), self.side_name(side)),
+                };
+                let note = match side {
+                    Side::Remote => "Files deleted over SFTP do not go to a recycle bin. This cannot be undone.",
+                    Side::Local => "These are moved to the Recycle Bin on this PC.",
+                };
+                Self::card(true)
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(div().w_full().text_heading().text_color(theme::ink()).child(title))
+                            .child(div().w_full().text_body().text_color(theme::warn_ink()).child(note)),
+                    )
+                    .child(Self::names_box(entries.iter().map(|e| e.name.clone())))
+                    .children(error.map(|e| div().w_full().text_meta().text_color(theme::warn()).child(e)))
+                    .child(self.dialog_buttons(
+                        Button::new("dialog-confirm", "Delete", ButtonKind::DestructiveFill),
+                        busy,
+                        cx,
+                    ))
+            }
+            DialogKind::Permissions { entries, bits } => {
+                let (title, detail) = match entries.as_slice() {
+                    [one] => (
+                        format!("Permissions for {}", one.name),
+                        format!("{}/{}", place.trim_end_matches('/'), one.name),
+                    ),
+                    many => (
+                        format!("Permissions for {} items", many.len()),
+                        "The same permissions are applied to every selected item.".to_string(),
+                    ),
+                };
+                let digit = |k: usize| bits[k] as u32 * 4 + bits[k + 1] as u32 * 2 + bits[k + 2] as u32;
+                let octal = format!("{}{}{}", digit(0), digit(3), digit(6));
+                let symbolic: String =
+                    bits.iter().enumerate().map(|(i, on)| if *on { b"rwx"[i % 3] as char } else { '-' }).collect();
+                let header = |text: &'static str| {
+                    div().flex_1().flex().justify_center().text_label().text_color(theme::ink_muted()).child(text)
+                };
+                let mut rows = Vec::new();
+                for (r, who) in ["Owner", "Group", "Everyone else"].into_iter().enumerate() {
+                    let mut row = div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(theme::line())
+                        .child(div().flex_none().w(relative(0.3)).text_body().text_color(theme::ink()).child(who));
+                    for c in 0..3 {
+                        let i = r * 3 + c;
+                        row = row.child(
+                            div()
+                                .id(("perm-bit", i))
+                                .flex_1()
+                                .h(theme::CONTROL)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .child(check_box(bits[i]))
+                                .on_click(cx.listener(move |this, _, _, cx| this.toggle_bit(i, cx))),
+                        );
+                    }
+                    rows.push(row);
+                }
+                Self::card(false)
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_start()
+                            .gap(theme::SPACE_3)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .child(div().w_full().text_heading().text_color(theme::ink()).child(title))
+                                    .child(
+                                        div().w_full().text_mono_small().text_color(theme::ink_muted()).child(detail),
+                                    ),
+                            )
+                            .child(nav_button(
+                                "perm-close".into(),
+                                "close",
+                                !busy,
+                                cx.listener(|this, _, _, cx| this.close_dialog(cx)),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .pb(px(6.))
+                                    .child(div().flex_none().w(relative(0.3)))
+                                    .child(header("READ"))
+                                    .child(header("WRITE"))
+                                    .child(header("RUN")),
+                            )
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(20.))
+                            .px(px(14.))
+                            .py(theme::SPACE_3)
+                            .rounded(theme::RADIUS_MD)
+                            .border_1()
+                            .border_color(theme::line())
+                            .bg(theme::ground())
+                            .font_family(theme::mono())
+                            .child(div().text_size(px(20.)).text_color(theme::ink()).child(octal))
+                            .child(div().text_size(px(14.)).text_color(theme::ink_muted()).child(symbolic)),
+                    )
+                    .children(error.map(|e| div().w_full().text_meta().text_color(theme::warn()).child(e)))
+                    .child(self.dialog_buttons(Button::primary("dialog-confirm", "Apply"), busy, cx))
+            }
+        };
+        let view = cx.entity().downgrade();
+        Some(modal("files-dialog", px(CONFLICT_W), card, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.close_dialog(cx));
+        }))
+    }
+
+    /// Transfers that would stop if the tab closed now.
+    pub fn unfinished(&self) -> usize {
+        self.jobs.iter().filter(|j| j.state != JobState::Done).count()
+    }
+
+    /// The tab is closing: drop every unfinished transfer. The engine
+    /// cancels active copies and deletes downloads' part files.
+    pub fn stop_all(&mut self) {
+        for job in self.engine.snapshot().iter().filter(|j| j.state != JobState::Done) {
+            self.engine.remove(job.id);
+        }
+    }
+
     fn accepts(&self, side: Side, value: &dyn Any, view: EntityId) -> bool {
         if let Some(d) = value.downcast_ref::<DraggedFiles>() {
             return d.view == view && d.from != side && self.can_receive(side);
@@ -1071,6 +1600,7 @@ impl FilesView {
             Side::Local => ("Upload →", self.can_receive(Side::Remote)),
             Side::Remote => ("← Download", self.can_receive(Side::Local)),
         };
+        let can_edit = self.can_edit(side);
         Some(
             div()
                 .flex_none()
@@ -1096,9 +1626,29 @@ impl FilesView {
                         .on_click(cx.listener(move |this, _, _, cx| this.send(side, cx))),
                 )
                 .child(
+                    Button::secondary(SharedString::from(format!("{tag}-rename")), "Rename")
+                        .compact()
+                        .disabled(count != 1 || !can_edit)
+                        .on_click(cx.listener(move |this, _, window, cx| this.open_name(side, true, window, cx))),
+                )
+                .when(side == Side::Remote, |d| {
+                    d.child(
+                        Button::secondary("remote-permissions", "Permissions")
+                            .compact()
+                            .disabled(!can_edit)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_permissions(cx))),
+                    )
+                })
+                .child(
                     Button::secondary(SharedString::from(format!("{tag}-copy-path")), "Copy path")
                         .compact()
                         .on_click(cx.listener(move |this, _, _, cx| this.copy_paths(side, cx))),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("{tag}-delete")), "Delete", ButtonKind::DestructiveOutline)
+                        .compact()
+                        .disabled(!can_edit)
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_delete(side, cx))),
                 )
                 .child(nav_button(
                     format!("{tag}-clear").into(),
@@ -1270,6 +1820,12 @@ impl FilesView {
                         "refresh",
                         pane.place.is_some() && connected,
                         cx.listener(move |this, _, _, cx| this.refresh(side, cx)),
+                    ))
+                    .child(nav_button(
+                        format!("{tag}-new-folder").into(),
+                        "folder-plus",
+                        self.can_edit(side),
+                        cx.listener(move |this, _, window, cx| this.open_name(side, false, window, cx)),
                     ))
                     .child(
                         div()
@@ -1616,5 +2172,6 @@ impl Render for FilesView {
             )
             .child(self.transfers(cx))
             .children(self.conflict_popup(cx))
+            .children(self.dialog_view(cx))
     }
 }

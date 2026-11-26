@@ -92,7 +92,7 @@ Each phase ends with a commit and a check.
 | 4 | **SFTP tab** *(done)*: tab kind, Open SFTP from the host detail, the terminal header and the picker, connecting and reconnecting | Open SFTP to the WSL server and through a jump host; drop and reconnect |
 | 5 | **File panes** *(done)*: listing, breadcrumbs, filter, selection, links, hidden files, copy path, drag between panes and from Explorer | Browse both sides; drag queues a transfer |
 | 6 | **Queue panel and conflicts** *(done)*: progress, pause, resume, retry, finished items, the conflict popup and its Settings default | A folder of mixed files both ways with conflicts; pause and resume; a dropped connection resumes |
-| 7 | **Rename, delete, permissions and new folder popups**, and "n transfers are still running. Close anyway?" when closing an SFTP tab (Refresh came in phase 5) | Each on both sides; delete lands in the Recycle Bin locally |
+| 7 | **Rename, delete, permissions and new folder popups** *(done)*, and "n transfers are still running. Close anyway?" when closing an SFTP tab (Refresh came in phase 5) | Each on both sides; delete lands in the Recycle Bin locally |
 | 8 | **Wrap-up:** notes, `CLAUDE.md`, gallery, the done check from a clean profile, PR | Done check passes |
 
 ## States to design
