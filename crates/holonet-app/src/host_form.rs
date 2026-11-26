@@ -49,6 +49,8 @@ pub struct HostForm {
     address: Entity<TextField>,
     port: Entity<TextField>,
     tailscale: Entity<TextField>,
+    /// "Default SFTP folder" (Connection); empty means the home folder.
+    sftp_folder: Entity<TextField>,
     /// Index into [`ROUTES`].
     route: usize,
     /// Settings, Connection: for the Automatic help line.
@@ -163,6 +165,7 @@ impl HostForm {
         let tailscale =
             text(cx, "100.x.y.z or name.tailnet.ts.net", h.tailscale_address.clone().unwrap_or_default(), true);
         let tags = text(cx, "Comma separated, e.g. api, arm64", h.tags.join(", "), false);
+        let sftp_folder = text(cx, "Home directory", h.sftp_folder.clone().unwrap_or_default(), true);
         let username = text(cx, "e.g. root", h.username.clone(), true);
         let (auth, saved_password, key_id, saved_passphrase) = match &h.auth {
             Auth::Password { saved } => (1, saved.clone(), None, None),
@@ -221,7 +224,7 @@ impl HostForm {
         });
 
         let mut subscriptions = Vec::new();
-        for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase] {
+        for f in [&label, &address, &port, &tailscale, &tags, &username, &password, &passphrase, &sftp_folder] {
             subscriptions.push(cx.subscribe_in(f, window, |this: &mut Self, _, e: &TextFieldEvent, window, cx| {
                 match e {
                     TextFieldEvent::Changed => {
@@ -262,6 +265,7 @@ impl HostForm {
             address,
             port,
             tailscale,
+            sftp_folder,
             route: ROUTES.iter().position(|r| *r == h.route).unwrap_or(0),
             fallback_secs: data.settings.connection.fallback_wait.duration().as_secs(),
             tags,
@@ -325,6 +329,8 @@ impl HostForm {
         host.tags =
             self.text(&self.tags, cx).split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         host.keep_alive = self.keep_alive;
+        let folder = self.text(&self.sftp_folder, cx);
+        host.sftp_folder = (!folder.is_empty()).then_some(folder);
         host.jump_host = self.selected_jump(cx).map(|(id, _)| *id);
         host.identity = self.selected_identity(cx).map(|i| i.id);
         if let Some(identity) = self.selected_identity(cx) {
@@ -793,7 +799,23 @@ impl Render for HostForm {
         let jump_name = self.selected_jump(cx).map(|(_, name)| name.clone());
         let connection = fieldset("Connection")
             // NewHost.dc.html: None, or a saved host.
-            .child(div().max_w(px(360.)).child(field("Jump host", self.jump_select.clone(), None)))
+            // NewHost.dc.html: Jump host and Default SFTP folder side by side.
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(theme::SPACE_4)
+                    .child(div().flex_grow().flex_basis(px(220.)).max_w(px(360.)).child(field(
+                        "Jump host",
+                        self.jump_select.clone(),
+                        None,
+                    )))
+                    .child(div().flex_grow().flex_basis(px(220.)).child(field(
+                        "Default SFTP folder",
+                        self.sftp_folder.clone(),
+                        None,
+                    ))),
+            )
             .child(Checkbox::new("keep-alive", "Keep connection alive", self.keep_alive).on_toggle({
                 let entity = entity.clone();
                 move |v, _, cx| {

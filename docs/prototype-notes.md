@@ -1402,3 +1402,26 @@ Everything the spike made was removed from the server and this PC.
 - 16 entries start with a dot but have no hidden attribute (`.cargo`, `.ssh` and the like). **The local pane treats only the attribute as hidden** (Windows' own meaning), and the host's pane treats dot-names as hidden.
 
 fmt, clippy and the unit tests pass.
+
+## Milestone 5, phase 1: model and settings (25 Nov 2026)
+
+- **`holonet-model`:**
+  - `Host` gains `sftp_folder` ("Default SFTP folder"; `None` means the home folder) and `sftp_local_folder` (the folder on this PC last used for the host).
+    - The plan had a separate map for the second. On the host it goes when the host is deleted, and duplicates with it.
+  - `Settings` gains `sftp: SftpSettings`:
+    - `on_conflict` (Ask, Overwrite, Keep both)
+    - `at_once` (2, 4, 8, with `count()`)
+    - `show_hidden`
+    - The defaults are Ask, 2 and on, the values `Settings.dc.html` shows.
+  - A test loads a milestone 4 vault (schema 2, no SFTP fields) with these defaults and round-trips it.
+- **Host form, Connection:** "Default SFTP folder" (mono, placeholder "Home directory") beside Jump host, as `NewHost.dc.html` draws them. Empty saves `None`.
+- **Settings:**
+  - A new SFTP section with its own chip: "When a file already exists" and "Transfers at once" selects, and "Show hidden files".
+  - The help lines say what each does; the hidden-files line says hidden means the attribute on this PC and dot-names on hosts.
+
+**Checked live** (the phase 4 test vault):
+- The section showed Ask, 2 and ticked.
+- Changed to Keep both, 8 and unticked, and set behind-a's Default SFTP folder to `/tmp`.
+- After restarting Holonet, all four had kept their new values.
+
+fmt, clippy, and the unit tests (35, 16, 12, 7, 13 and 16) pass.

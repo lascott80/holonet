@@ -53,8 +53,8 @@ No control is shown before its milestone lands.
 
 ### `holonet-model`
 - `Host` gains `sftp_folder: Option<String>`.
-- `Settings` gains `sftp: SftpSettings { on_conflict: Ask | Overwrite | KeepBoth, at_once: 2 | 4 | 8, show_hidden: bool }`.
-- `VaultData` gains the last local folder per host (`sftp_local: BTreeMap<HostId, String>`).
+- `Settings` gains `sftp: SftpSettings { on_conflict: Ask | Overwrite | KeepBoth, at_once: 2 | 4 | 8, show_hidden: bool }`, defaulting to Ask, 2 and shown, as `Settings.dc.html` draws them.
+- `Host` also gains `sftp_local_folder: Option<String>`, the folder on this PC last used for it (on the host rather than a separate map, so it goes when the host does).
 - Everything uses `#[serde(default)]`; a test decodes a milestone 4 vault.
 
 ### `holonet-ssh`
@@ -86,7 +86,7 @@ Each phase ends with a commit and a check.
 | # | Phase | Exit check |
 | --- | --- | --- |
 | 0 | **Spikes** *(done; russh-sftp outpaces OpenSSH's `sftp` here, resume works, Explorer drops arrive)*: (a) `russh-sftp` 4.0 against the WSL server: list, a 500 MB upload and download with throughput compared with OpenSSH's `sftp`, seek and resume, chmod, symlinks, a non-UTF-8 name; (b) GPUI drag between two lists, and a file dropped from Explorer; (c) Recycle Bin delete; (d) drives and hidden files | Notes record each result; throughput sets the target below |
-| 1 | **Model and settings:** the new fields, the host form's "Default SFTP folder", Settings' SFTP section | A milestone 4 vault opens; Settings saves the three SFTP rows |
+| 1 | **Model and settings** *(done)*: the new fields, the host form's "Default SFTP folder", Settings' SFTP section | A milestone 4 vault opens; Settings saves the three SFTP rows |
 | 2 | **`holonet-files` operations:** remote and local listing, rename, delete, mkdir, chmod | WSL tests for each, and the Recycle Bin on this PC |
 | 3 | **Transfer engine:** queue, folders, at-once limit, conflicts, pause, resume, retry, progress | Tests, including resume after killing the connection mid-file |
 | 4 | **SFTP tab:** tab kind, Open SFTP from the host detail, the terminal header and the picker, connecting and reconnecting | Open SFTP to the WSL server and through a jump host; drop and reconnect |

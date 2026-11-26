@@ -63,7 +63,14 @@ const LICENCES: &[(&str, &str)] = &[
 
 /// Sections, in page order: (chip label, child index in the scroll container).
 const SECTIONS: &[(&str, usize)] =
-    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("Keyboard", 4), ("About", 5)];
+    &[("Terminal", 1), ("Vault and security", 2), ("Connection", 3), ("SFTP", 4), ("Keyboard", 5), ("About", 6)];
+
+/// Settings, SFTP, "When a file already exists" and "Transfers at once"
+/// options in order.
+const ON_CONFLICT: [holonet_model::OnConflict; 3] =
+    [holonet_model::OnConflict::Ask, holonet_model::OnConflict::Overwrite, holonet_model::OnConflict::KeepBoth];
+const AT_ONCE: [holonet_model::AtOnce; 3] =
+    [holonet_model::AtOnce::Two, holonet_model::AtOnce::Four, holonet_model::AtOnce::Eight];
 
 /// Settings page state kept by the workspace.
 pub(crate) struct SettingsUi {
@@ -73,6 +80,8 @@ pub(crate) struct SettingsUi {
     scrollback: Entity<Select>,
     keep_alive: Entity<Select>,
     fallback_wait: Entity<Select>,
+    on_conflict: Entity<Select>,
+    at_once: Entity<Select>,
     /// "Lock vault after": 15 minutes, 1 hour, Never.
     lock_after: Entity<Select>,
     /// Whether Windows Hello is set up on this PC; `None` while checking.
@@ -176,6 +185,20 @@ impl SettingsUi {
                 LOCK_AFTER.iter().position(|l| *l == settings.lock_after_idle_mins).unwrap_or(0),
             )
         });
+        let on_conflict = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["Ask".into(), "Overwrite".into(), "Keep both".into()],
+                ON_CONFLICT.iter().position(|c| *c == settings.sftp.on_conflict).unwrap_or(0),
+            )
+        });
+        let at_once = cx.new(|cx| {
+            Select::new(
+                cx,
+                vec!["2".into(), "4".into(), "8".into()],
+                AT_ONCE.iter().position(|a| *a == settings.sftp.at_once).unwrap_or(0),
+            )
+        });
         // Asking Windows takes a moment: the switch waits for the answer.
         cx.spawn(async move |this, cx| {
             let available = cx.background_executor().spawn(async { crate::hello::available() }).await;
@@ -189,6 +212,8 @@ impl SettingsUi {
             unknown_keys,
             fallback_wait,
             lock_after,
+            on_conflict,
+            at_once,
             hello_available: None,
             hello_dialog: None,
             font_size,
@@ -223,6 +248,16 @@ impl SettingsUi {
                 let SelectEvent::Changed(i) = *event;
                 let s = [Scrollback::Lines10k, Scrollback::Lines50k, Scrollback::Unlimited][i.min(2)];
                 this.set_terminal(|t| t.scrollback = s, cx);
+            }),
+            cx.subscribe(&self.on_conflict, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let choice = ON_CONFLICT[i.min(2)];
+                this.save(|d| d.settings.sftp.on_conflict = choice, cx);
+            }),
+            cx.subscribe(&self.at_once, |this: &mut Workspace, _, event: &SelectEvent, cx| {
+                let SelectEvent::Changed(i) = *event;
+                let n = AT_ONCE[i.min(2)];
+                this.save(|d| d.settings.sftp.at_once = n, cx);
             }),
             cx.subscribe(&self.lock_after, |this: &mut Workspace, _, event: &SelectEvent, cx| {
                 let SelectEvent::Changed(i) = *event;
@@ -352,6 +387,7 @@ impl Workspace {
             .child(page_block(width, self.terminal_section(&settings, &installed, preview, cx)))
             .child(page_block(width, self.security_section(cx)))
             .child(page_block(width, self.connection_section(&connection, cx)))
+            .child(page_block(width, self.sftp_section(cx)))
             .child(page_block(width, keyboard_section()))
             .child(page_block(width, self.about_section(cx)))
     }
@@ -709,6 +745,35 @@ impl Workspace {
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.save(|d| d.settings.connection.reconnect = !d.settings.connection.reconnect, cx);
                     cx.notify();
+                }),
+            ),
+        ]))
+    }
+
+    /// Settings.dc.html, SFTP.
+    fn sftp_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_hidden = self.vault_data().is_none_or(|d| d.settings.sftp.show_hidden);
+        section("SFTP").child(setting_card(vec![
+            setting_row(
+                "When a file already exists",
+                Some("Ask chooses once for each transfer: overwrite, keep both or skip.".into()),
+                div().w(px(200.)).child(self.settings_ui.on_conflict.clone()),
+            )
+            .into_any_element(),
+            setting_row(
+                "Transfers at once",
+                Some("Files beyond this wait in the queue.".into()),
+                div().w(px(200.)).child(self.settings_ui.at_once.clone()),
+            )
+            .into_any_element(),
+            check_row(
+                "show-hidden",
+                "Show hidden files",
+                Some("Hidden files on this PC, and names starting with a dot on hosts."),
+                show_hidden,
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.save(|d| d.settings.sftp.show_hidden = !d.settings.sftp.show_hidden, cx);
                 }),
             ),
         ]))

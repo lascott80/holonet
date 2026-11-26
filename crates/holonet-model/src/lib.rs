@@ -176,6 +176,13 @@ pub struct Host {
     pub jump_host: Option<HostId>,
     #[serde(default = "yes")]
     pub keep_alive: bool,
+    /// Where the host's side of an SFTP tab starts; `None` is the sign-in's
+    /// home folder (NewHost.dc.html, "Default SFTP folder").
+    #[serde(default)]
+    pub sftp_folder: Option<String>,
+    /// The folder on this PC last used in an SFTP tab for this host.
+    #[serde(default)]
+    pub sftp_local_folder: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -230,6 +237,8 @@ impl Host {
             route: Route::default(),
             jump_host: None,
             keep_alive: true,
+            sftp_folder: None,
+            sftp_local_folder: None,
             tags: Vec::new(),
             icon: RoleIcon::default(),
             created_at: Timestamp::now(),
@@ -453,6 +462,8 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub connection: ConnectionSettings,
+    #[serde(default)]
+    pub sftp: SftpSettings,
 }
 
 fn default_connect_timeout() -> u32 {
@@ -473,6 +484,7 @@ impl Default for Settings {
             hello_unlock: false,
             terminal: TerminalSettings::default(),
             connection: ConnectionSettings::default(),
+            sftp: SftpSettings::default(),
         }
     }
 }
@@ -700,6 +712,53 @@ impl ConnectionSettings {
     /// turned keep-alive off.
     pub fn keep_alive_for(&self, host: &Host) -> Option<std::time::Duration> {
         if host.keep_alive { self.keep_alive.interval() } else { None }
+    }
+}
+
+/// What a transfer does when a file of the same name is already there
+/// (Settings, SFTP; `decisions.md`: ask once per transfer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnConflict {
+    #[default]
+    Ask,
+    Overwrite,
+    KeepBoth,
+}
+
+/// How many transfers run at once (Settings, SFTP).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtOnce {
+    #[default]
+    Two,
+    Four,
+    Eight,
+}
+
+impl AtOnce {
+    pub fn count(self) -> usize {
+        match self {
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Eight => 8,
+        }
+    }
+}
+
+/// Settings, SFTP (Settings.dc.html: Ask, 2 at once, hidden files shown).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SftpSettings {
+    pub on_conflict: OnConflict,
+    pub at_once: AtOnce,
+    /// Hidden files: the hidden attribute on this PC, dot-names on a host.
+    pub show_hidden: bool,
+}
+
+impl Default for SftpSettings {
+    fn default() -> Self {
+        Self { on_conflict: OnConflict::Ask, at_once: AtOnce::Two, show_hidden: true }
     }
 }
 
@@ -1100,6 +1159,24 @@ mod tests {
             source: None,
             imported_at: Timestamp(0),
         }
+    }
+
+    #[test]
+    fn milestone_4_vault_loads_with_sftp_defaults() {
+        let old = r#"{"schema":2,
+            "hosts":[{"id":"00000000-0000-0000-0000-000000000001","address":"x","created_at":0,
+                "tailscale_address":"100.64.0.9","route":"tailscale"}],
+            "settings":{"lock_after_idle_mins":15,"connection":{"fallback_wait":"secs5"}}}"#;
+        let d: VaultData = serde_json::from_str(old).unwrap();
+        let h = &d.hosts[0];
+        assert_eq!((h.sftp_folder.as_deref(), h.sftp_local_folder.as_deref()), (None, None));
+        assert_eq!(d.settings.sftp, SftpSettings::default());
+        assert_eq!(d.settings.sftp.on_conflict, OnConflict::Ask);
+        assert_eq!(d.settings.sftp.at_once.count(), 2);
+        assert!(d.settings.sftp.show_hidden);
+        // Round trip.
+        let again: VaultData = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(again, d);
     }
 
     #[test]
