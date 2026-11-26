@@ -39,7 +39,7 @@ impl ImportKind {
     }
 
     /// The three sources, as FirstRun.dc.html words them.
-    fn choices(self) -> [(&'static str, &'static str, &'static str); 3] {
+    pub(crate) fn choices(self) -> [(&'static str, &'static str, &'static str); 3] {
         match self {
             ImportKind::Config => [
                 (
@@ -77,7 +77,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn import_choice(&mut self, kind: ImportKind, choice: usize, cx: &mut Context<Self>) {
+    pub(crate) fn import_choice(&mut self, kind: ImportKind, choice: usize, cx: &mut Context<Self>) {
         match choice {
             0 => self.run_import(kind, Source::Windows, cx),
             1 => {

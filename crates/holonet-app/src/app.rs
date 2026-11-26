@@ -223,7 +223,8 @@ impl HolonetApp {
             Some(d) => d.host(host.id).map(|h| d.logs_output(h)).unwrap_or_else(|| d.logs_output(host)),
             None => host.log_output.unwrap_or(false),
         };
-        let mut record = holonet_model::SessionRecord::new(Some(host.id), host.display_name(), kind, wanted);
+        let saved = self.is_saved(host.id, cx);
+        let mut record = holonet_model::SessionRecord::new(saved.then_some(host.id), host.display_name(), kind, wanted);
         record.route = route;
         record.user = user;
         let log = if record.logged {
@@ -529,6 +530,20 @@ impl HolonetApp {
         let data = self.vault_data(cx)?;
         // With its identity's username and sign-in, if it has one.
         let host = data.resolved(data.host(id)?);
+        self.new_pane_for(host, size, opening, window, cx)
+    }
+
+    /// A pane for a host as given: a saved host already resolved, or a
+    /// quick connect's host that is not in the vault.
+    fn new_pane_for(
+        &mut self,
+        host: holonet_model::Host,
+        size: GridSize,
+        opening: (PaneMode, Remembered),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Pane>> {
+        let data = self.vault_data(cx)?;
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
             holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
@@ -557,6 +572,12 @@ impl HolonetApp {
                 // The failed hop: a jump host's failure edits the jump host.
                 let id = pane.read(cx).host_to_edit();
                 this.edit_origin = Some(pane.downgrade());
+                // A quick connect has no saved host to edit: save it.
+                if !this.is_saved(id, cx) {
+                    let host = pane.read(cx).draft_host();
+                    this.save_as_host(host, window, cx);
+                    return;
+                }
                 this.show_vault(window, cx);
                 if let Some(w) = this.workspace().cloned() {
                     w.update(cx, |w, cx| w.edit_host(id, window, cx));
@@ -668,6 +689,33 @@ impl HolonetApp {
     ) -> Option<Entity<Tab>> {
         let size = Self::tab_grid(window);
         let pane = self.new_pane(id, size, opening, window, cx)?;
+        Some(self.open_tab_with(pane, window, cx))
+    }
+
+    /// Quick connect (FirstRun.dc.html's Connect now, the Hosts search): a
+    /// terminal to a host that is not saved. Its host key is still checked.
+    pub fn quick_connect(&mut self, host: holonet_model::Host, window: &mut Window, cx: &mut Context<Self>) {
+        let size = Self::tab_grid(window);
+        if let Some(pane) = self.new_pane_for(host, size, (PaneMode::Terminal, Vec::new()), window, cx) {
+            self.open_tab_with(pane, window, cx);
+        }
+    }
+
+    /// Whether a host is saved in the vault (true while locked: nothing is
+    /// offered then anyway).
+    pub fn is_saved(&self, id: HostId, cx: &App) -> bool {
+        self.vault_data(cx).is_none_or(|d| d.host(id).is_some())
+    }
+
+    /// "Save as host": the host form, filled in from a quick connect.
+    fn save_as_host(&mut self, host: holonet_model::Host, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_vault(window, cx);
+        if let Some(w) = self.workspace().cloned() {
+            w.update(cx, |w, cx| w.open_form_with(None, Some(host), window, cx));
+        }
+    }
+
+    fn open_tab_with(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) -> Entity<Tab> {
         let app = cx.entity().downgrade();
         let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
@@ -677,6 +725,10 @@ impl HolonetApp {
             TabEvent::OpenFiles { host, remembered } => {
                 let (host, remembered) = (*host, remembered.clone());
                 this.open_files(host, remembered, window, cx);
+            }
+            TabEvent::SaveAsHost(host) => {
+                let host = (**host).clone();
+                this.save_as_host(host, window, cx);
             }
             TabEvent::ManageSnippets => {
                 this.show_vault(window, cx);
@@ -688,7 +740,7 @@ impl HolonetApp {
         .detach();
         self.tabs.push(tab.clone());
         self.select(Some(self.tabs.len() - 1), window, cx);
-        Some(tab)
+        tab
     }
 
     /// Split a tab's active pane, with the same host unless another is given.
@@ -714,9 +766,16 @@ impl HolonetApp {
             Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
             Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
         };
-        let Some(pane) = self.new_pane(host.unwrap_or(same), size, (PaneMode::Terminal, Vec::new()), window, cx) else {
-            return;
+        let opening = (PaneMode::Terminal, Vec::new());
+        let pane = match host {
+            // A quick connect splits into another pane to the same host.
+            None if !self.is_saved(same, cx) => {
+                let host = active.read(cx).host.clone();
+                self.new_pane_for(host, size, opening, window, cx)
+            }
+            _ => self.new_pane(host.unwrap_or(same), size, opening, window, cx),
         };
+        let Some(pane) = pane else { return };
         tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
         cx.notify();
     }

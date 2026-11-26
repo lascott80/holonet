@@ -286,6 +286,57 @@ fn lower_first(text: &str) -> String {
     c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }
 
+/// Quick connect's host from `user@address`, `user@address:port` or an
+/// `ssh` command, not saved. A jump host must be a saved host; a key file
+/// is matched by name among the Keychain's keys.
+pub fn quick_host(text: &str, d: &VaultData) -> Result<Host, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Type user@address, such as deploy@10.0.0.4.".into());
+    }
+    let q = holonet_import::command::parse(text).map_err(|e| e.message().to_string())?;
+    let (mut address, mut port) = (q.address.clone(), q.port);
+    // user@host:port and user@[v6]:port, which ssh itself does not take
+    // but people type.
+    if port.is_none()
+        && let Some(spec) = JumpSpec::parse(&address)
+    {
+        (address, port) = (spec.host, spec.port);
+    }
+    if !holonet_model::is_valid_address(&address) {
+        return Err(format!("{address} is not a hostname or an IP address."));
+    }
+    let Some(user) = q.user.clone().filter(|u| !u.is_empty()) else {
+        return Err(format!("Add the user name: user@{address}."));
+    };
+    let mut host = Host::new(address);
+    host.username = user;
+    host.port = port.unwrap_or(22).max(1);
+    host.agent_forwarding = q.forward_agent.unwrap_or(false);
+    host.compression = q.compression.unwrap_or(false);
+    if let Some(hop) = q.jump.last() {
+        let found = d
+            .hosts
+            .iter()
+            .find(|h| h.display_name().eq_ignore_ascii_case(&hop.host) || h.address.eq_ignore_ascii_case(&hop.host));
+        match found {
+            Some(j) => {
+                host.jump_host = Some(j.id);
+                host.from_group.jump_host = false;
+            }
+            None => return Err(format!("The jump host {} is not saved. Add it as a host first.", hop.host)),
+        }
+    }
+    if let Some(file) = &q.identity_file {
+        let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+        match d.keys.iter().find(|k| k.name.eq_ignore_ascii_case(name)) {
+            Some(k) => host.auth = Auth::key(k.id),
+            None => return Err(format!("The key {name} is not in the Keychain. Import it there first.")),
+        }
+    }
+    Ok(host)
+}
+
 /// What an applied import did, for its notice.
 #[derive(Default)]
 pub struct Outcome {
@@ -485,6 +536,27 @@ mod tests {
             notes: Vec::new(),
             exists: false,
         }
+    }
+
+    #[test]
+    fn quick_hosts() {
+        let mut d = VaultData::default();
+        let mut gw = Host::new("203.0.113.20");
+        gw.label = "bastion-east".into();
+        let gw_id = gw.id;
+        d.hosts.push(gw);
+        let h = quick_host("deploy@10.0.0.4", &d).unwrap();
+        assert_eq!((h.username.as_str(), h.address.as_str(), h.port), ("deploy", "10.0.0.4", 22));
+        assert!(matches!(h.auth, Auth::Password { saved: None }));
+        let h = quick_host("ssh -J bastion-east -p 2222 pi@nas-01", &d).unwrap();
+        assert_eq!((h.port, h.jump_host), (2222, Some(gw_id)));
+        assert_eq!(quick_host("root@[::1]:2200", &d).unwrap().port, 2200);
+        assert_eq!(quick_host("pi@nas-01:2200", &d).unwrap().address, "nas-01");
+        assert_eq!(quick_host("nas-01", &d).unwrap_err(), "Add the user name: user@nas-01.");
+        assert!(quick_host("ssh -J nowhere a@b", &d).unwrap_err().contains("nowhere is not saved"));
+        assert!(quick_host("a@b c d", &d).is_ok(), "a remote command is ignored");
+        assert!(quick_host("a@host:99999", &d).is_err());
+        assert!(quick_host("", &d).is_err());
     }
 
     #[test]

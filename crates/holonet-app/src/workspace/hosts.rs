@@ -91,7 +91,10 @@ impl Workspace {
         if data.hosts.is_empty() {
             return self.welcome(cx).into_any_element();
         }
-        let query = self.search.read(cx).text().trim().to_string();
+        let raw_query = self.search.read(cx).text().to_string();
+        // "ssh user@address" in the search connects without saving.
+        let quick_row = looks_like_quick_connect(&raw_query).then(|| self.quick_row(&raw_query, cx));
+        let query = if quick_row.is_some() { String::new() } else { raw_query.trim().to_string() };
         // Shown with their identity's username and sign-in.
         let resolved: Vec<Host> = data.hosts.iter().map(|h| data.resolved(h)).collect();
         // A group filter whose group was deleted shows everything.
@@ -220,6 +223,7 @@ impl Workspace {
                         .flex_col()
                         .gap(px(26.))
                         .child(header)
+                        .children(quick_row)
                         .child(self.group_row(&data, cols, cx))
                         .child(
                             div()
@@ -263,22 +267,135 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn welcome(&mut self, cx: &mut Context<Self>) -> Div {
-        div().size_full().flex().justify_center().px(theme::SPACE_6).py(px(56.)).child(
+    /// First run (FirstRun.dc.html): an empty vault's welcome, with
+    /// Connect now, New host and the ways to bring in what you have.
+    fn welcome(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        use super::import::ImportKind;
+        let heading = |t: &'static str| div().text_label().text_color(theme::ink_muted()).mb(px(10.)).child(t);
+        let connect = div()
+            .flex()
+            .flex_col()
+            .child(heading("CONNECT NOW"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_grow()
+                            .flex_basis(px(320.))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(div().text_mono().text_color(theme::accent()).child("ssh"))
+                            .child(div().flex_1().min_w_0().child(self.quick.clone())),
+                    )
+                    .child(Button::primary("quick-connect", "Connect").header().on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let text = this.quick.read(cx).text().to_string();
+                            this.quick_connect(&text, cx);
+                        },
+                    )))
+                    .child(
+                        Button::secondary("first-host", "New host")
+                            .header()
+                            .on_click(cx.listener(|this, _, window, cx| this.open_form(None, window, cx))),
+                    ),
+            )
+            .children(
+                self.quick_problem.clone().map(|p| div().pt(theme::SPACE_2).child(crate::ui::field_help(p, true))),
+            );
+
+        let card =
+            |i: usize, (name, place, about): (&'static str, &'static str, &'static str), cx: &mut Context<Self>| {
+                div()
+                    .id(SharedString::from(format!("first-import-{i}")))
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .p(px(18.))
+                    .bg(theme::card())
+                    .border_1()
+                    .border_color(theme::line())
+                    .rounded(theme::RADIUS_XL)
+                    .cursor_pointer()
+                    .hover(|s| s.shadow(theme::shadow_hover()))
+                    .child(
+                        div()
+                            .font_family(theme::DISPLAY)
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::ink())
+                            .child(name),
+                    )
+                    .child(div().text_mono_small().text_color(theme::ink_muted()).child(place))
+                    .child(div().text_meta().text_color(theme::ink_muted()).child(about))
+                    .on_click(cx.listener(move |this, _, _, cx| this.import_choice(ImportKind::Config, i, cx)))
+            };
+        let cards: Vec<_> = ImportKind::Config.choices().into_iter().enumerate().map(|(i, c)| card(i, c, cx)).collect();
+        let imports = div()
+            .flex()
+            .flex_col()
+            .child(heading("IMPORT WHAT YOU ALREADY HAVE"))
+            .child(div().grid().grid_cols(3).gap(px(12.)).children(cards));
+
+        let link = |id: &'static str, title: &'static str, about: &'static str| {
+            div()
+                .id(id)
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(theme::SPACE_1)
+                .px(px(18.))
+                .py(px(16.))
+                .border_1()
+                .border_color(theme::line())
+                .rounded(theme::RADIUS_XL)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::card()))
+                .child(div().text_body().font_weight(FontWeight::MEDIUM).text_color(theme::ink()).child(title))
+                .child(div().text_meta().text_color(theme::ink_muted()).child(about))
+        };
+        let more = div()
+            .grid()
+            .grid_cols(3)
+            .gap(px(12.))
+            .child(
+                link(
+                    "first-keys",
+                    "Add your keys",
+                    "Import from ~/.ssh, from WSL or from any file, or generate a new one.",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.set_page(Page::Keychain, cx))),
+            )
+            .child(
+                link("first-known", "Bring your known_hosts", "Keep the server keys you have already trusted.")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_import(ImportKind::KnownHosts, cx))),
+            )
+            .child(
+                link("first-terminal", "Set up the terminal", "Pick a font, size and color scheme.")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_page(Page::Settings, cx))),
+            );
+
+        div().id("welcome").size_full().overflow_y_scroll().flex().justify_center().px(theme::SPACE_6).py(px(56.)).child(
             div()
                 .w_full()
                 .max_w(px(760.))
                 .flex()
                 .flex_col()
                 .gap(px(28.))
-                .child(icon("globe", px(40.), theme::accent()))
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(theme::SPACE_3)
+                        .gap(theme::SPACE_2)
+                        .child(icon("globe", px(40.), theme::accent()))
                         .child(
                             div()
+                                .mt(theme::SPACE_2)
                                 .font_family(theme::DISPLAY)
                                 .text_size(px(34.))
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -286,15 +403,18 @@ impl Workspace {
                                 .child("Welcome to Holonet"),
                         )
                         .child(div().text_size(px(16.)).line_height(px(24.)).text_color(theme::ink_muted()).child(
-                            "Your vault is set up and empty. Add the first host you want to connect to: an address, a user, and a key or password.",
+                            "Your vault is set up and empty. Connect to something now, or bring in the hosts you already have.",
                         )),
                 )
-                .child(div().child(
-                    Button::primary("first-host", "New host")
-                        .header()
-                        .icon("plus")
-                        .on_click(cx.listener(|this, _, window, cx| this.open_form(None, window, cx))),
-                )),
+                .child(connect)
+                .child(imports)
+                .child(more)
+                .child(
+                    div()
+                        .text_meta()
+                        .text_color(theme::ink_muted())
+                        .child("Imports are copied into the encrypted vault. Your original files are left as they are."),
+                ),
         )
     }
 
@@ -756,6 +876,55 @@ impl Workspace {
                 ),
             )
             .child(cards)
+    }
+}
+
+/// Whether search text reads as a quick connect: an `ssh` command, or
+/// `user@address` with no spaces.
+pub(crate) fn looks_like_quick_connect(text: &str) -> bool {
+    let t = text.trim();
+    t.to_ascii_lowercase().starts_with("ssh ") || (t.contains('@') && !t.contains(char::is_whitespace))
+}
+
+impl Workspace {
+    /// The Hosts search's "Connect to …" row.
+    fn quick_row(&self, text: &str, cx: &mut Context<Self>) -> Div {
+        let shown = text.trim().trim_start_matches("ssh ").trim().to_string();
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme::SPACE_3)
+            .p(theme::SPACE_4)
+            .bg(theme::card())
+            .border_1()
+            .border_color(theme::accent())
+            .rounded(theme::RADIUS_XL)
+            .child(icon("terminal", px(18.), theme::accent()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(theme::ink())
+                            .child(SharedString::from(format!("Connect to {shown}"))),
+                    )
+                    .child(match self.quick_problem.clone() {
+                        Some(p) => crate::ui::field_help(p, true),
+                        None => crate::ui::field_help(
+                            "Opens a terminal without saving a host. Its tab offers Save as host.",
+                            false,
+                        ),
+                    }),
+            )
+            .child(Button::primary("search-connect", "Connect").on_click(cx.listener(|this, _, _, cx| {
+                let text = this.search.read(cx).text().to_string();
+                this.quick_connect(&text, cx);
+            })))
     }
 }
 

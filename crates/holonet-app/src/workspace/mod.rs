@@ -96,6 +96,12 @@ pub struct Workspace {
     runtime: tokio::runtime::Handle,
     /// Hosts page: search field, cards or list, selected host.
     search: Entity<TextField>,
+    /// First run's Connect now field, and why the last quick connect could
+    /// not start.
+    quick: Entity<TextField>,
+    quick_problem: Option<SharedString>,
+    /// A quick connect waiting for the next render to open its tab.
+    pending_quick: Option<Host>,
     cards: bool,
     selected: Option<HostId>,
     /// Hosts page: the group card picked to filter the hosts.
@@ -132,12 +138,36 @@ impl Workspace {
     ) -> Self {
         let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
         let settings_subs = settings_ui.subscribe(cx);
-        let search = cx.new(|cx| TextField::new(cx, "Find a host"));
+        let search = cx.new(|cx| TextField::new(cx, "Find a host, or type ssh user@address"));
+        let quick = cx.new(|cx| TextField::new(cx, "user@address").mono());
         let kh_search = cx.new(|cx| TextField::new(cx, "Filter by host, address or fingerprint"));
         let subscriptions = vec![
-            cx.subscribe(&search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
+            cx.subscribe(&search, |this: &mut Self, field, event: &TextFieldEvent, cx| {
+                match event {
+                    TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
+                    // Enter on "ssh user@address" connects without saving.
+                    TextFieldEvent::Submitted => {
+                        let text = field.read(cx).text().to_string();
+                        if hosts::looks_like_quick_connect(&text) {
+                            this.quick_connect(&text, cx);
+                        }
+                    }
+                    TextFieldEvent::Changed => {
+                        this.quick_problem = None;
+                        cx.notify()
+                    }
+                }
+            }),
+            cx.subscribe(&quick, |this: &mut Self, field, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Submitted => {
+                    let text = field.read(cx).text().to_string();
+                    this.quick_connect(&text, cx);
+                }
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
-                _ => cx.notify(),
+                TextFieldEvent::Changed => {
+                    this.quick_problem = None;
+                    cx.notify()
+                }
             }),
             cx.subscribe(&kh_search, |_: &mut Self, field, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Cancelled => field.update(cx, |f, cx| f.set_text("", cx)),
@@ -166,6 +196,9 @@ impl Workspace {
             page: Page::Hosts,
             runtime,
             search,
+            quick,
+            quick_problem: None,
+            pending_quick: None,
             cards: true,
             selected: None,
             group_filter: None,
@@ -209,10 +242,21 @@ impl Workspace {
 
     /// New host (`None`) or Edit host.
     pub(crate) fn open_form(&mut self, host: Option<Host>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form_with(host, None, window, cx);
+    }
+
+    /// The form, for a new host started from `draft` (Save as host).
+    pub(crate) fn open_form_with(
+        &mut self,
+        host: Option<Host>,
+        draft: Option<Host>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(data) = self.vault.as_ref().map(|v| v.data()) else { return };
         let timeout = Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64);
         let runtime = self.runtime.clone();
-        let form = cx.new(|cx| HostForm::new(host, data, timeout, runtime, window, cx));
+        let form = cx.new(|cx| HostForm::new(host, draft, data, timeout, runtime, window, cx));
         self._subscriptions.push(cx.subscribe_in(
             &form,
             window,
@@ -280,6 +324,21 @@ impl Workspace {
         window.defer(cx, move |window, cx| {
             let _ = app.update(cx, |app, cx| app.connect(id, window, cx));
         });
+    }
+
+    /// Quick connect: a terminal to `user@address` (or an `ssh` command)
+    /// without saving a host. Deferred, as [`Self::connect`].
+    pub(crate) fn quick_connect(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(data) = self.vault_data() else { return };
+        match crate::import::quick_host(text, data) {
+            Ok(host) => {
+                self.quick_problem = None;
+                // Started by the next render, which has the window.
+                self.pending_quick = Some(host);
+            }
+            Err(why) => self.quick_problem = Some(why.into()),
+        }
+        cx.notify();
     }
 
     /// Ask the app to open an SFTP tab (deferred, as [`Self::connect`]).
@@ -399,6 +458,12 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(host) = self.pending_quick.take() {
+            let app = self.app.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = app.update(cx, |app, cx| app.quick_connect(host, window, cx));
+            });
+        }
         let mut notices = Vec::new();
         if self.restored_from_backup {
             notices.push((

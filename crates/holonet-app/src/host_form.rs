@@ -49,6 +49,9 @@ enum TestState {
 
 pub struct HostForm {
     original: Option<Host>,
+    /// A new host's starting values ("Save as host" after a quick
+    /// connect). It keeps the draft's id, so the open tab counts as saved.
+    draft: Option<Host>,
     /// "Quick fill: paste an ssh command or a ~/.ssh/config entry" (new
     /// hosts), and what it filled or could not use.
     quick_fill: Entity<TextField>,
@@ -170,6 +173,7 @@ impl HostForm {
     /// vault's keys, identities and known hosts.
     pub fn new(
         host: Option<Host>,
+        draft: Option<Host>,
         data: &holonet_model::VaultData,
         connect_timeout: Duration,
         runtime: tokio::runtime::Handle,
@@ -180,7 +184,7 @@ impl HostForm {
         let mut identities: Vec<Identity> = data.identities.clone();
         identities.sort_by_key(|i| i.name.to_lowercase());
         let known_hosts: Vec<KnownHost> = data.known_hosts.clone();
-        let h = host.clone().unwrap_or_else(|| Host::new(""));
+        let h = host.clone().or_else(|| draft.clone()).unwrap_or_else(|| Host::new(""));
         let text = |cx: &mut Context<Self>, placeholder: &str, value: String, mono: bool| {
             cx.new(|cx| {
                 let f = TextField::new(cx, placeholder.to_string()).with_text(value);
@@ -205,7 +209,7 @@ impl HostForm {
             }
         };
         // A new host defaults to a key when the vault has one.
-        let auth = if host.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
+        let auth = if host.is_none() && draft.is_none() { if keys.is_empty() { 1 } else { 0 } } else { auth };
         let identity_index = h.identity.and_then(|id| identities.iter().position(|i| i.id == id));
         let auth = if identity_index.is_some() { 2 } else { auth };
         let identity_select = cx.new(|cx| {
@@ -363,6 +367,7 @@ impl HostForm {
             original: host,
             quick_fill,
             quick_note: None,
+            draft,
             label,
             address,
             port,
@@ -603,7 +608,7 @@ impl HostForm {
 
     /// The host as the form currently describes it.
     fn build(&self, cx: &Context<Self>) -> Host {
-        let mut host = self.original.clone().unwrap_or_else(|| Host::new(""));
+        let mut host = self.original.clone().or_else(|| self.draft.clone()).unwrap_or_else(|| Host::new(""));
         host.label = self.text(&self.label, cx);
         host.address = self.text(&self.address, cx);
         host.port = self.port(cx).unwrap_or(0);

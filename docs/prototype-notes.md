@@ -2577,3 +2577,49 @@ A new crate with three readers. It takes text and returns plain data: reading fi
 - The test account's key, config and `known_hosts` were removed, `authorized_keys` restored (3 lines), and the home, `.ssh` and `authorized_keys` permissions put back to 750, 700 and 600. The test vault copy and exports were removed.
 - The paste test used the Windows clipboard, so whatever was on it before is gone.
 - fmt, clippy `-D warnings` and the workspace tests pass: `holonet-app` 45, `holonet-model` 28, `holonet-import` 18.
+
+## Milestone 7, phase 5: first run and quick connect (26 Nov 2026)
+
+**First run (`workspace/hosts.rs`):**
+
+- An empty vault shows FirstRun.dc.html in place of the milestone 2 welcome:
+  - the globe, "Welcome to Holonet" and the drawn sentence
+  - **Connect now:** an accent `ssh` and a mono `user@address` field, with Connect and New host
+  - **Import what you already have:** the three config cards, which start the import from that source directly
+  - **Add your keys** (Keychain), **Bring your known_hosts** (Known hosts import) and **Set up the terminal** (Settings)
+  - the note that imports are copied
+- **Card layout:** the card rows are three-column grids. Flex rows with a basis put each card on its own line, because their text set a wide minimum.
+
+**Quick connect:**
+
+- **What it accepts:** `import::quick_host` reads `user@address`, `user@address:port`, `user@[v6]:port` or a full `ssh` command (through `holonet-import`'s Quick fill reader).
+  - **Must be present:** a user ("Add the user name: user@127.0.0.1.") and a valid address.
+  - **Must already be saved:** a jump host, matched by name or address, and a key file, matched by name in the Keychain. Otherwise it says what to add first.
+- **Where it starts:** from Connect now, and from the Hosts search. Text that starts with `ssh ` or is `user@address` with no spaces shows a "Connect to …" row ("Opens a terminal without saving a host. Its tab offers Save as host."), and Enter there connects. The placeholder is now "Find a host, or type ssh user@address", as Palette.dc.html draws.
+- **The tab:** the app opens it with `new_pane_for`, now split from `new_pane` so a pane can be made from a host that is not in the vault. The host key is checked as usual.
+- **Opening the tab:** `Workspace::new` has no window, so a quick connect waits in `pending_quick` and the next render (which has the window) opens the tab.
+- **What changes for an unsaved host:**
+  - The tab shows **Save as host** and hides Open SFTP here.
+  - Splitting opens another pane to the same unsaved host.
+  - A failed connection's Edit host becomes Save as host.
+  - The password prompt has no "Save in the encrypted vault" (there is nowhere to save it). It says "This host is not saved. Save as host keeps the password, if you want to."
+  - Its History record has no saved host, so "Connect again" is not offered.
+- **Save as host:**
+  - **The form:** opens New host filled in from the pane (`HostForm` gains a `draft`), including the password typed in the pane, with "Save in the encrypted vault" ticked.
+  - **The same id:** the saved host keeps the draft's id, so the open tab counts as saved at once and shows Open SFTP here instead.
+
+**Live check** (a new vault in an empty folder, the WSL server):
+
+1. **Creating the vault** showed First run.
+2. **A missing user:** `127.0.0.1:2222` in Connect now said "Add the user name: user@127.0.0.1."
+3. **The first quick connect:** `holotest@127.0.0.1:2222` opened a tab named 127.0.0.1 with Save as host. It asked to trust the key, then for the password, and the shell ran.
+4. **After rebuilding** (for the password prompt change):
+   - The same quick connect asked for the password without the save checkbox.
+   - Save as host opened the form with the user, address, port and password filled in.
+   - Save added the host, and the tab switched to Open SFTP here.
+5. **From the Hosts search:** `ssh holotest@localhost -p 2222` showed the Connect to row, and Enter opened a tab asking to trust localhost's key (cancelled).
+6. **Import:** the phase 4 WSL test config, through Import, added m7-jump and m7-target: "Imported 2 hosts and 1 key."
+
+**Cleanup and checks:**
+- The test account's config, key and `known_hosts` were removed, and its `authorized_keys` and permissions (750, 700, 600) restored. The test vault folder was removed.
+- fmt, clippy `-D warnings` and the workspace tests pass. `holonet-app` has 46, including `quick_hosts`.

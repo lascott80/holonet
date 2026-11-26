@@ -144,6 +144,8 @@ pub enum TabEvent {
         axis: Axis,
         host: Option<HostId>,
     },
+    /// "Save as host": the active pane's host is a quick connect.
+    SaveAsHost(Box<holonet_model::Host>),
     /// "Open SFTP here": an SFTP tab for the active pane's host, with its
     /// typed secrets.
     OpenFiles {
@@ -989,6 +991,10 @@ impl Render for Tab {
         };
         let can_split = self.can_split();
         let files = self.is_files(cx);
+        let saved = {
+            let id = self.active.read(cx).host.id;
+            self.app.upgrade().is_none_or(|app| app.read(cx).is_saved(id, cx))
+        };
         let body = self.render_node(&self.root, Vec::new(), cx);
         let drawer = if files { None } else { self.drawer(cx) };
         div()
@@ -1046,8 +1052,17 @@ impl Render for Tab {
                                         .child(format!("A tab holds up to {MAX_PANES} panes.")),
                                 )
                             })
+                            // A quick connect's host is not saved yet.
+                            .when(!saved, |d| {
+                                d.child(Button::primary("save-as-host", "Save as host").on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let host = this.active.read(cx).draft_host();
+                                        cx.emit(TabEvent::SaveAsHost(Box::new(host)));
+                                    },
+                                )))
+                            })
                             // Terminal.dc.html: "Open SFTP here" for the active pane's host.
-                            .when(!files, |d| {
+                            .when(!files && saved, |d| {
                                 d.child(Button::secondary("open-sftp-here", "Open SFTP here").icon("folder").on_click(
                                     cx.listener(|this, _, _, cx| {
                                         let (host, remembered) = {

@@ -520,6 +520,24 @@ impl Pane {
     }
 
     /// Each hop's typed secret, for a pane opened from this one.
+    /// Whether a hop's host is saved in the vault (a quick connect's is not).
+    fn hop_saved(&self, hop: usize, cx: &gpui::App) -> bool {
+        let id = self.hop_host(hop).id;
+        self.app.upgrade().is_none_or(|app| app.read(cx).is_saved(id, cx))
+    }
+
+    /// The host for "Save as host": this pane's, with the password typed
+    /// for it, so the form can keep it.
+    pub fn draft_host(&self) -> Host {
+        let mut host = self.host.clone();
+        if let (Auth::Password { .. }, Some((true, secret))) =
+            (&host.auth, self.signs.get(self.target_hop()).and_then(|s| s.remembered.clone()))
+        {
+            host.auth = Auth::Password { saved: Some(secret) };
+        }
+        host
+    }
+
     pub fn remembered(&self) -> Remembered {
         self.signs.iter().map(|s| s.remembered.clone()).collect()
     }
@@ -2099,6 +2117,13 @@ impl Pane {
                 Some(group) => (
                     format!("Enter the password for {user}@{host}").into(),
                     format!("The {group} group asks for the password each time, so it is not saved.").into(),
+                    None,
+                ),
+                // A quick connect's host is not saved, so neither is its
+                // password: Save as host offers it on the form.
+                None if !self.hop_saved(hop, cx) => (
+                    format!("Enter the password for {user}@{host}").into(),
+                    "This host is not saved. Save as host keeps the password, if you want to.".into(),
                     None,
                 ),
                 None => (
