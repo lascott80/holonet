@@ -144,6 +144,8 @@ pub fn options_from(mode: &str, env: &HashMap<String, String>) -> Result<Connect
         connect_timeout: Duration::from_secs(10),
         keep_alive: Some(holonet_ssh::KEEPALIVE),
         prompts: FilePrompts::with_answers(root().join(".dev/known_hosts"), answers),
+        agent_forwarding: false,
+        compression: false,
         jump: None,
     })
 }

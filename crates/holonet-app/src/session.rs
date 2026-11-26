@@ -36,6 +36,7 @@ use crate::files_view::FilesView;
 use crate::hops::{self, Hop, RouteEvent, Routed};
 use crate::host_form::describe_error;
 use crate::shell::TabState;
+use crate::snippet_run::{RunPrompt, RunPromptEvent};
 use crate::terminal::GridSize;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::theme::{self, TypeStyles};
@@ -338,6 +339,16 @@ pub struct Pane {
     reconnect: Option<Reconnect>,
     /// Waits for and starts the next reconnect attempt.
     reconnect_task: Option<gpui::Task<()>>,
+    /// The host's startup snippet has had its one chance: it is sent after
+    /// the shell first opens and never replayed (decisions.md).
+    startup_done: bool,
+    /// Filled snippets from a multi-host run, typed once the shell opens.
+    queued: Vec<String>,
+    /// A snippet waiting for its run prompt, and the prompt while open.
+    ask: Option<(holonet_model::Snippet, bool)>,
+    /// The tab is broadcasting (amber edges).
+    broadcasting: bool,
+    prompt: Option<(Entity<RunPrompt>, Subscription)>,
     /// The last sleep, wake or network change, and when.
     disturbance: Option<(Disturbance, std::time::Instant)>,
     /// Focus the prompt's field at the next render (it is created without a window).
@@ -406,6 +417,8 @@ impl Pane {
                     this.session = None;
                 }
                 TerminalEvent::Lost(reason) => this.on_lost(reason.clone(), cx),
+                // The tab listens for these itself (broadcast).
+                TerminalEvent::Typed(_) => return,
             }
             cx.notify();
         })];
@@ -448,6 +461,11 @@ impl Pane {
             alone: true,
             reconnect: None,
             reconnect_task: None,
+            startup_done: false,
+            queued: Vec::new(),
+            ask: None,
+            broadcasting: false,
+            prompt: None,
             disturbance: None,
             _subscriptions: subscriptions,
         };
@@ -551,6 +569,7 @@ impl Pane {
         let user = if host.username.is_empty() { "this user".to_string() } else { host.username.clone() };
         let line = match (&host.auth, self.hop_key(hop)) {
             (Auth::Key { .. }, Some(key)) => format!("Offering key {} for {user}", key.name),
+            (Auth::Agent, _) => format!("Offering the agent's keys for {user}"),
             _ => format!("Offering password for {user}"),
         };
         let line = format!("{}{line}", self.hop_prefix(hop));
@@ -898,6 +917,9 @@ impl Pane {
                 connect_timeout,
                 keep_alive: step.keep_alive,
                 prompts: Arc::new(UiPrompts { tx: tx.clone(), hop }),
+                // Only this pane's own host gets the agent (`ssh -A` on the last hop).
+                agent_forwarding: hop == self.jumps.len() && step.host.agent_forwarding,
+                compression: step.host.compression,
                 jump: None,
             });
         }
@@ -1080,7 +1102,9 @@ impl Pane {
                     TextFieldEvent::Cancelled => this.answer_secret(false, cx),
                     TextFieldEvent::Changed => {}
                 }));
-                let save = !matches!(request, SecretRequest::Challenge { .. });
+                // A group that asks each time never has its password saved.
+                let asks = matches!(request, SecretRequest::Password { .. }) && self.group_asks(hop, cx).is_some();
+                let save = !matches!(request, SecretRequest::Challenge { .. }) && !asks;
                 self.state = State::Secret { hop, request, field, save, reply: Some(reply) };
                 self.focus_pending = true;
             }
@@ -1155,6 +1179,94 @@ impl Pane {
         cx.notify();
     }
 
+    /// Send the host's startup snippet, once per pane: not after a
+    /// reconnect, since commands are never replayed (decisions.md).
+    fn run_startup_snippet(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.startup_done, true) {
+            return;
+        }
+        if let Some(snippet) = self.app.upgrade().and_then(|app| app.read(cx).startup_snippet(self.host.id, cx)) {
+            self.run_snippet(snippet, false, cx);
+        }
+        // Then what a multi-host run asked this pane to type.
+        for text in std::mem::take(&mut self.queued) {
+            self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+        }
+    }
+
+    /// The pane's shell is open and takes input.
+    pub fn can_run(&self) -> bool {
+        self.mode == PaneMode::Terminal && matches!(self.state, State::Connected) && self.reconnect.is_none()
+    }
+
+    /// Run a snippet here: at once, or after the run prompt when it has
+    /// variables or asks before running.
+    /// `broadcast`: the person ran it in a broadcasting tab, so it goes
+    /// to the other panes too (startup snippets never do).
+    pub fn run_snippet(&mut self, snippet: holonet_model::Snippet, broadcast: bool, cx: &mut Context<Self>) {
+        if RunPrompt::needed(&snippet, false) {
+            // The prompt is built on the next render, which has the window
+            // to focus its first field.
+            self.prompt = None;
+            self.ask = Some((snippet, broadcast));
+            cx.notify();
+            return;
+        }
+        let text = snippet.input(&Default::default());
+        self.type_snippet(&text, broadcast, cx);
+    }
+
+    fn type_snippet(&mut self, text: &str, broadcast: bool, cx: &mut Context<Self>) {
+        self.terminal.update(cx, |t, cx| {
+            if broadcast {
+                t.type_user_text(text, cx)
+            } else {
+                t.type_text(text, cx);
+            }
+        });
+    }
+
+    /// The tab is broadcasting: amber edges.
+    pub fn set_broadcast(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.broadcasting != on {
+            self.broadcasting = on;
+            cx.notify();
+        }
+    }
+
+    /// Type `text` (a filled snippet) now, or once the shell first opens.
+    pub fn queue_input(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.startup_done && self.can_run() {
+            self.terminal.update(cx, |t, cx| t.type_text(&text, cx));
+            self.focus_pending = true;
+        } else {
+            self.queued.push(text);
+        }
+    }
+
+    /// Build the run prompt asked for by [`Self::run_snippet`].
+    fn open_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((snippet, broadcast)) = self.ask.take() else { return };
+        let last = self.app.upgrade().map(|app| app.read(cx).snippet_values(snippet.id)).unwrap_or_default();
+        let target = self.name().to_string();
+        let run = snippet.clone();
+        let prompt = cx.new(|cx| RunPrompt::new(snippet, target, None, &last, window, cx));
+        let sub = cx.subscribe(&prompt, move |this: &mut Self, _, event: &RunPromptEvent, cx| {
+            if let RunPromptEvent::Run(values) = event {
+                if let Some(app) = this.app.upgrade() {
+                    let values = values.clone();
+                    app.update(cx, |app, _| app.remember_snippet_values(run.id, values));
+                }
+                let text = run.input(values);
+                this.type_snippet(&text, broadcast, cx);
+            }
+            this.prompt = None;
+            this.focus_pending = true;
+            cx.notify();
+        });
+        self.prompt = Some((prompt, sub));
+    }
+
     fn finish(&mut self, result: Result<(Session, Opened), ConnectError>, cx: &mut Context<Self>) {
         match result {
             Ok((session, opened)) => {
@@ -1179,7 +1291,10 @@ impl Pane {
                 );
                 self.session = Some(Arc::new(session));
                 match opened {
-                    Opened::Shell(shell) => self.terminal.update(cx, |t, cx| t.attach(shell, cx)),
+                    Opened::Shell(shell) => {
+                        self.terminal.update(cx, |t, cx| t.attach(shell, cx));
+                        self.run_startup_snippet(cx);
+                    }
                     Opened::Files(remote) => {
                         let files = match self.files.clone() {
                             Some(files) => files,
@@ -1196,7 +1311,9 @@ impl Pane {
                     }
                 }
                 self.state = State::Connected;
-                self.focus_pending = true;
+                // Only the tab's active pane takes the keyboard: a multi-host
+                // run's panes connect in any order.
+                self.focus_pending = self.active;
                 // Each hop's typed secret is remembered for reconnecting, and
                 // saved when asked.
                 let mut saves = Vec::new();
@@ -1226,8 +1343,14 @@ impl Pane {
                 }
                 let id = self.host.id;
                 self.host.last_connected_at = Some(Timestamp::now());
+                // Each hop's typed secret, for the host's background connection.
+                let typed: Vec<(holonet_model::HostId, (bool, Secret))> = (0..self.signs.len())
+                    .filter_map(|hop| self.signs[hop].remembered.clone().map(|r| (self.hop_host(hop).id, r)))
+                    .collect();
                 if let Some(app) = self.app.upgrade() {
                     app.update(cx, |app, cx| {
+                        // Rules set to start with this host start now.
+                        app.host_connected(id, typed, cx);
                         app.update_vault(
                             move |d| {
                                 if let Some(h) = d.host_mut(id) {
@@ -1304,7 +1427,15 @@ impl Pane {
                     ConnectError::SignInRefused { method, remaining } => {
                         let offered = if remaining.is_empty() { method.to_string() } else { remaining.join(",") };
                         self.note(format!("{prefix}Server: Permission denied ({offered})"), true);
-                        if *method == "publickey" {
+                        if *method == "publickey" && matches!(self.hop_host(hop).auth, Auth::Agent) {
+                            self.fail(
+                                Failure::KeyRefused,
+                                format!("{} refused the agent's keys", upper_first(&server)),
+                                format!(
+                                    "None of the keys in Windows' OpenSSH agent are in the server's authorized_keys for {user}. Add the right key to the agent with ssh-add, or choose another sign-in."
+                                ),
+                            )
+                        } else if *method == "publickey" {
                             self.fail(
                                 Failure::KeyRefused,
                                 format!("{} refused the key {key_name}", upper_first(&server)),
@@ -1328,6 +1459,21 @@ impl Pane {
                             "The key passphrase is wrong",
                             format!("Enter the passphrase for {key_name} again. Holonet has not contacted the server with this key."),
                         )
+                    }
+                    ConnectError::AgentUnavailable | ConnectError::AgentEmpty | ConnectError::AgentFailed(_) => {
+                        self.note(format!("{prefix}{e}"), true);
+                        let (title, body) = match e {
+                            ConnectError::AgentUnavailable => (
+                                "Windows' OpenSSH agent is not running",
+                                "Start the ssh-agent service in Windows, then retry, or edit the host to choose another sign-in.".to_string(),
+                            ),
+                            ConnectError::AgentEmpty => (
+                                "The SSH agent holds no keys",
+                                "Add a key to Windows' OpenSSH agent with ssh-add, then retry, or edit the host to choose another sign-in.".to_string(),
+                            ),
+                            _ => ("The SSH agent could not sign in", describe_error(e)),
+                        };
+                        self.fail(Failure::KeyRefused, title, body)
                     }
                     ConnectError::Cancelled | ConnectError::HostKeyRejected => {
                         cx.emit(SessionEvent::Close);
@@ -1865,6 +2011,12 @@ impl Pane {
         self.center_card(card).into_any_element()
     }
 
+    /// The group whose "Ask each time" this hop's sign-in follows.
+    fn group_asks(&self, hop: usize, cx: &gpui::App) -> Option<SharedString> {
+        let host = self.hop_host(hop).id;
+        self.app.upgrade().and_then(|app| app.read(cx).asks_each_time(host, cx))
+    }
+
     fn secret_view(
         &self,
         hop: usize,
@@ -1874,11 +2026,18 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (title, body, save_label): (SharedString, SharedString, Option<&str>) = match request {
-            SecretRequest::Password { user, host } => (
-                format!("Enter the password for {user}@{host}").into(),
-                "This host has no saved password.".into(),
-                Some("Save in the encrypted vault"),
-            ),
+            SecretRequest::Password { user, host } => match self.group_asks(hop, cx) {
+                Some(group) => (
+                    format!("Enter the password for {user}@{host}").into(),
+                    format!("The {group} group asks for the password each time, so it is not saved.").into(),
+                    None,
+                ),
+                None => (
+                    format!("Enter the password for {user}@{host}").into(),
+                    "This host has no saved password.".into(),
+                    Some("Save in the encrypted vault"),
+                ),
+            },
             SecretRequest::Passphrase { key_name } => (
                 format!("Enter the passphrase for {key_name}").into(),
                 "The key is protected with a passphrase.".into(),
@@ -2003,7 +2162,7 @@ impl Pane {
     }
 
     /// The status bar the tab shows for its active pane.
-    pub fn status_bar(&self) -> Div {
+    pub fn status_bar(&self, cx: &gpui::App) -> Div {
         let (word, color): (&str, gpui::Rgba) = match self.state {
             _ if self.reconnect.is_some() => ("Reconnecting", theme::ink_muted()),
             State::Connected if self.via == Some(Via::Tailscale) => ("Connected over Tailscale", theme::group_mint()),
@@ -2016,6 +2175,7 @@ impl Pane {
         let auth = match self.info.auth_method.as_str() {
             "publickey" => self.key.as_ref().map(|k| format!("Key {}", k.name)).unwrap_or_else(|| "Key".into()),
             "password" | "keyboard-interactive" => "Password".into(),
+            "agent" => "SSH agent".into(),
             _ => String::new(),
         };
         let mut items: Vec<SharedString> = Vec::new();
@@ -2029,6 +2189,19 @@ impl Pane {
         if !self.jumps.is_empty() && matches!(self.state, State::Connected) {
             let names: Vec<&str> = self.jumps.iter().map(|j| j.name()).collect();
             items.push(format!("Through {}", names.join(", ")).into());
+        }
+        if matches!(self.state, State::Connected) && self.mode == PaneMode::Terminal {
+            if !matches!(self.info.compression.as_str(), "" | "none") {
+                items.push("Compressed".into());
+            }
+            // Terminal.dc.html: "Agent forwarding off".
+            items.push(if self.host.agent_forwarding { "Agent forwarding on" } else { "Agent forwarding off" }.into());
+        }
+        // The host's running port forwards (Terminal.dc.html: "Forward L 5432 → db-primary:5432").
+        if matches!(self.state, State::Connected)
+            && let Some(app) = self.app.upgrade()
+        {
+            items.extend(app.read(cx).forwards_for(self.host.id, cx).into_iter().map(SharedString::from));
         }
         div()
             .flex()
@@ -2052,7 +2225,10 @@ impl Pane {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.focus_pending) {
+        if self.ask.is_some() {
+            self.open_prompt(window, cx);
+        }
+        if std::mem::take(&mut self.focus_pending) && self.prompt.is_none() {
             self.focus(window, cx);
         }
         // A terminal that is no longer drawn (the pane failed, or shows a
@@ -2061,7 +2237,8 @@ impl Render for Pane {
         if !terminal_shown && self.terminal.read(cx).is_focused(window) {
             window.focus(&self.focus_handle);
         }
-        let color = theme::no_group();
+        let tag = self.app.upgrade().and_then(|app| app.read(cx).group_tag(self.host.id, cx));
+        let color = crate::workspace::GroupTag::color_of(tag.as_ref());
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
             _ if self.reconnect.is_some() => "Reconnecting".into(),
@@ -2139,7 +2316,13 @@ impl Render for Pane {
             .flex_col()
             .bg(theme::terminal())
             .border_1()
-            .border_color(if self.active { theme::ink_muted() } else { theme::line() })
+            .border_color(if self.broadcasting {
+                theme::warn()
+            } else if self.active {
+                theme::ink_muted()
+            } else {
+                theme::line()
+            })
             .rounded(theme::RADIUS_MD)
             .overflow_hidden()
             // 2px group-color top edge (GPUI borders are one color).
@@ -2162,7 +2345,7 @@ impl Render for Pane {
                             .gap(theme::SPACE_2)
                             .child(crate::ui::group_square(color))
                             .child(div().text_color(theme::ink()).font_weight(FontWeight::MEDIUM).child(self.name()))
-                            .child(div().text_color(color).child("No group")),
+                            .child(div().text_color(color).child(crate::workspace::GroupTag::name_of(tag.as_ref()))),
                     )
                     .child(
                         div()
@@ -2171,7 +2354,14 @@ impl Render for Pane {
                             .child(state_word),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(content)
+                    .children(self.prompt.as_ref().map(|(p, _)| p.clone())),
+            )
     }
 }
 

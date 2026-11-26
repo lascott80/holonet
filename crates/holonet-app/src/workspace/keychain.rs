@@ -827,7 +827,7 @@ impl Workspace {
                 Some(k) if k.encrypted && k.saved_passphrase.is_none() => Some(format!("Passphrase for {}", k.name)),
                 _ => None,
             },
-            Auth::Password { .. } => None,
+            Auth::Password { .. } | Auth::Agent => None,
         }
     }
 
@@ -880,6 +880,8 @@ impl Workspace {
                     secret: field,
                     stops: stops.clone(),
                 }),
+                agent_forwarding: false,
+                compression: hop.host.compression,
                 jump: None,
             });
         }
@@ -978,6 +980,7 @@ impl Workspace {
                 },
                 Auth::Password { saved: Some(_) } => "Password, stored in vault".to_string(),
                 Auth::Password { saved: None } => "Password, asked on connect".to_string(),
+                Auth::Agent => "SSH agent".to_string(),
             };
             let users = data.identity_users(id).len();
             let meta = format!(
@@ -1020,6 +1023,8 @@ impl Workspace {
         let (auth, key_index, saved) = match existing.as_ref().map(|i| &i.auth) {
             Some(Auth::Key { key_id, .. }) => (0, key_ids.iter().position(|k| k == key_id).unwrap_or(0), None),
             Some(Auth::Password { saved }) => (1, 0, saved.clone()),
+            // Identities sign in with a key or a password; the agent is a host's own choice.
+            Some(Auth::Agent) => (0, 0, None),
             None => (if keys.is_empty() { 1 } else { 0 }, 0, None),
         };
         let options = keys.iter().map(|k| SharedString::from(format!("{} ({})", k.name, type_label(k)))).collect();

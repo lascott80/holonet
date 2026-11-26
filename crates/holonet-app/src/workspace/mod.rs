@@ -1,11 +1,15 @@
-//! The unlocked workspace: side navigation and pages (Hosts, the host form,
-//! Settings). Phases 6 and 7 add the session tab and Known hosts.
+//! The unlocked workspace: side navigation and pages (Hosts and Groups, the
+//! host form, Keychain, Known hosts, Settings).
 
+mod forwarding;
+mod groups;
 mod hosts;
 mod keychain;
 mod known_hosts;
 mod settings;
+mod snippets;
 
+pub use groups::GroupTag;
 pub use hosts::format_date;
 
 use std::path::PathBuf;
@@ -44,10 +48,20 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// Pages that exist in this build (milestone 2 plan: no control that does nothing).
-const PAGES: [NavEntry; 4] = [NavEntry::Hosts, NavEntry::Keychain, NavEntry::KnownHosts, NavEntry::Settings];
+const PAGES: [NavEntry; 6] = [
+    NavEntry::Hosts,
+    NavEntry::Keychain,
+    NavEntry::PortForwarding,
+    NavEntry::Snippets,
+    NavEntry::KnownHosts,
+    NavEntry::Settings,
+];
 
 pub(crate) enum Page {
     Hosts,
+    Groups,
+    Forwarding,
+    Snippets,
     Form(Entity<HostForm>),
     Keychain,
     KnownHosts,
@@ -80,6 +94,12 @@ pub struct Workspace {
     search: Entity<TextField>,
     cards: bool,
     selected: Option<HostId>,
+    /// Hosts page: the group card picked to filter the hosts.
+    group_filter: Option<holonet_model::GroupId>,
+    groups_ui: groups::GroupsUi,
+    forwarder: Entity<crate::forwards::Forwarder>,
+    fw: forwarding::ForwardingUi,
+    sn: snippets::SnippetsUi,
     /// Known hosts page: search, filter pill, selected entry, open dialog.
     kh_search: Entity<TextField>,
     kh_filter: usize,
@@ -100,6 +120,7 @@ impl Workspace {
         vault: UnlockedVault,
         restored_from_backup: bool,
         runtime: tokio::runtime::Handle,
+        forwarder: Entity<crate::forwards::Forwarder>,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings_ui = settings::SettingsUi::new(&vault.data().settings, cx);
@@ -118,6 +139,12 @@ impl Workspace {
         ];
         let path = vault.path().to_path_buf();
         let kc = keychain::KeychainUi::new(cx);
+        let groups_ui = groups::GroupsUi::new(cx);
+        let groups_subs = groups_ui.subscribe(cx);
+        let fw = forwarding::ForwardingUi::new(cx);
+        let fw_subs = fw.subscribe(&forwarder, cx);
+        let sn = snippets::SnippetsUi::new(cx);
+        let sn_subs = sn.subscribe(cx);
         Self {
             app,
             vault: Some(vault),
@@ -127,6 +154,11 @@ impl Workspace {
             search,
             cards: true,
             selected: None,
+            group_filter: None,
+            groups_ui,
+            forwarder,
+            fw,
+            sn,
             kh_search,
             kh_filter: 0,
             kh_selected: None,
@@ -137,7 +169,13 @@ impl Workspace {
             settings_ui,
             kc,
             change_password: None,
-            _subscriptions: subscriptions.into_iter().chain(settings_subs).collect(),
+            _subscriptions: subscriptions
+                .into_iter()
+                .chain(settings_subs)
+                .chain(groups_subs)
+                .chain(fw_subs)
+                .chain(sn_subs)
+                .collect(),
         }
     }
 
@@ -388,12 +426,17 @@ impl Render for Workspace {
             Page::Settings => NavEntry::Settings,
             Page::KnownHosts => NavEntry::KnownHosts,
             Page::Keychain => NavEntry::Keychain,
+            Page::Forwarding => NavEntry::PortForwarding,
+            Page::Snippets => NavEntry::Snippets,
             _ => NavEntry::Hosts,
         };
         let page = match &self.page {
             Page::Settings => self.settings_page(window, cx).into_any_element(),
             Page::Form(form) => form.clone().into_any_element(),
             Page::Hosts => self.hosts_page(window, cx),
+            Page::Groups => self.groups_page(cx),
+            Page::Forwarding => self.forwarding_page(window, cx),
+            Page::Snippets => self.snippets_page(window, cx),
             Page::KnownHosts => self.known_hosts_page(cx),
             Page::Keychain => self.keychain_page(cx),
         };
@@ -410,10 +453,15 @@ impl Render for Workspace {
                     .on_select({
                         move |entry, _, cx| {
                             entity.update(cx, |this, cx| {
+                                if entry == NavEntry::Snippets {
+                                    this.open_snippets(None, cx);
+                                    return;
+                                }
                                 this.page = match entry {
                                     NavEntry::Settings => Page::Settings,
                                     NavEntry::KnownHosts => Page::KnownHosts,
                                     NavEntry::Keychain => Page::Keychain,
+                                    NavEntry::PortForwarding => Page::Forwarding,
                                     _ => Page::Hosts,
                                 };
                                 cx.notify();

@@ -19,9 +19,9 @@ use holonet_model::HostId;
 use crate::app::HolonetApp;
 use crate::session::Pane;
 use crate::shell::TabState;
-use crate::terminal_view::{SearchQuery, SearchStatus};
+use crate::terminal_view::{SearchQuery, SearchStatus, TerminalEvent, Typed};
 use crate::theme::{self, TypeStyles};
-use crate::ui::{Button, icon};
+use crate::ui::{Button, ButtonKind, dialog, dialog_buttons, icon, modal};
 use crate::ui::{Checkbox, TextField, TextFieldEvent};
 
 /// Owner decision 1: up to four panes per tab.
@@ -150,6 +150,8 @@ pub enum TabEvent {
         host: HostId,
         remembered: crate::session::Remembered,
     },
+    /// The drawer's "Manage snippets": the Snippets page.
+    ManageSnippets,
 }
 
 pub struct Tab {
@@ -161,6 +163,14 @@ pub struct Tab {
     /// The split menu, while open: its axis and the hosts it offers.
     menu: Option<(Axis, Vec<(HostId, SharedString)>)>,
     find: Option<FindBar>,
+    /// The Snippets drawer is open (Terminal.dc.html).
+    drawer: bool,
+    /// Broadcast input: what is typed in the active pane goes to every
+    /// connected pane of this tab.
+    broadcast: bool,
+    /// Turning broadcast on reaches hosts in a "warn" group: the question,
+    /// with "1 Production host".
+    cast_ask: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -169,7 +179,7 @@ impl EventEmitter<TabEvent> for Tab {}
 impl Tab {
     pub fn new(app: WeakEntity<HolonetApp>, pane: Entity<Pane>, cx: &mut Context<Self>) -> Self {
         // Redraw the header, status bar and title bar when a pane changes.
-        let subscriptions = vec![cx.observe(&pane, |_, _, cx| cx.notify())];
+        let subscriptions = Self::watch(&pane, cx);
         Self {
             app,
             root: Node::Leaf(pane.clone()),
@@ -177,8 +187,153 @@ impl Tab {
             drag: None,
             menu: None,
             find: None,
+            drawer: false,
+            broadcast: false,
+            cast_ask: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Follow a pane: redraw when it changes, and hear what is typed in it.
+    fn watch(pane: &Entity<Pane>, cx: &mut Context<Self>) -> Vec<Subscription> {
+        let terminal = pane.read(cx).terminal().clone();
+        let from = pane.downgrade();
+        vec![
+            cx.observe(pane, |_, _, cx| cx.notify()),
+            cx.subscribe(&terminal, move |this: &mut Self, _, event: &TerminalEvent, cx| {
+                if let TerminalEvent::Typed(typed) = event
+                    && let Some(from) = from.upgrade()
+                {
+                    this.fan_out(&from, typed, cx);
+                }
+            }),
+        ]
+    }
+
+    /// While broadcasting, send what was typed in `from` to every other
+    /// connected pane, in the order it was typed.
+    fn fan_out(&mut self, from: &Entity<Pane>, typed: &Typed, cx: &mut Context<Self>) {
+        if !self.broadcast || !self.contains(from) {
+            return;
+        }
+        for pane in self.panes().into_iter().filter(|p| p != from) {
+            if !pane.read(cx).can_run() {
+                continue;
+            }
+            let terminal = pane.read(cx).terminal().clone();
+            terminal.update(cx, |t, cx| t.replay(typed, cx));
+        }
+    }
+
+    /// The Broadcast button and Ctrl Shift B: turn it off, or on (asking
+    /// first when a host in a "warn" group is in the tab).
+    pub fn toggle_broadcast(&mut self, cx: &mut Context<Self>) {
+        if self.broadcast {
+            self.set_broadcast(false, cx);
+            return;
+        }
+        if self.panes().len() < 2 || self.is_files(cx) {
+            return;
+        }
+        match self.warn_text(cx) {
+            Some(warn) => {
+                self.cast_ask = Some(warn);
+                cx.notify();
+            }
+            None => self.set_broadcast(true, cx),
+        }
+    }
+
+    fn set_broadcast(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.broadcast = on;
+        self.cast_ask = None;
+        self.mark_panes(cx);
+        cx.notify();
+    }
+
+    /// "1 Production host": the tab's hosts in groups marked "warn".
+    fn warn_text(&self, cx: &App) -> Option<String> {
+        let hosts: Vec<HostId> = self.panes().iter().map(|p| p.read(cx).host.id).collect();
+        self.app.upgrade().and_then(|app| app.read(cx).warn_text(&hosts, cx))
+    }
+
+    /// "both panes", "all 4 panes", or "the 2 connected panes" while
+    /// some have ended or are reconnecting (they get nothing).
+    fn pane_count_text(&self, cx: &App) -> String {
+        let total = self.panes().len();
+        let live = self.panes().iter().filter(|p| p.read(cx).can_run()).count();
+        match (live, total) {
+            (2, 2) => "both panes".to_string(),
+            (n, t) if n == t => format!("all {n} panes"),
+            (1, _) => "the 1 connected pane".to_string(),
+            (n, _) => format!("the {n} connected panes"),
+        }
+    }
+
+    /// Terminal.dc.html's amber strip while broadcasting.
+    fn broadcast_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.broadcast {
+            return None;
+        }
+        // Counted over the panes that receive what is typed.
+        let live: Vec<HostId> =
+            self.panes().iter().filter(|p| p.read(cx).can_run()).map(|p| p.read(cx).host.id).collect();
+        let including = self
+            .app
+            .upgrade()
+            .and_then(|app| app.read(cx).warn_text(&live, cx))
+            .map(|w| format!(", including {w}"))
+            .unwrap_or_default();
+        let reach = format!("Everything you type goes to {}{including}.", self.pane_count_text(cx));
+        Some(
+            crate::ui::power::broadcast_strip(
+                reach,
+                cx.listener(|this, _, window, cx| {
+                    this.set_broadcast(false, cx);
+                    this.focus(window, cx);
+                }),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// "Broadcast to 2 panes, including 1 Production host?"
+    fn broadcast_question(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let warn = self.cast_ask.as_ref()?;
+        let close = {
+            let this = cx.weak_entity();
+            move |_: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.cast_ask = None;
+                    cx.notify()
+                });
+            }
+        };
+        Some(
+            modal(
+                "broadcast-ask",
+                px(460.),
+                dialog(
+                    true,
+                    format!("Broadcast to {} panes, including {warn}?", self.panes().len()),
+                    "Everything you type, paste or run from the drawer goes to every connected pane in this tab until you turn it off.",
+                )
+                .child(dialog_buttons([
+                    Button::secondary("broadcast-ask-cancel", "Cancel").on_click({
+                        let close = close.clone();
+                        move |_, window, cx| close(window, cx)
+                    }),
+                    Button::new("broadcast-ask-ok", "Turn on broadcast", ButtonKind::DestructiveFill).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.set_broadcast(true, cx);
+                            this.focus(window, cx);
+                        }),
+                    ),
+                ])),
+                close,
+            )
+            .into_any_element(),
+        )
     }
 
     pub fn panes(&self) -> Vec<Entity<Pane>> {
@@ -205,9 +360,150 @@ impl Tab {
             return;
         }
         let target = self.active.clone();
-        self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
+        let subs = Self::watch(&pane, cx);
+        self._subscriptions.extend(subs);
         self.root.split(&target, axis, pane.clone());
         self.activate(pane, window, cx);
+    }
+
+    /// Add a pane beside or below `target` without making it active
+    /// (a multi-host run lays out its panes this way).
+    pub fn add_pane(&mut self, target: &Entity<Pane>, axis: Axis, pane: Entity<Pane>, cx: &mut Context<Self>) {
+        if !self.can_split() {
+            return;
+        }
+        let subs = Self::watch(&pane, cx);
+        self._subscriptions.extend(subs);
+        self.root.split(target, axis, pane);
+        self.mark_panes(cx);
+        cx.notify();
+    }
+
+    /// The Snippets button: open or close the drawer.
+    pub fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawer = !self.drawer;
+        cx.notify();
+    }
+
+    /// Run a snippet from the drawer in the active pane.
+    fn run_from_drawer(&mut self, snippet: holonet_model::Snippet, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active.clone();
+        if !pane.read(cx).can_run() {
+            return;
+        }
+        let broadcast = self.broadcast;
+        pane.update(cx, |p, cx| {
+            p.run_snippet(snippet, broadcast, cx);
+            p.focus(window, cx);
+        });
+    }
+
+    /// The Snippets drawer (Terminal.dc.html): the library, what a click
+    /// runs in, and "Manage snippets".
+    fn drawer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.drawer {
+            return None;
+        }
+        let snippets = self.app.upgrade().map(|app| app.read(cx).snippets(cx)).unwrap_or_default();
+        let ready = self.active.read(cx).can_run();
+        let target: SharedString = if !ready {
+            "Connect the active pane first".into()
+        } else if self.broadcast {
+            format!("Runs in {}", self.pane_count_text(cx)).into()
+        } else {
+            "Runs in active pane".into()
+        };
+        let items = snippets.into_iter().enumerate().map(|(i, s)| {
+            let name = s.display_name().to_string();
+            let command = s.command.replace(['\r', '\n'], " ");
+            div()
+                .id(("drawer-snippet", i))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(theme::SPACE_3)
+                .rounded(theme::RADIUS_MD)
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::line())
+                .when(ready, |d| {
+                    d.cursor_pointer()
+                        .hover(|d| d.border_color(theme::line_strong()))
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_from_drawer(s.clone(), window, cx)))
+                })
+                .when(!ready, |d| d.opacity(0.5))
+                .child(
+                    div().text_body().font_weight(FontWeight::MEDIUM).text_color(theme::ink()).truncate().child(name),
+                )
+                .child(div().flex().child(
+                    div().flex_1().min_w_0().text_mono_small().text_color(theme::ink_muted()).truncate().child(command),
+                ))
+        });
+        let items: Vec<_> = items.collect();
+        let empty = items.is_empty();
+        Some(
+            div()
+                .w(px(260.))
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .p(px(14.))
+                .rounded(theme::RADIUS_MD)
+                .bg(theme::panel())
+                .border_1()
+                .border_color(theme::line())
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(
+                            div()
+                                .font_family(theme::DISPLAY)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::ink())
+                                .child("Snippets"),
+                        )
+                        .child(div().text_meta().text_color(theme::ink_muted()).child(target)),
+                )
+                .child(
+                    div()
+                        .id("drawer-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .when(empty, |d| {
+                            d.child(div().text_body().text_color(theme::ink_muted()).child("No snippets yet."))
+                        })
+                        .children(items),
+                )
+                .child(
+                    div()
+                        .id("manage-snippets")
+                        .flex_none()
+                        .py(px(12.))
+                        .flex()
+                        .justify_center()
+                        .rounded(theme::RADIUS_MD)
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme::line_strong())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised()))
+                        .text_body()
+                        .text_color(theme::ink_muted())
+                        .child("Manage snippets")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(TabEvent::ManageSnippets))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Remove a pane. Returns true when the tab has none left.
@@ -218,6 +514,10 @@ impl Tab {
         }
         let index = panes.iter().position(|p| p == pane).unwrap_or(0);
         self.root.remove(pane);
+        // Broadcast needs two panes; the closed one drops out either way.
+        if self.broadcast && self.panes().len() < 2 {
+            self.broadcast = false;
+        }
         if &self.active == pane {
             let rest = self.panes();
             let next = rest[index.min(rest.len() - 1)].clone();
@@ -249,9 +549,13 @@ impl Tab {
     fn mark_panes(&self, cx: &mut Context<Self>) {
         let panes = self.panes();
         let alone = panes.len() == 1;
+        let broadcast = self.broadcast;
         for p in panes {
             let active = p == self.active;
-            p.update(cx, |p, cx| p.set_place(active, alone, cx));
+            p.update(cx, |p, cx| {
+                p.set_place(active, alone, cx);
+                p.set_broadcast(broadcast, cx);
+            });
         }
     }
 
@@ -681,11 +985,12 @@ impl Render for Tab {
         let find_bar = self.find_bar(window, cx);
         let (name, target, status) = {
             let p = self.active.read(cx);
-            (p.name(), p.target_line(), p.status_bar())
+            (p.name(), p.target_line(), p.status_bar(cx))
         };
         let can_split = self.can_split();
         let files = self.is_files(cx);
         let body = self.render_node(&self.root, Vec::new(), cx);
+        let drawer = if files { None } else { self.drawer(cx) };
         div()
             .size_full()
             .flex()
@@ -760,6 +1065,28 @@ impl Render for Tab {
                                     cx,
                                 ))
                             })
+                            // Terminal.dc.html: Broadcast, amber while on. It needs two panes.
+                            .when(!files && (self.broadcast || self.panes().len() > 1), |d| {
+                                let on = self.broadcast;
+                                d.child(
+                                    div()
+                                        .id("broadcast-toggle")
+                                        .h(theme::CONTROL)
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(theme::RADIUS_MD)
+                                        .border_1()
+                                        .border_color(if on { theme::warn() } else { theme::line() })
+                                        .bg(if on { theme::warn_surface() } else { theme::card() })
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::raised()))
+                                        .text_body()
+                                        .text_color(if on { theme::warn() } else { theme::ink() })
+                                        .child("Broadcast")
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_broadcast(cx))),
+                                )
+                            })
                             .when(!files, |d| {
                                 d.child({
                                     // A toggle: the accent border while the bar is open.
@@ -783,12 +1110,48 @@ impl Render for Tab {
                                         .child("Find")
                                         .on_click(cx.listener(|this, _, window, cx| this.toggle_find(window, cx)))
                                 })
+                            })
+                            // Terminal.dc.html: the Snippets drawer's toggle.
+                            .when(!files, |d| {
+                                let on = self.drawer;
+                                d.child(
+                                    div()
+                                        .id("snippets-toggle")
+                                        .h(theme::CONTROL)
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme::SPACE_2)
+                                        .rounded(theme::RADIUS_MD)
+                                        .border_1()
+                                        .border_color(if on { theme::accent() } else { theme::line() })
+                                        .bg(theme::card())
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::raised()))
+                                        .text_body()
+                                        .text_color(theme::ink())
+                                        .child(icon("snippets", px(16.), theme::ink_muted()))
+                                        .child("Snippets")
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx))),
+                                )
                             }),
                     ),
             )
+            .children(self.broadcast_strip(cx))
             .children(find_bar)
             // Gutter and panes.
-            .child(div().flex_1().min_h_0().p(theme::SPACE_2).bg(theme::sunken()).child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .p(theme::SPACE_2)
+                    .bg(theme::sunken())
+                    .flex()
+                    .gap(theme::SPACE_2)
+                    .child(div().flex_1().min_w_0().h_full().child(body))
+                    .children(drawer),
+            )
             .child(status)
+            .children(self.broadcast_question(cx))
     }
 }

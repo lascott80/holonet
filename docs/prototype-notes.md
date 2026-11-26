@@ -1763,3 +1763,522 @@ Carried forward, not tested or not built:
 - **The host's selection bar** wraps onto two lines at this window width (the design's bar wraps too).
 - **An identity whose key was deleted** opens its form with the first key selected (from milestone 4).
 - **Dragging out of the app to Explorer**: GPUI 0.2.2 has no drag source on Windows.
+
+## Milestone 6, phase 0: spikes (26 Nov 2026)
+
+The plan is `docs/milestone-6-plan.md`. **Owner decisions:**
+- each host with active forwarding rules gets its own background connection
+- "Run on n hosts" opens panes in a new tab
+- SSH agent sign-in and agent forwarding are in, with the owner starting the `ssh-agent` service (now Manual and running)
+- broadcast reaches the panes of the current tab
+
+The three spikes are examples in `holonet-ssh`: `m6_forward`, `m6_agent` and `m6_broadcast`. They drive russh 0.65.4 directly, so the library is unchanged until phase 3. They stay until phase 9.
+
+**(a) Forwarding** (`m6_forward`, release build, WSL server on loopback). The host served a folder with Python's `http.server` on its own 127.0.0.1:18080:
+
+| Check | Result |
+| --- | --- |
+| Local: a listener on this PC, `channel_open_direct_tcpip` per connection, 500 MB download | 540–574 MB/s; SHA-256 matched the host's |
+| Local: 50 small downloads at once | 50/50 correct in 2.8 s. The same 50 requests made on the host itself take 2.1 s: Python's server has a listen backlog of 5. One at a time they take about 12 ms each |
+| Local: 50 `direct-tcpip` opens at once with no traffic | 50 in 1.0 s (also against that backlog) |
+| Local: binding the same port again | `AddrInUse`, "Only one usage of each socket address … is normally permitted" (os error 10048) |
+| Remote: `tcpip_forward("127.0.0.1", 19000)`, the handler's `server_channel_open_forwarded_tcpip` connecting to a server on this PC, the host's curl fetching 300 MB | 639 MB/s, every byte arrived |
+| Remote: 20 requests at once from the host | 20 answers |
+| Remote: port 80 (privileged), and a port already forwarded | `Err(RequestDenied)` for both |
+| Remote: port 0 | `Ok(43427)`: the host picks and russh returns it |
+| Remote: `cancel_tcpip_forward`, then the host's curl | Connection refused (http code 000) |
+| Dynamic: a SOCKS5 server (CONNECT, no authentication) opening `direct-tcpip`; Windows `curl.exe --socks5-hostname` to `localhost:18080` | Works. The host resolved `localhost`. 500 MB at 682 MB/s |
+| Dynamic: a closed port on the host | The open fails with `ConnectFailed`; the reply code 5 makes curl say "cannot complete SOCKS5 connection … (5)" |
+
+Lessons:
+- **Forwarded channels come to the client handler,** keyed by the bound port. The phase 3 handler needs a route table it shares with the rules.
+- **`tcpip_forward` returns 0** when a fixed port is granted, and the chosen port when asked for 0.
+- **Harness:** `pkill -f 'http.server 18080'` inside a `bash -c` kills the shell running it, because the pattern appears in its own command line (even as `http[.]server`, when the same command line also starts the server). The spike tracks the server by PID file instead.
+
+**(b) Windows' OpenSSH agent** (`m6_agent`, `\.\pipe\openssh-ssh-agent`):
+
+| Check | Result |
+| --- | --- |
+| Agent not running (the service was stopped, then a made-up pipe name) | `AgentClient::connect_named_pipe` fails with `NotFound` (os error 2): the "agent is not running" message can key on it |
+| Add the test server's Ed25519 key, then list | Listed. The Windows agent returns identities **without their comments**, so Holonet shows a key's type and fingerprint, not a name |
+| Sign in with `authenticate_publickey_with(user, public_key, None, &mut agent)` | Signed in; Holonet never held the private key during sign-in |
+| `channel.agent_forward(true)` on a session channel, then `ssh-add -l` on the host | `SSH_AUTH_SOCK` was set, and the host listed the key's SHA-256 fingerprint. The handler's `server_channel_open_agent_forward` bridged the channel to a new pipe connection per request (`ClientOptions::new().open(PIPE)` + `copy_bidirectional`) |
+| Remove the key | The agent holds 0 keys afterwards, and `ssh-add -l` says "The agent has no identities." |
+
+- **The first run's key check compared whole `PublicKey` values,** which include the comment. It failed before the cleanup step and left the key in the agent. The second run, comparing `key_data()`, removed it.
+- **OpenSSH on the host makes `~/.ssh/agent/`** for forwarded agent sockets. The empty folder was removed afterwards.
+
+**(c) Broadcast** (`m6_broadcast`): four shells, each on its own connection as panes have, running `stty raw -echo; exec cat`, so every byte typed comes straight back:
+
+| Check | Result |
+| --- | --- |
+| 400 keystrokes sent to all four, one every 15 ms, one input message per pane in one loop | Every pane got all 400 back in order. Echo median 3.1–3.2 ms, 95th percentile 5.0–6.6 ms, worst 10–16 ms |
+| A 64 KB paste sent to all four at once | Intact in every pane after 8 ms |
+
+Sending the same bytes to each pane's existing input channel is enough; broadcast needs no new transport. The keystroke loop took 8.2 s rather than 6 s because Windows' timer rounds the 15 ms sleep up.
+
+fmt and clippy `-D warnings` pass. The host's home has only its usual files.
+
+## Milestone 6, phase 1: model (26 Nov 2026)
+
+**`holonet-model`, schema 3:**
+- **New ids:** `GroupId`, `SnippetId` and `ForwardRuleId`. `VaultData` gains `groups`, `snippets` and `forward_rules`, each read as empty from older files.
+- **`Group`** (`group.rs`):
+  - name, `GroupColor` (the drawn Cyan, Violet, Mint, Gray, Rose and Lime)
+  - `GroupKey` (`AskEachTime` or a key)
+  - jump host, route, and `warn`
+- **`Host` gains:**
+  - `group`, `startup_snippet`, `agent_forwarding` and `compression`
+  - `from_group: FromGroup { route, jump_host, key }`, which says which fields follow the group. The host's own route, jump host and sign-in stay in their fields, so turning "from group" off brings them back.
+  - New hosts follow the group for route and jump host, not for the key.
+- **`Snippet`** (`snippet.rs`):
+  - `press_enter` (default on) and `confirm`
+  - `parse()` splits a command into text and `${name}` variables. A name is letters, digits and `_`; `$${x}` is a literal `${x}`; anything else is text.
+  - `variables()` lists each name once, in order. `fill()` substitutes values.
+  - `input()` gives what to type: line breaks become `\r`, plus a final `\r` when "Press Enter after inserting" is on.
+  - `run_note()` gives the card's text.
+- **`ForwardRule`** (`forward.rs`):
+  - `ForwardKind` Local, Remote or Dynamic, a host, a bind address (127.0.0.1 by default), a port, the destination, and `start_with_host`
+  - `ssh_flag()` and `ssh_command()` as drawn (`ssh -N -L 8080:localhost:80 staging-api`), with a bind address other than loopback written in front
+  - `status_text()` for the status bar ("Forward L 5432 → db-primary:5432")
+  - `is_loopback()`, and `problems()` with interface text
+- **Inheritance lives in the existing `VaultData::resolved(host)`,** which the app already calls before connecting and showing a host. It applies the group's route, jump host and key for the fields that follow it.
+  - An identity's sign-in beats the group's key.
+  - "Ask each time" signs in with a password asked on connect.
+  - A host is never its own jump host through its group, so a bastion can sit in the group whose hosts it fronts.
+  - `effective_jump()` gives the jump host alone. `jump_chain()` follows it hop by hop, so a loop through a group's jump host is still caught.
+  - `key_users()` counts hosts that use a key through their group.
+- **Removing things:**
+  - `delete_group(id, delete_hosts)` leaves its hosts ungrouped, or removes them too; their server keys stay either way.
+  - `delete_snippet()` clears it from hosts that ran it at startup, and returns them.
+  - `delete_host()` now also removes the forwarding rules through that host.
+- **Migration 2 → 3:**
+  - A host's route follows the group if it is Automatic, and its jump host if it has none. Other values stay its own, and keys are never marked.
+  - The step runs once, by schema number, so a default chosen on purpose later is not turned back into "from group".
+  - A milestone 5 build refuses a schema 3 vault as newer, as before.
+- **`Auth::Agent` waits for phase 8,** where it gets its sign-in path; added now it would only be a variant nothing can use.
+
+**`holonet-app`:** no changes were needed. With no groups, `resolved()` and `jump_chain()` give what they gave before. The host form starts from the saved host, so it keeps the new fields when it saves.
+
+**Check:**
+- The six new unit tests pass:
+  - migration of a milestone 5 vault
+  - inheritance, overrides, identities, "Ask each time", the bastion case and loops
+  - removing groups, snippets and hosts
+  - snippet parsing and input
+  - rule commands and problems
+  - round trips
+- A copy of the milestone 5 test vault (8 hosts) opened in this build. `behind-a` connected through its jump host ("Through jump-a"). The copy was then removed.
+
+fmt, clippy `-D warnings` and all workspace tests pass (`holonet-model`: 22).
+
+## Milestone 6, phase 2: groups (26 Nov 2026)
+
+**Groups page** (`workspace/groups.rs`, Groups.dc.html), opened from "Manage groups" on the Hosts page, with the breadcrumb "Hosts / Groups" back:
+- **Group cards:** name, host count, and the Key, Jump host and Connect using defaults ("Automatic, Tailscale fallback" as drawn). The group's color is a 3px strip down the left edge.
+  - GPUI has one border color per element, so the strip is a div inside a clipped card, not `border-left`.
+- **The editor** (360px, so the six 44px swatches fit in one row):
+  - Name
+  - Color (Cyan, Violet, Mint, Gray, Rose, Lime; Rose #F29BB8 and Lime #B5D67F are the drawn swatches, named in `theme::group_color`)
+  - Key ("Ask each time" or a key), Jump host, Connect using
+  - "Warn before broadcast or multi-host snippets"
+  - Save group, and Delete group for a saved one
+- **Names** must be given and unique. Saving shows no notice: the card appearing or changing is the confirmation, and a notice pushed the editor's buttons off the panel.
+- **The delete prompt** follows the design: "Its hosts are kept and become ungrouped." With "Also delete its n hosts" ticked it says "The group and its hosts are removed. Their server keys stay in Known hosts." and the button becomes "Delete group and hosts".
+- **Not drawn:** "No groups yet" in a dashed box, and "New group" in the editor, with Cancel when other groups exist.
+
+**Hosts page:**
+- **The Groups row** (Main.dc.html): a card per group with a 2px color strip along the top and its host count, and "Manage groups".
+  - Clicking a card filters the hosts. The section label becomes the group's name with "Show all hosts"; clicking the card again also shows all.
+  - An empty group says "No hosts in this group" with "Show all hosts".
+- **The summary** reads "8 hosts in 2 groups".
+- **Group color and name** show on cards, list rows (a new Group column) and the detail panel's icon, plus a Group row in its details.
+- **The detail panel's route** says "From the Lab A group." when inherited; choosing a route there makes it the host's own.
+
+**Host form:**
+- A **Group** select under Label.
+- **Connect using, Jump host and Authentication follow the group's value while marked "from <group>"** next to their labels.
+  - Changing the route or jump host makes it the host's own, and the label becomes "Use group default", which returns it.
+  - For sign-in, following the group replaces the Authentication controls with "Signs in with the key holotest_ed25519 (Ed25519), the Lab A group's default. Change it on the Groups page, or give this host its own sign-in." and a "Use this host's own sign-in" button.
+  - An identity always signs in instead.
+- **Defaults:**
+  - Existing hosts keep their own sign-in when put in a group.
+  - A new host follows its first group's sign-in.
+  - Route and jump host follow by default (`FromGroup::default`).
+- **Following the jump host:** GPUI runs observers after the update, so a "changing it ourselves" flag cannot tell the form's own updates from the person's choice. The jump select's observer compares instead: showing the group's jump host is following, any other choice is the host's own.
+  - Choosing "No group" never marks a field as overridden.
+- **The summary and equivalent command show what connecting will use** (`ssh -J jump-a …` from the group). The summary has a Group row.
+- **A deleted group key** is reported: "The group's key was deleted from the vault. Choose another key for the group, or use this host's own sign-in."
+
+**Tabs, panes and SFTP:**
+- **Colors:** the tab's top edge, the pane's top edge and header, and the host's side of an SFTP tab take the group's color, and the pane header shows its name.
+- **Lookups are live:** `HolonetApp::group_tag(host)` reads the vault each time they draw, so renaming, recoloring or deleting a group shows at once in open tabs. Session tabs are hidden while locked, so nothing needs caching.
+
+**"Ask each time" and saving passwords:**
+- A host following a group's "Ask each time" gets a password prompt that says "The Lab A group asks for the password each time, so it is not saved." and offers no Save checkbox (`HolonetApp::asks_each_time`).
+- The first test showed the checkbox, and a saved password would have gone into the host's own sign-in, which the group's default ignores.
+
+**Shared control fix:** `Checkbox` now puts its label in a shrinkable box, so long labels wrap ("Warn before broadcast or multi-host snippets" was clipped at the panel's edge).
+
+**Taffy pitfall:** a grid item with `overflow_hidden` shrank to nothing (the first Groups row drew two lines). Without it, the strip rounds its own top corners.
+
+**Check** (release build, a copy of the milestone 5 test vault, the WSL test server; the copy was deleted afterwards):
+
+| Step | Result |
+| --- | --- |
+| Import the test server's key; create Lab A (Violet, that key, jump-a, Primary, warn) and Lab B (Mint, Ask each time, no jump, Automatic) | Both cards show their defaults; the Hosts page reads "8 hosts in 2 groups" |
+| Put wsl-b in Lab A, use the group's sign-in, Save and connect | Connected. Status bar "Key holotest_ed25519 · Through jump-a"; tab, pane edge and header violet, "wsl-b Lab A" |
+| Give wsl-b its own jump host (None), Save and connect | "Use group default" appeared and `-J` left the command. Connected directly, still with the group's key |
+| "Use group default" on the jump host | Back to "from Lab A", jump-a, `ssh -J jump-a …` |
+| Put wsl-a in Lab B, use the group's sign-in, connect | Password prompt despite wsl-a's own saved password, without Save (after the fix). Signed in with the typed password; tab mint |
+| Filter by Lab A | Only wsl-b, with "Lab A · Show all hosts" |
+| Recolor Lab A to Rose with wsl-b open | The open tab, pane edge and header dot turned rose |
+| Delete Lab B, keeping its host | The prompt changed its text and button when "Also delete its 1 host" was ticked. Without it, wsl-a stayed and its open tab turned gray "No group" |
+
+fmt, clippy `-D warnings` and all workspace tests pass.
+
+The gallery gets the swatches and group cards in phase 9 with the other milestone 6 controls.
+
+## Milestone 6, phase 3: forwarding engine (26 Nov 2026)
+
+**`holonet-ssh::forward`**, with `Session::forward(ForwardSpec) -> Result<Forward, ForwardError>`:
+- **Specs:**
+  - `ForwardSpec::Local { bind_address, port, destination, destination_port }`
+  - `Remote { … }` (port 0 lets the host choose)
+  - `Dynamic { bind_address, port }`
+  - An empty bind address means 127.0.0.1.
+- **Binding is done before `forward` returns,** so these come back at once as `ForwardError`s with interface text:
+  - "Port 5432 is already in use on this PC."
+  - Windows' reserved ranges or a missing address: "This PC would not open port … on …: …"
+  - "The host refused to forward port 80."
+  - "The connection to the host was lost."
+- **A task serves connections until the `Forward` is stopped or dropped, or the session is lost.** The session is checked every 500 ms.
+- **`ForwardStatus`:**
+  - `Active { port, open, total, last_error }` while it runs, where `port` is the one actually bound, also for port 0
+  - `Failed(ConnectionLost)` or `Stopped` at the end
+  - `Forward::watch()` follows it
+- **A connection that cannot be made does not stop the forward.** Its reason becomes `last_error`, for example:
+  - "127.0.0.1:18199: the host could not connect to it"
+  - "127.0.0.1:52011 on this PC: nothing is listening there"
+  - "localhost:18198: the host could not connect to it"
+- **Stopping** closes the listener and every open connection. For a remote forward it also sends `cancel-tcpip-forward`.
+- **Remote forwards:**
+  - The session keeps a route table (`forward::Routes`), shared with its handler.
+  - The handler's `server_channel_open_forwarded_tcpip` accepts channels for ports in the table and rejects others with `ConnectFailed`.
+  - Each accepted channel is joined to its destination on this PC.
+- **SOCKS5:**
+  - RFC 1928 CONNECT with no authentication; IPv4, IPv6 and domain names, which the host resolves.
+  - Other commands get reply 7 (not supported), other address types 8.
+  - Failed opens map `ConnectFailed` to reply 5 (refused) and `AdministrativelyProhibited` to 2.
+  - Handshake errors are the client's and are not reported.
+- **`Session` now holds its russh handle in an `Arc`** so forward tasks can open channels after `forward` returns. Jump-hosted sessions forward through their own (innermost) session.
+- **Forward failures** have their own wording ("the host could not connect to it"), separate from the jump-host wording used when connecting.
+
+**Tests** (`tests/forward.rs`, WSL; each starts Python's web server on the host's 127.0.0.1 on its own port and removes it):
+
+| Test | Checks |
+| --- | --- |
+| `local_forward_reaches_a_host_service` | Port 0 binds and reports its port. A download works. Status counts `total: 1, open: 0` afterwards. A closed destination leaves the forward running with the reason. `stop()` ends with `Stopped` and the port can be bound again |
+| `a_port_in_use_is_reported` | Local and Dynamic on a port this test holds: `PortInUse` with its text. A bind address this PC lacks (192.0.2.1): `Bind` |
+| `remote_forward_reaches_this_pc` | Port 0: the host's choice is reported. The host's curl gets "hello from this PC". Port 80: `Refused(80)`. A closed destination on this PC: the reason. After `stop()` the host's curl gets nothing (000) |
+| `dynamic_forward_is_a_socks_proxy` | A SOCKS5 CONNECT to `localhost` (resolved by the host) reaches its web server. A closed port gets reply 5 and the reason; `total: 2` |
+| `a_lost_connection_ends_the_forward` | `kill -9 $PPID` on the host: `Failed(ConnectionLost)` with "The connection to the host was lost.", the port is closed, and a new forward on that session is refused at once |
+
+All five passed on four runs in a row (about 2.7 s each). The existing WSL tests (13) still pass with the new handler. The host's home has only its usual files afterwards.
+
+fmt and clippy `-D warnings` pass.
+
+## Milestone 6, phase 4: Port forwarding page and background connections (26 Nov 2026)
+
+**What was built:**
+
+- **`forwards.rs`: the `Forwarder` entity.** It owns one background connection per host that has running rules, separate from any tab (owner's decision 1).
+  - Each rule has a `RuleState`: `Starting`, `NeedsSecret`, `Active { port, open, total, last_error }`, `Reconnecting { attempt }` or `Failed(why)`.
+  - The connection is made with `hops::connect_by_route`, so routes and jump chains work as they do in a terminal.
+  - Host keys:
+    - A trusted key is accepted.
+    - A key accepted before is accepted while the vault is locked.
+    - An unknown key stops the rule with "Connect to X once in a terminal to verify its host key, then switch this on." Nothing in the background asks about host keys.
+    - A changed key always stops the rule and is recorded for review in Known hosts, as `decisions.md` asks.
+  - Passwords and passphrases:
+    - Secrets typed in a terminal are kept for the host's background connection. `Session::finish` hands them over with `App::host_connected`.
+    - A secret nobody has typed is asked for on the Port forwarding page in a modal. The card shows "Waiting for the password for X".
+    - A refused sign-in forgets what was typed for that connection's hops.
+  - Reconnect: a lost connection is tried again after 1, 2, 4, 8 and 16 seconds, with the rule shown as `Reconnecting`. After that it fails with the reason.
+  - The last rule switched off closes the connection.
+- **`workspace/forwarding.rs`: the Port forwarding page.**
+  - Rule cards show a type tag, the start note, the route (this PC → host → destination), the status text and a switch (`ui::switch`).
+  - The side form has:
+    - a Local, Remote or Dynamic choice
+    - label, host, bind address and port fields
+    - a warning for a bind address other than loopback
+    - the equivalent `ssh` command
+    - "Start when this host connects"
+  - Saving a running rule restarts it.
+  - Delete asks first.
+- **Start with host:** opening a terminal to a host starts its rules that are set to start with it. The pane's status bar lists the host's running forwards ("Forward L 18080 → localhost:18183").
+- **Polish found in the check:**
+  - The equivalent command shows `[port]` and `[host]` for fields not filled in yet, as the host form's `ssh [address]` does.
+  - A refused sign-in reads "ask-a refused the password. Switch the rule on to type it again." It no longer shows the raw error.
+
+**Live check** (WSL server; a web server on the host's 127.0.0.1 and one on this PC's 127.0.0.1, both removed afterwards):
+
+| Check | Result |
+| --- | --- |
+| Local rule, this PC 18080 → host localhost | curl on this PC got the host's page |
+| Remote rule, host 19004 → this PC | the host's curl got "hello from this PC" |
+| Dynamic rule (SOCKS5) | `curl --socks5-hostname` through it reached the host's page |
+| Kill the host's sshd sessions | all three rules came back within about 1 s and worked again |
+| Switch every rule off | the background connection closed (no sshd sessions left) |
+| Start with host | opening a terminal started the rule, and the status bar showed it; closing the tab left the forward working |
+| Dynamic rule on a port already in use | "Stopped: Port 18184 is already in use on this PC.", and the other rules kept running |
+| Rule through a host with no saved password | the page asked; the card waited. A wrong password stopped the rule with the new wording. The right one made it Active, and the host's curl worked |
+
+One false alarm during the check: a rule stayed "Starting…" and was then refused. The server's `auth.log` showed a wrong password for holotest. The test harness had typed it before the field had focus, and the app had behaved correctly.
+
+fmt, clippy `-D warnings`, the workspace tests and the five WSL forward tests pass.
+
+## Milestone 6, phase 5: Snippets page and startup snippets (26 Nov 2026)
+
+**What was built:**
+
+- **`workspace/snippets.rs`: the Snippets page** (`Snippets.dc.html`), in the side navigation between Port forwarding and Known hosts.
+  - The library is a grid of cards, as many 260px columns as fit beside the editor. Each card shows the name, the command in a mono box, and the run note ("Runs immediately", "Inserts without running", or "Asks before running" in amber).
+  - A filter matches the name or the command, and Escape clears it. With nothing matching it says "No snippets match this filter."; with no snippets at all, a dashed box explains the first step.
+  - The editor has:
+    - Name and Command, with the drawn note ("Holonet asks for service each time this runs. Write a variable as ${name}." or "No variables. …")
+    - "Press Enter after inserting" and "Ask before running"
+    - the startup note ("Startup snippet for a, b and c." or "Not used as a startup snippet.")
+    - Save, Duplicate ("… copy", saved and opened) and Delete
+  - An empty name or command is caught with a message.
+  - Deleting a snippet that a host uses at startup says so ("It is the startup snippet for wsl-a. That host will no longer run a startup snippet."), and the model clears it from those hosts.
+- **Host form:** a Startup snippet select (None, then the library by name) sits between Jump host and Default SFTP folder, as `NewHost.dc.html` draws it. Its help says "Runs once when a terminal first connects." With an empty library it says "Add snippets on the Snippets page."
+- **Sending it:** `Pane::run_startup_snippet` runs when a terminal pane's shell opens. A `startup_done` flag means it runs once per pane:
+  - It is not sent again after a reconnect or a manual retry (`decisions.md`: commands are never replayed).
+  - A new pane, such as a split, is a new shell and runs it once.
+  - The snippet is read from the vault at that moment, so a change on the Snippets page applies to the next pane.
+  - `TerminalView::type_text` writes it as keyboard input, which phase 6's drawer will reuse.
+- **Variables and confirmations at startup:** a pane that has just connected does not open a popup by itself, so in this phase a startup snippet with variables or "Ask before running" is not sent. The pane shows a dim line instead: "The startup snippet "Restart service" was not run: it asks for service." Phase 6 brings the variable and confirmation popups, which can take this over.
+
+**Not as drawn:**
+
+- **Command is a single-line field.** Holonet's text field has no multi-line mode, and the drawn textarea would need one. A pasted line break becomes a space. The model already sends line breaks as Enter, so a multi-line field can be added later without changing the vault.
+- **"Run on" and its run button** are left out until phase 6, where running from a session and on several hosts arrives (no control that does nothing).
+
+**GPUI notes:**
+
+- `ui::field` is `flex_1` so it fills a row. In a short column editor that made each field take a share of the spare height, so the snippet editor's fields are `flex_none`.
+- Text cut with an ellipsis inside a padded block child of a grid item measured as empty and showed only "…". Making the box a flex row, with the text `flex_1().min_w_0().truncate()`, fixed it.
+- The side navigation is 220 logical pixels wide. Card columns are worked out from that, as on the Hosts page, not from screenshot pixels.
+
+**Live check** (WSL server, a copy of the test vault):
+
+| Check | Result |
+| --- | --- |
+| Create three snippets, one with `${service}` and "Ask before running" | Cards and run notes as drawn, two columns |
+| Set wsl-a's startup snippet to one that appends a line to a file, then Save and connect | The file had 1 line; the command shows at the prompt |
+| Kill the host's sshd session | The pane reconnected; still 1 line, and no command at the new prompt |
+| Split right to the same host | A new pane: 2 lines |
+| Startup snippet with a variable | Not sent; the dim note is written at the top of the pane |
+| Delete that snippet | The prompt names wsl-a; the host's startup snippet is cleared |
+| Filter "zzz", then "mark"; Duplicate | "No snippets match this filter."; one card; "Disk usage copy" saved and selected |
+
+The pane writes the note before the server's welcome text arrives, so it ends up above the welcome text. That is acceptable while phase 6 replaces the note with the value prompt.
+
+fmt, clippy `-D warnings` and the workspace tests pass, plus a new test for the startup note wording. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 6: snippets in sessions and multi-host runs (26 Nov 2026)
+
+**What was built:**
+
+- **`snippet_run.rs`: the run prompt** (not drawn). One popup covers the cases a snippet asks about before it runs:
+  - It has one field per `${name}` variable, and shows the command as it will be typed, filled in as you type.
+  - The title names the target ("Run Mark word on wsl-a"), with a question mark when the snippet asks before running or reaches a warn group.
+  - A run that reaches hosts in groups marked "warn" turns the dialog amber. It says "This runs on 2 Production hosts. Check the command before running it." and the button reads "Run anyway".
+  - An empty value is caught ("Enter a value for word."). Enter runs it and Escape or the backdrop cancels.
+  - Values are remembered per snippet in `HolonetApp` until Holonet closes, never in the vault. A remembered value comes back selected, so typing replaces it.
+  - `warn_text` counts the hosts in warn groups ("1 Production host", "3 hosts in Production and Staging") and has a unit test.
+  - `RunPrompt::needed` decides whether to ask at all. A snippet with no variables, no confirmation and no warn group runs straight away.
+- **Snippets drawer** (`Terminal.dc.html`):
+  - The tab header's Snippets button opens a panel beside the panes with the library ("Runs in active pane") and a dashed "Manage snippets", which opens the Snippets page.
+  - A click runs the snippet in the active pane. While that pane is not connected, the items are dimmed and the note says "Connect the active pane first".
+  - SFTP tabs have no drawer.
+- **The pane** (`session.rs`):
+  - `run_snippet` types the snippet, or first asks for `ask`. The prompt is built on the pane's next render, which has the window to focus its field, and drawn over that pane alone.
+  - `queue_input` holds text until the shell first opens.
+  - Startup snippets with variables or "Ask before running" now open the prompt in their pane instead of phase 5's note.
+- **Run on** (`Snippets.dc.html`): the editor has a chip per host with its group colour.
+  - The button reads "Run in active session", "Run on 1 host" or "Run on n hosts".
+  - "Run in active session" types into the active pane of the session tab shown last, and switches to that tab. With no hosts chosen and no open terminal, a line explains both ways instead of a button that does nothing.
+  - "Run on n hosts" opens a tab per four hosts, laid out as 1, side by side, then a 2 × 2 grid (`Tab::add_pane`). Each pane signs in its own way and types the filled command once its shell opens.
+  - The page asks the app through `window.defer`, since opening panes reads the vault while the page is being updated.
+- **Focus:** a pane that connects takes the keyboard only if it is its tab's active pane. Otherwise the panes of a multi-host run each grabbed focus as they connected, and the last one won.
+
+**Live check** (WSL server, a copy of the test vault, a snippet `echo ${word} >> ~/p6mark.txt`):
+
+| Check | Result |
+| --- | --- |
+| Drawer in a wsl-a terminal, value "one" | The prompt opened in the pane with its field focused; the file had "one" |
+| Run on wsl-a, wsl-b and jump-a | One tab with three panes (two left, one right); each typed the command once connected; three new lines |
+| Run on behind-a (in a warn group "Production") and wsl-a | The amber dialog; Enter with an empty field gave the message; "Run anyway" added two lines |
+| wsl-a's startup snippet set to it, Save and connect | The prompt opened in the new pane with the last value selected, and ran |
+| Kill the session | The pane reconnected with no prompt and nothing typed |
+| Split right to wsl-a | The new pane asked; the value typed there ran |
+
+One step went wrong in the harness. A value typed in a separate command right after a screenshot never reached the field, so the prompt ran with the remembered value. Typing in the same step as opening the prompt worked every time, in the drawer, the startup prompt of a split, and the page. This looks like Windows refusing the foreground switch for that one command, not the app.
+
+fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 7: broadcast (26 Nov 2026)
+
+**What was built:**
+
+- **Input as typed** (`terminal_view.rs`):
+  - The terminal now emits `TerminalEvent::Typed` for each key it sends (`Typed::Key` with the keystroke), each paste (`Typed::Paste`, the clipboard text), and each snippet the person runs (`Typed::Text`, through `type_user_text`).
+  - `replay` sends one of these to another terminal, encoded for that terminal's own modes: application cursor keys, and bracketed paste. This is what the plan's risk asked for.
+  - Startup snippets and multi-host runs still use `type_text`, which emits nothing, so they are never broadcast.
+- **The tab** (`tab.rs`):
+  - `watch` follows each pane: it redraws on change and listens to the pane terminal's `Typed` events.
+  - While broadcasting, `fan_out` replays each one into every other pane that `can_run`. Ended and reconnecting panes get nothing.
+  - Each pane's input channel keeps the order.
+- **Turning it on:** the Broadcast button (shown once the tab has two panes, amber while on) and Ctrl Shift B.
+  - With a host in a "warn" group in the tab, it first asks: "Broadcast to 4 panes, including 1 Production host?", with "Turn on broadcast".
+  - It turns off from the strip's "Turn off", from the button or the shortcut again, and by itself when the tab is down to one pane.
+- **While on:**
+  - **The strip** (`Terminal.dc.html`): "Broadcast is on. Everything you type goes to all 4 panes, including 1 Production host." It says "both panes" for two, and "the 2 connected panes" while some have ended.
+  - Amber edges on every pane (`Pane::set_broadcast`).
+  - The drawer says "Runs in all 3 panes", and snippets run from it reach every pane (`run_snippet(…, broadcast)`), after its prompt if it has one.
+
+**Crash found and fixed:** Ctrl Shift B crashed the app the second time, when it turned broadcast on.
+
+- The app's action handler called into the tab, and the tab read the app for the warn-group count while the app was still being updated. GPUI aborts on that.
+- The first press only turned broadcast off, which reads nothing, so it worked.
+- The handler now defers the toggle (`cx.defer`).
+- The lesson for these notes: a method that reads `HolonetApp` must not be called synchronously from the app's own listeners. The Snippets page already defers for the same reason.
+
+**Live check** (WSL server, a copy of the test vault, behind-a in a warn group "Production", four panes from a multi-host run):
+
+| Check | Result |
+| --- | --- |
+| Broadcast button | The question named 4 panes and 1 Production host; "Turn on broadcast" showed the strip and amber edges |
+| Type two commands and paste a third (Ctrl Shift V, then Enter) | Each of the four shells wrote a, b, then c-paste, in order (by its `$$`) |
+| End one shell, then "Close pane" | The others got the next command (3 lines); the strip said "all 3 panes" with no Production host |
+| Run a snippet from the drawer | "Runs in all 3 panes"; it ran in all three |
+| Ctrl Shift B | Off; then on again (no question once no warn host remained) |
+| End shells and close panes down to one | Broadcast turned off: no strip, no amber, no Broadcast button |
+| End one shell while on | The strip said "the 2 connected panes" |
+
+One Ctrl Shift B press was lost to the harness's focus timing and had to be sent again. stderr stayed empty after the fix.
+
+fmt, clippy `-D warnings` and the workspace tests pass. The host's home has only its usual files afterwards.
+
+## Milestone 6, phase 8: SSH agent, agent forwarding and compression (26 Nov 2026)
+
+**What was built:**
+
+- **`holonet-ssh`:**
+  - **`Credential::Agent`** connects to Windows' OpenSSH agent at `AGENT_PIPE` (`\\.\pipe\openssh-ssh-agent`), as spike (b) did.
+    - It offers each of the agent's keys with `authenticate_publickey_with`. Holonet never holds them.
+    - New errors: `AgentUnavailable` (the pipe cannot be opened: the service is stopped), `AgentEmpty` (no keys) and `AgentFailed` (the agent could not sign).
+    - A server that refuses every key gives `SignInRefused { method: "publickey" }`, as a stored key does.
+    - `SessionInfo::auth_method` is `"agent"`.
+  - **Agent forwarding:** `ConnectOptions::agent_forwarding`.
+    - The handler bridges the host's `auth-agent@openssh.com` channels to a new pipe connection each (`copy_bidirectional`), only when the connection asked for forwarding. Otherwise it rejects them as administratively prohibited.
+    - `Session::open_shell` sends `agent_forward(true)` before the shell.
+    - The app sets it on the target hop only, never on a jump host. Background forwarding connections never set it, since they have no shell.
+  - **Compression:** `ConnectOptions::compression` puts `zlib@openssh.com`, then `zlib`, then `none` first in `Preferred::compression`. Off keeps russh's default (`none` first). `kex_done` records what was negotiated in `SessionInfo::compression`.
+- **Model:**
+  - `Auth::Agent`, stored as `{"method":"agent"}` with nothing else, which a unit test checks.
+  - `Host::ssh_command_via` adds `-A` and `-C` for the two switches, also unit-tested.
+- **Host form** (`NewHost.dc.html`):
+  - Authentication reads SSH key, Password, SSH agent, then Identity when the vault has one. Each segment carries its `auth` code (`AUTH_AGENT` is 3), so the order no longer depends on which options are shown.
+  - "SSH agent" shows the drawn note: "Holonet will offer the keys loaded in the Windows OpenSSH agent. Nothing is stored for this host."
+  - Agent forwarding, Keep connection alive and Compression sit in one row, as drawn. Agent forwarding on adds a line: "The host can use the keys in this PC's agent while the terminal is open. Forward it only to hosts you trust."
+  - The summary says "SSH agent".
+- **Elsewhere:**
+  - Host cards and the Keychain say "SSH agent".
+  - The pane notes "Offering the agent's keys for holotest".
+  - The failure screens are:
+    - "Windows' OpenSSH agent is not running"
+    - "The SSH agent holds no keys", which says to add one with ssh-add
+    - "… refused the agent's keys"
+  - The status bar adds "SSH agent", "Compressed" when compression was negotiated, and "Agent forwarding on" or "off", as drawn.
+  - Identities still sign in with a key or a password.
+
+**Tests:** `tests/agent.rs` is one WSL test, so nothing else changes the agent while it runs. It needs the `ssh-agent` service running.
+
+- With the agent empty, sign-in gives `AgentEmpty`.
+- It adds the `.dev` Ed25519 test key.
+- With forwarding and compression on: sign-in reports `agent` and `zlib@openssh.com`, and the host's `ssh-add -l` lists the key's SHA-256 fingerprint.
+- With both off: compression is `none`, and `ssh-add -l` exits 2 with no fingerprint.
+- It removes `~/.ssh/agent`, which OpenSSH creates for forwarded sockets.
+- The key is always removed from the agent at the end, and the test checks the agent is back to what it held before.
+
+It passes, as do the other 25 WSL tests.
+
+**Live check** (a copy of the test vault; wsl-a set to SSH agent with forwarding and compression on):
+
+| Check | Result |
+| --- | --- |
+| The form | "SSH agent" after Password, the drawn note, the switches in one row, and the equivalent command `ssh -A -C holotest@127.0.0.1 -p 2222` |
+| Save and connect with the agent empty | "The SSH agent holds no keys" with Retry, Edit host and Close tab. Its body then repeated the title, so it now says how to fix it instead |
+| `ssh-add` the `.dev` test key, then Retry | Connected. The status bar read "SSH agent · Compressed · Agent forwarding on", and the host's `ssh-add -l` listed the test key's fingerprint |
+| Afterwards | `ssh-add -d` removed the key, so the agent has no identities. The host's `~/.ssh` holds only `authorized_keys` |
+
+"Windows' OpenSSH agent is not running" was not checked live: that needs the service stopped, and Holonet's work never changes Windows services. Spike (b) showed that a missing pipe fails to open, and that is the case this message covers.
+
+fmt, clippy `-D warnings`, the workspace tests and every WSL test pass.
+
+## Milestone 6, phase 9: wrap-up (26 Nov 2026)
+
+**Removed:** the phase 0 spikes, `holonet-ssh`'s `m6_forward`, `m6_agent` and `m6_broadcast` examples. `holonet-ssh` keeps only its `shell` example.
+
+**Gallery:**
+
+- Milestone 6's page controls moved into `ui/power.rs`, which the pages use too:
+  - `swatch` (Groups)
+  - `kind_color`, `kind_tag`, and `rule_card` with `RuleCard` (Port forwarding)
+  - `host_chip` (the Snippets page's Run on)
+  - `broadcast_strip` (the tab)
+- The on/off switch was already `ui::switch`.
+- `--gallery` has a Power features section:
+  - the three rule type tags
+  - two rule cards (an active local rule and a dynamic rule) whose switches toggle between their states
+  - the six swatches, which pick
+  - four host chips, which toggle
+  - the amber broadcast strip, whose Turn off is logged
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Create, recolour and delete groups; put hosts in them; give a group defaults | Created Lab: violet, key "Ask each time", jump host done-a, warn on. Recoloured it to mint. Deleted it at the end; done-c was kept with "No group" |
+| A host uses its group's defaults unless it sets its own; the form labels them | done-c in Lab showed "from Lab" on Authentication and Jump host and `ssh -J done-a …`. It connected through done-a and asked for its password ("The Lab group asks for the password each time, so it is not saved."). done-a and done-b kept their own sign-in |
+| Group colours on host cards, tabs and pane edges | Violet, then mint after the recolour: done-c's card, the group card, the tab's top edge, the pane's top edge and its "Lab" tag |
+| Local, remote and SOCKS rules through a host, switched on and off | Three rules through done-a. The local and SOCKS rules reached the host's web server and the remote rule reached this PC's; switched off, the local port refused |
+| Background connection; start when the host connects | The rules connected with no terminal involved. With all off, a new done-a pane started the "Starts with done-a" rule, and the manual ones stayed off |
+| Survives a dropped connection | Killed every server session: all three rules worked again on their own, and the terminal reconnected |
+| The status bar lists the host's forwards | done-a's bar: "Forward D 1083 (SOCKS5)", "Forward L 18090 → localhost:18183", "Forward R 19006 → 127.0.0.1:18184" |
+| A snippet library with `${name}`, Ask before running and Press Enter | "Mark word" `echo ${word} >> ~/done6.txt`, with Ask before running. The prompt asked "Run Mark word on done-a?" with the field and the filled command |
+| Snippets run from the drawer, on several hosts, and at startup | Drawer: "cd" written. Run on done-a and done-c: the amber "This runs on 1 Lab host" question, then a tab of two panes; done-c asked for its password in its pane; "multi" written twice. Startup: done-a's startup snippet asked in its new pane, and "boot" was written |
+| Broadcast | In the two-pane tab: "Broadcast to 2 panes, including 1 Lab host?", then the strip and amber edges. One typed command was written by both shells (two process ids) |
+| SSH agent sign-in, forwarding and compression | done-b (SSH agent, forwarding and compression on) signed in with the `.dev` key added to the agent. The bar read "SSH agent · Compressed · Agent forwarding on", and the host's `ssh-add -l` listed the key. The key was removed afterwards |
+
+**A typing problem chased down to the harness.**
+
+- Several times, text typed into a prompt never arrived. Once it closed a tab, because an empty password prompt counts as cancelled.
+- It first looked like a bug in split tabs, so I added temporary logging to the text field's input and the terminal's key handler, then reproduced it.
+- The lost characters reached neither, so Windows had dropped them before they got to Holonet's window. The next characters, typed the same way, arrived.
+- The logging was removed.
+
+fmt, clippy `-D warnings`, the workspace unit tests, and the WSL integration tests pass: `holonet-ssh` has 13 connection, 5 forward, 1 agent and 7 others, and `holonet-files` has 5. The test files on both sides, the web servers, the throwaway vault and the agent's test key were removed. The test account's home has only its usual files.
+
+**Milestone 6 is done.**
+
+Carried forward, not tested or not built:
+
+- **The snippet editor's Command is a single-line field.** A multi-line field needs a text area that Holonet does not have yet. Stored line breaks are still sent as Enter.
+- **A startup snippet is typed as soon as the shell opens,** so the shell echoes it once before the prompt, as any typeahead would.
+- **"Windows' OpenSSH agent is not running"** was not shown live: that needs the service stopped, which Holonet's work never does.
+- **The dynamic rule's port placeholder** still reads 8080, where 1080 would suit SOCKS better.
+- **A snippet run from the editor before it is saved** remembers its values under a new id each time, so they are not offered on the next run.

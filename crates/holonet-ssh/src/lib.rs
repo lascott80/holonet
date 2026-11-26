@@ -1,6 +1,6 @@
-//! SSH sessions for Holonet: connecting, the host key decision, sign-in and
-//! PTY shells. Forwarding and SFTP come in later milestones. Builds and tests
-//! without a window.
+//! SSH sessions for Holonet: connecting, the host key decision, sign-in,
+//! PTY shells, the SFTP subsystem and port forwarding ([`forward`]). Builds
+//! and tests without a window.
 //!
 //! The interface takes part through [`Prompts`] (host key decisions and
 //! secrets that are not saved). A [`Shell`] is a pair of channels, so the
@@ -19,6 +19,7 @@
 //! [`LostReason::JumpHost`].
 
 mod connect;
+pub mod forward;
 pub mod hostkey;
 pub mod keys;
 
@@ -30,9 +31,10 @@ use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc;
 
 pub use connect::{
-    BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KEEPALIVE, LostReason, Prompts,
+    AGENT_PIPE, BoxFuture, ConnectError, ConnectOptions, Credential, HostKeyDecision, KEEPALIVE, LostReason, Prompts,
     SecretRequest, SessionInfo, probe,
 };
+pub use forward::{Forward, ForwardError, ForwardSpec, ForwardStatus};
 pub use hostkey::{KeyStatus, PresentedKey, classify, fingerprint};
 pub use keys::{
     GeneratedKey, KeyFileError, KeyInfo, KeyKind, algorithm_label, convert_ppk, generate_key, inspect_private_key,
@@ -59,13 +61,18 @@ impl PtySize {
 
 /// A signed-in SSH connection.
 pub struct Session {
-    handle: connect::Handle,
+    /// Shared with the forwards running on this session.
+    handle: Arc<connect::Handle>,
+    /// Remote forwards' destinations, shared with the session's handler.
+    routes: forward::Routes,
     info: SessionInfo,
     lost: Arc<Mutex<Option<LostReason>>>,
     /// The address as connected to, for messages about this hop.
     host: String,
     /// The jump host this session runs through. Kept open while this one is.
     via: Option<Box<Session>>,
+    /// Its shell asks the host to forward this PC's agent.
+    agent_forwarding: bool,
 }
 
 /// One hop's lost-connection record, for the shell's watcher.
@@ -91,8 +98,17 @@ impl Session {
     /// through `opts.prompts`, and sign in.
     pub async fn connect(opts: ConnectOptions) -> Result<Self, ConnectError> {
         let host = opts.host.clone();
+        let agent_forwarding = opts.agent_forwarding;
         let c = connect::connect(&opts).await?;
-        Ok(Self { handle: c.handle, info: c.info, lost: c.lost, host, via: c.via })
+        Ok(Self {
+            handle: Arc::new(c.handle),
+            routes: c.routes,
+            info: c.info,
+            lost: c.lost,
+            host,
+            via: c.via,
+            agent_forwarding,
+        })
     }
 
     /// The jump host session this one runs through, if any.
@@ -107,7 +123,13 @@ impl Session {
         watches
     }
 
-    /// Run a command and collect its output (Install on host).
+    /// Start a port forward over this session. The port is bound (or the
+    /// host has agreed to listen) when this returns; the forward runs until
+    /// it is stopped or dropped, or the connection is lost.
+    pub async fn forward(&self, spec: ForwardSpec) -> Result<Forward, ForwardError> {
+        forward::start(self.handle.clone(), self.routes.clone(), spec).await
+    }
+
     /// Open the `sftp` subsystem on a new channel of this session.
     pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
         let channel = self.handle.channel_open_session().await?;
@@ -115,6 +137,7 @@ impl Session {
         Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
     }
 
+    /// Run a command and collect its output (Install on host).
     pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command).await?;
@@ -218,6 +241,9 @@ impl Session {
                 &[],
             )
             .await?;
+        if self.agent_forwarding {
+            channel.agent_forward(true).await?;
+        }
         channel.request_shell(true).await?;
 
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ShellInput>();

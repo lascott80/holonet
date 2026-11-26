@@ -36,7 +36,10 @@ use crate::ui::{Button, ButtonKind, dialog, dialog_buttons, icon, modal};
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
 
-actions!(holonet, [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find]);
+actions!(
+    holonet,
+    [NewTab, CloseTab, NextTab, PreviousTab, SplitRight, SplitDown, NextPane, PreviousPane, Find, Broadcast]
+);
 
 const CONTEXT: &str = "HolonetApp";
 
@@ -48,6 +51,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-d", SplitRight, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-f", Find, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-b", Broadcast, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-e", SplitDown, Some(CONTEXT)),
         // With Shift held, Windows layouts report ] and [ as } and {.
         KeyBinding::new("ctrl-shift-]", NextPane, Some(CONTEXT)),
@@ -89,6 +93,15 @@ pub struct HolonetApp {
     focus: gpui::FocusHandle,
     /// The last key, click or mouse movement in the window, for idle locking.
     last_input: Rc<Cell<Instant>>,
+    /// Port forwarding rules that are switched on, with their background
+    /// connections. Here rather than in the vault view, so they stay up
+    /// while the vault is locked.
+    forwarder: Entity<crate::forwards::Forwarder>,
+    /// Each snippet's variable values from its last run, until Holonet
+    /// closes (never saved to the vault).
+    snippet_values: std::collections::HashMap<holonet_model::SnippetId, std::collections::HashMap<String, String>>,
+    /// The session tab last shown, for "Run in active session".
+    last_session: Option<gpui::WeakEntity<Tab>>,
 }
 
 /// How often the idle time is checked.
@@ -126,7 +139,10 @@ impl HolonetApp {
             }
         })
         .detach();
+        let (me, forward_runtime) = (cx.entity().downgrade(), runtime.clone());
+        let forwarder = cx.new(|_| crate::forwards::Forwarder::new(me, forward_runtime));
         Self {
+            forwarder,
             path,
             stage,
             runtime,
@@ -139,6 +155,8 @@ impl HolonetApp {
             edit_origin: None,
             focus: cx.focus_handle(),
             last_input: Rc::new(Cell::new(Instant::now())),
+            snippet_values: Default::default(),
+            last_session: None,
         }
     }
 
@@ -146,7 +164,8 @@ impl HolonetApp {
     pub fn opened(&mut self, vault: UnlockedVault, restored_from_backup: bool, cx: &mut Context<Self>) {
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
-        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, cx)));
+        let forwarder = self.forwarder.clone();
+        self.stage = Stage::Open(cx.new(|cx| Workspace::new(app, vault, restored_from_backup, runtime, forwarder, cx)));
         self.last_input.set(Instant::now());
         cx.notify();
     }
@@ -191,6 +210,74 @@ impl HolonetApp {
 
     fn vault_data<'a>(&self, cx: &'a App) -> Option<&'a VaultData> {
         self.workspace().and_then(|w| w.read(cx).vault_data())
+    }
+
+    /// A saved host's group, read from the vault each time so renaming or
+    /// recoloring a group shows at once. `None` when it has no group, or
+    /// while the vault is locked (session tabs are hidden then).
+    /// The status bar's text for a host's active forwards.
+    pub fn forwards_for(&self, host: holonet_model::HostId, cx: &App) -> Vec<String> {
+        self.forwarder.read(cx).active_for(host)
+    }
+
+    /// A pane connected to `host`: its rules set to start with the host
+    /// start, and its typed secrets serve their background connection.
+    pub fn host_connected(
+        &mut self,
+        host: holonet_model::HostId,
+        typed: Vec<(holonet_model::HostId, (bool, holonet_model::Secret))>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = self.vault_data(cx).cloned() else { return };
+        self.forwarder.update(cx, |f, cx| f.host_connected(host, typed, &data, cx));
+    }
+
+    /// The group whose "Ask each time" a host's sign-in follows, by name:
+    /// its password is asked on every connection and never saved.
+    pub fn asks_each_time(&self, host: holonet_model::HostId, cx: &App) -> Option<SharedString> {
+        let data = self.vault_data(cx)?;
+        let host = data.host(host)?;
+        let group = data.host_group(host)?;
+        let has_identity = host.identity.and_then(|id| data.identity(id)).is_some();
+        (host.from_group.key && !has_identity && group.key == holonet_model::GroupKey::AskEachTime)
+            .then(|| group.display_name().to_string().into())
+    }
+
+    /// A snippet's values from its last run.
+    pub fn snippet_values(&self, id: holonet_model::SnippetId) -> std::collections::HashMap<String, String> {
+        self.snippet_values.get(&id).cloned().unwrap_or_default()
+    }
+
+    pub fn remember_snippet_values(
+        &mut self,
+        id: holonet_model::SnippetId,
+        values: std::collections::HashMap<String, String>,
+    ) {
+        self.snippet_values.insert(id, values);
+    }
+
+    /// "2 Production hosts" among `hosts`, for broadcast's question.
+    pub fn warn_text(&self, hosts: &[HostId], cx: &App) -> Option<String> {
+        crate::snippet_run::warn_text(self.vault_data(cx)?, hosts)
+    }
+
+    /// The library by name, for a tab's Snippets drawer.
+    pub fn snippets(&self, cx: &App) -> Vec<holonet_model::Snippet> {
+        let Some(data) = self.vault_data(cx) else { return Vec::new() };
+        let mut all = data.snippets.clone();
+        all.sort_by_key(|s| s.display_name().to_lowercase());
+        all
+    }
+
+    /// A host's startup snippet as the vault has it now.
+    pub fn startup_snippet(&self, host: holonet_model::HostId, cx: &App) -> Option<holonet_model::Snippet> {
+        let data = self.vault_data(cx)?;
+        data.host(host)?.startup_snippet.and_then(|id| data.snippet(id)).cloned()
+    }
+
+    pub fn group_tag(&self, host: holonet_model::HostId, cx: &App) -> Option<crate::workspace::GroupTag> {
+        let data = self.vault_data(cx)?;
+        crate::workspace::GroupTag::of(data, data.host(host)?)
     }
 
     /// Change the vault and save it (no-op while locked).
@@ -328,7 +415,7 @@ impl HolonetApp {
         let host = data.resolved(data.host(id)?);
         let key = match &host.auth {
             holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
-            holonet_model::Auth::Password { .. } => None,
+            holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
         };
         let app = cx.entity().downgrade();
         let runtime = self.runtime.clone();
@@ -378,7 +465,7 @@ impl HolonetApp {
             let jumps = crate::hops::jumps(data, &host);
             let key = match &host.auth {
                 holonet_model::Auth::Key { key_id, .. } => data.key(*key_id).cloned(),
-                holonet_model::Auth::Password { .. } => None,
+                holonet_model::Auth::Password { .. } | holonet_model::Auth::Agent => None,
             };
             let limits = Limits {
                 connect_timeout: Duration::from_secs(data.settings.connect_timeout_secs.max(1) as u64),
@@ -400,14 +487,71 @@ impl HolonetApp {
         self.open_tab(id, (PaneMode::Files, remembered), window, cx);
     }
 
-    fn open_tab(&mut self, id: HostId, opening: (PaneMode, Remembered), window: &mut Window, cx: &mut Context<Self>) {
-        // Estimate the terminal size from the window.
+    /// The terminal size a new tab's pane starts with, from the window.
+    fn tab_grid(window: &Window) -> GridSize {
         let viewport = window.viewport_size();
-        let size = GridSize {
+        GridSize {
             cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
             rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
-        };
-        let Some(pane) = self.new_pane(id, size, opening, window, cx) else { return };
+        }
+    }
+
+    /// "Run on n hosts": a tab with a pane per host, four to a tab, each
+    /// typing `text` once its shell opens. Each host signs in its own way;
+    /// one that asks for a password asks in its pane.
+    pub fn run_on_hosts(&mut self, hosts: &[HostId], text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let full = Self::tab_grid(window);
+        let half = GridSize { cols: (full.cols / 2).max(20), rows: (full.rows / 2).max(5) };
+        for chunk in hosts.chunks(crate::tab::MAX_PANES) {
+            let Some(tab) = self.open_tab(chunk[0], (PaneMode::Terminal, Vec::new()), window, cx) else { continue };
+            let first = tab.read(cx).active_pane().clone();
+            first.update(cx, |p, cx| p.queue_input(text.clone(), cx));
+            let mut panes = vec![first];
+            for &host in &chunk[1..] {
+                let Some(pane) = self.new_pane(host, half, (PaneMode::Terminal, Vec::new()), window, cx) else {
+                    continue;
+                };
+                pane.update(cx, |p, cx| p.queue_input(text.clone(), cx));
+                // Two side by side, then each split down: a 2 × 2 grid.
+                let (target, axis) = match panes.len() {
+                    1 => (panes[0].clone(), Axis::Right),
+                    2 => (panes[0].clone(), Axis::Down),
+                    _ => (panes[1].clone(), Axis::Down),
+                };
+                tab.update(cx, |t, cx| t.add_pane(&target, axis, pane.clone(), cx));
+                panes.push(pane);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The terminal "Run in active session" types into: the active pane
+    /// of the session tab shown last, when its shell is open.
+    pub fn active_session_name(&self, cx: &App) -> Option<SharedString> {
+        let tab = self.last_session.as_ref()?.upgrade()?;
+        let pane = tab.read(cx).active_pane().clone();
+        let pane = pane.read(cx);
+        pane.can_run().then(|| pane.name())
+    }
+
+    /// Type `text` into that pane and show its tab.
+    pub fn run_in_active_session(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.last_session.as_ref().and_then(|t| t.upgrade()) else { return };
+        let Some(index) = self.tabs.iter().position(|t| *t == tab) else { return };
+        let pane = tab.read(cx).active_pane().clone();
+        pane.update(cx, |p, cx| p.queue_input(text, cx));
+        self.select(Some(index), window, cx);
+    }
+
+    fn open_tab(
+        &mut self,
+        id: HostId,
+        opening: (PaneMode, Remembered),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Tab>> {
+        let size = Self::tab_grid(window);
+        let pane = self.new_pane(id, size, opening, window, cx)?;
         let app = cx.entity().downgrade();
         let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
@@ -418,10 +562,17 @@ impl HolonetApp {
                 let (host, remembered) = (*host, remembered.clone());
                 this.open_files(host, remembered, window, cx);
             }
+            TabEvent::ManageSnippets => {
+                this.show_vault(window, cx);
+                if let Some(w) = this.workspace().cloned() {
+                    w.update(cx, |w, cx| w.open_snippets(None, cx));
+                }
+            }
         })
         .detach();
-        self.tabs.push(tab);
+        self.tabs.push(tab.clone());
         self.select(Some(self.tabs.len() - 1), window, cx);
+        Some(tab)
     }
 
     /// Split a tab's active pane, with the same host unless another is given.
@@ -530,6 +681,11 @@ impl HolonetApp {
 
     fn select(&mut self, tab: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.active = tab;
+        if let Some(t) = tab.and_then(|i| self.tabs.get(i))
+            && !t.read(cx).is_files(cx)
+        {
+            self.last_session = Some(t.downgrade());
+        }
         if let Some(i) = tab {
             self.tab_scroll.scroll_to_item(i);
         }
@@ -661,12 +817,13 @@ impl Render for HolonetApp {
                 .enumerate()
                 .map(|(i, t)| {
                     let t = t.read(cx);
+                    let host = t.active_pane().read(cx).host.id;
                     TabInfo {
                         id: SharedString::from(format!("session-{i}")).into(),
                         name: t.name(cx),
                         kind: if t.is_files(cx) { TabKind::Sftp } else { TabKind::Terminal },
                         state: t.state(cx),
-                        color: theme::no_group(),
+                        color: crate::workspace::GroupTag::color_of(self.group_tag(host, cx).as_ref()),
                         active: self.active == Some(i),
                     }
                 })
@@ -801,6 +958,13 @@ impl Render for HolonetApp {
                             t.toggle_find(window, cx);
                         }
                     });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Broadcast, _, cx| {
+                // Deferred: turning it on reads the vault through this app,
+                // which is mid-update here.
+                if let Some(tab) = this.active_tab() {
+                    cx.defer(move |cx| tab.update(cx, |t, cx| t.toggle_broadcast(cx)));
                 }
             }))
             .on_action(cx.listener(|this, _: &NextPane, window, cx| {

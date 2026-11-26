@@ -1,10 +1,12 @@
-//! The Hosts page (Main.dc.html): header with search and New host, cards or
-//! list, and the detail panel. Empty vault: a welcome in FirstRun's layout,
+//! The Hosts page (Main.dc.html): header with search and New host, the
+//! group cards (which filter the hosts, and lead to Groups), cards or list,
+//! and the detail panel. Empty vault: a welcome in FirstRun's layout,
 //! without the import cards (milestone 7).
 
 use gpui::{AnyElement, Context, Div, FontWeight, IntoElement, Rgba, SharedString, Window, div, prelude::*, px};
 use holonet_model::{Auth, Host, HostId, RoleIcon, Timestamp, VaultData};
 
+use super::groups::{GroupTag, host_count};
 use super::{Page, Workspace};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{Button, Segmented, group_square, icon, key_values, section_label};
@@ -32,13 +34,12 @@ fn role_icon(icon: RoleIcon) -> &'static str {
     }
 }
 
-/// Group color; every host is ungrouped until milestone 6.
-fn host_color(_host: &Host) -> Rgba {
-    theme::no_group()
+/// A host's group color, or the "No group" gray.
+fn host_color(data: &VaultData, host: &Host) -> Rgba {
+    GroupTag::color_of(GroupTag::of(data, host).as_ref())
 }
 
-fn icon_tile(host: &Host, size: f32, radius: f32, glyph: f32) -> Div {
-    let color = host_color(host);
+fn icon_tile(host: &Host, color: Rgba, size: f32, radius: f32, glyph: f32) -> Div {
     div()
         .size(px(size))
         .flex_none()
@@ -62,6 +63,7 @@ fn sign_in(host: &Host, data: &VaultData) -> SharedString {
     let how: SharedString = match &host.auth {
         Auth::Password { saved: Some(_) } => "Password".into(),
         Auth::Password { saved: None } => "Password, asked".into(),
+        Auth::Agent => "SSH agent".into(),
         Auth::Key { key_id, .. } => {
             data.key(*key_id).map(|k| k.name.clone()).unwrap_or_else(|| "Missing key".into()).into()
         }
@@ -92,7 +94,13 @@ impl Workspace {
         let query = self.search.read(cx).text().trim().to_string();
         // Shown with their identity's username and sign-in.
         let resolved: Vec<Host> = data.hosts.iter().map(|h| data.resolved(h)).collect();
-        let mut hosts: Vec<&Host> = resolved.iter().filter(|h| matches(h, &query)).collect();
+        // A group filter whose group was deleted shows everything.
+        if self.group_filter.is_some_and(|g| data.group(g).is_none()) {
+            self.group_filter = None;
+        }
+        let filter = self.group_filter;
+        let mut hosts: Vec<&Host> =
+            resolved.iter().filter(|h| matches(h, &query) && filter.is_none_or(|g| h.group == Some(g))).collect();
         hosts.sort_by_key(|h| h.display_name().to_lowercase());
         // Keep a selection while there is something to select.
         if self.selected.is_none_or(|id| !hosts.iter().any(|h| h.id == id)) {
@@ -116,12 +124,13 @@ impl Workspace {
                     .flex_1()
                     .min_w(px(200.))
                     .child(div().text_title().text_color(theme::ink()).child("Hosts"))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(theme::ink_muted())
-                            .child(SharedString::from(format!("{count} host{}", if count == 1 { "" } else { "s" }))),
-                    ),
+                    .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(
+                        match data.groups.len() {
+                            0 => host_count(count),
+                            1 => format!("{} in 1 group", host_count(count)),
+                            n => format!("{} in {n} groups", host_count(count)),
+                        },
+                    ))),
             )
             .child(div().w(px(320.)).child(self.search.clone()))
             .child(
@@ -152,23 +161,35 @@ impl Workspace {
                 .flex_col()
                 .items_center()
                 .gap(theme::SPACE_3)
-                .child(div().text_heading().text_color(theme::ink()).child("No hosts match"))
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(theme::ink_muted())
-                        .child(SharedString::from(format!("Nothing matches \u{201C}{query}\u{201D}."))),
-                )
-                .child(Button::secondary("clear-search", "Clear search").on_click(cx.listener(|this, _, _, cx| {
-                    this.search.update(cx, |f, cx| f.set_text("", cx));
-                })))
+                .child(div().text_heading().text_color(theme::ink()).child(if query.is_empty() {
+                    "No hosts in this group"
+                } else {
+                    "No hosts match"
+                }))
+                .child(div().text_body().text_color(theme::ink_muted()).child(SharedString::from(
+                    if query.is_empty() {
+                        "Put a host in this group from its form, under Group.".to_string()
+                    } else {
+                        format!("Nothing matches \u{201C}{query}\u{201D}.")
+                    },
+                )))
+                .child(if query.is_empty() {
+                    Button::secondary("clear-filter", "Show all hosts").on_click(cx.listener(|this, _, _, cx| {
+                        this.group_filter = None;
+                        cx.notify()
+                    }))
+                } else {
+                    Button::secondary("clear-search", "Clear search").on_click(cx.listener(|this, _, _, cx| {
+                        this.search.update(cx, |f, cx| f.set_text("", cx));
+                    }))
+                })
                 .into_any_element()
         } else if self.cards {
             div()
                 .grid()
                 .grid_cols(cols as u16)
                 .gap(px(GAP))
-                .children(hosts.iter().map(|h| self.host_card(h, selected == Some(h.id), cx)))
+                .children(hosts.iter().map(|h| self.host_card(h, &data, selected == Some(h.id), cx)))
                 .into_any_element()
         } else {
             self.host_list(&hosts, selected, &data, cx).into_any_element()
@@ -182,21 +203,50 @@ impl Workspace {
             .flex()
             .child(
                 div().id("hosts-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().child(
-                    div().px(theme::SPACE_6).py(px(28.)).flex().flex_col().gap(px(26.)).child(header).child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(theme::SPACE_3)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(section_label("All hosts"))
-                                    .child(toggle),
-                            )
-                            .child(body),
-                    ),
+                    div()
+                        .px(theme::SPACE_6)
+                        .py(px(28.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(26.))
+                        .child(header)
+                        .child(self.group_row(&data, cols, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(theme::SPACE_3)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap(theme::SPACE_3)
+                                        .child(match filter.and_then(|g| data.group(g)) {
+                                            None => section_label("All hosts").into_any_element(),
+                                            Some(g) => div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(theme::SPACE_3)
+                                                .child(section_label(g.display_name()))
+                                                .child(
+                                                    div()
+                                                        .id("show-all-hosts")
+                                                        .text_meta()
+                                                        .text_color(theme::accent())
+                                                        .cursor_pointer()
+                                                        .child("Show all hosts")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.group_filter = None;
+                                                            cx.notify()
+                                                        })),
+                                                )
+                                                .into_any_element(),
+                                        })
+                                        .child(toggle),
+                                )
+                                .child(body),
+                        ),
                 ),
             )
             .children(detail)
@@ -238,8 +288,10 @@ impl Workspace {
         )
     }
 
-    fn host_card(&self, host: &Host, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn host_card(&self, host: &Host, data: &VaultData, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = host.id;
+        let tag = GroupTag::of(data, host);
+        let color = GroupTag::color_of(tag.as_ref());
         div()
             .id(SharedString::from(format!("card-{}", host.id.0)))
             .flex()
@@ -258,7 +310,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(theme::SPACE_3)
-                    .child(icon_tile(host, 40., 10., 20.))
+                    .child(icon_tile(host, color, 40., 10., 20.))
                     .child(
                         div()
                             .flex()
@@ -305,8 +357,8 @@ impl Workspace {
                             .items_center()
                             .gap(theme::SPACE_2)
                             .text_color(theme::ink_muted())
-                            .child(group_square(host_color(host)))
-                            .child("No group"),
+                            .child(group_square(color))
+                            .child(GroupTag::name_of(tag.as_ref())),
                     )
                     .child(div().text_color(theme::ink_muted()).child(match host.last_connected_at {
                         Some(ts) => SharedString::from(format_date(ts)),
@@ -330,12 +382,15 @@ impl Workspace {
             .text_color(theme::ink_muted())
             .child(div().col_span(1))
             .child(div().col_span(3).child("HOST"))
-            .child(div().col_span(4).child("ADDRESS"))
+            .child(div().col_span(3).child("ADDRESS"))
+            .child(div().col_span(2).child("GROUP"))
             .child(div().col_span(2).child("SIGN-IN"))
-            .child(div().col_span(2).child("LAST"));
+            .child(div().col_span(1).child("LAST"));
         let rows = hosts.iter().map(|h| {
             let id = h.id;
             let on = selected == Some(id);
+            let tag = GroupTag::of(data, h);
+            let color = GroupTag::color_of(tag.as_ref());
             columns(div())
                 .id(SharedString::from(format!("row-{}", h.id.0)))
                 .min_h(theme::CONTROL)
@@ -344,7 +399,7 @@ impl Workspace {
                 .cursor_pointer()
                 .when(on, |d| d.bg(theme::card_selected()))
                 .when(!on, |d| d.hover(|s| s.bg(theme::raised())))
-                .child(div().col_span(1).child(icon(role_icon(h.icon), px(16.), host_color(h))))
+                .child(div().col_span(1).child(icon(role_icon(h.icon), px(16.), color)))
                 .child(
                     div()
                         .col_span(3)
@@ -357,7 +412,7 @@ impl Workspace {
                 )
                 .child(
                     div()
-                        .col_span(4)
+                        .col_span(3)
                         .min_w_0()
                         .text_mono_small()
                         .text_color(theme::ink_soft())
@@ -368,12 +423,24 @@ impl Workspace {
                     div()
                         .col_span(2)
                         .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .text_meta()
+                        .text_color(theme::ink_muted())
+                        .child(group_square(color))
+                        .child(div().min_w_0().truncate().child(GroupTag::name_of(tag.as_ref()))),
+                )
+                .child(
+                    div()
+                        .col_span(2)
+                        .min_w_0()
                         .truncate()
                         .text_meta()
                         .text_color(theme::ink_muted())
                         .child(sign_in(h, data)),
                 )
-                .child(div().col_span(2).min_w_0().text_meta().text_color(theme::ink_muted()).child(
+                .child(div().col_span(1).min_w_0().truncate().text_meta().text_color(theme::ink_muted()).child(
                     match h.last_connected_at {
                         Some(ts) => SharedString::from(format_date(ts)),
                         None => "Never".into(),
@@ -436,7 +503,7 @@ impl Workspace {
             .py(px(28.))
             .bg(theme::panel())
             .shadow(theme::shadow_panel())
-            .child(icon_tile(host, 52., 12., 26.))
+            .child(icon_tile(host, host_color(data, host), 52., 12., 26.))
             .child(
                 div()
                     .flex()
@@ -451,9 +518,26 @@ impl Workspace {
                     .child(div().text_meta().text_color(theme::ink_muted()).child(last_connected(host))),
             )
             .when(host.tailscale().is_some(), |d| {
-                // Main.dc.html: the route, stored per host, shown when there is a choice.
+                // Main.dc.html: the route, shown when there is a choice. It
+                // may come from the group; choosing here makes it the host's own.
                 let route = crate::host_form::ROUTES.iter().position(|r| *r == host.route).unwrap_or(0);
-                let wait = data.settings.connection.fallback_wait.duration().as_secs();
+                let group_route = data.host(id).zip(data.host_group(host)).filter(|(h, _)| h.from_group.route);
+                let help = match group_route {
+                    Some((_, g)) => format!(
+                        "{} From the {} group.",
+                        crate::host_form::route_help(
+                            host.route,
+                            true,
+                            data.settings.connection.fallback_wait.duration().as_secs()
+                        ),
+                        g.display_name()
+                    ),
+                    None => crate::host_form::route_help(
+                        host.route,
+                        true,
+                        data.settings.connection.fallback_wait.duration().as_secs(),
+                    ),
+                };
                 d.child(
                     div()
                         .flex()
@@ -479,6 +563,7 @@ impl Workspace {
                                             move |d| {
                                                 if let Some(h) = d.host_mut(id) {
                                                     h.route = route;
+                                                    h.from_group.route = false;
                                                 }
                                             },
                                             cx,
@@ -487,7 +572,7 @@ impl Workspace {
                                 }
                             }),
                         )
-                        .child(crate::ui::field_help(crate::host_form::route_help(host.route, true, wait), false)),
+                        .child(crate::ui::field_help(help, false)),
                 )
             })
             .child(key_values(vec![
@@ -509,6 +594,16 @@ impl Workspace {
                             .to_string(),
                     )
                     .into_any_element(),
+                ),
+                (
+                    "Group".into(),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_2)
+                        .child(group_square(host_color(data, host)))
+                        .child(GroupTag::name_of(GroupTag::of(data, host).as_ref()))
+                        .into_any_element(),
                 ),
             ]))
             .child(div().flex().flex_col().gap(theme::SPACE_2).child(section_label("Host key")).child(host_key))
@@ -564,6 +659,93 @@ impl Workspace {
         self.save(|d| d.hosts.push(copy), cx);
         self.selected = Some(new_id);
         self.page = Page::Hosts;
+    }
+}
+
+impl Workspace {
+    /// Main.dc.html's Groups row: a card per group (its color along the top,
+    /// its host count) that filters the hosts, and "Manage groups".
+    fn group_row(&self, data: &VaultData, cols: usize, cx: &mut Context<Self>) -> Div {
+        let mut groups: Vec<&holonet_model::Group> = data.groups.iter().collect();
+        groups.sort_by_key(|g| g.display_name().to_lowercase());
+        let filter = self.group_filter;
+        let cards: AnyElement = if groups.is_empty() {
+            div()
+                .text_body()
+                .text_color(theme::ink_muted())
+                .child("No groups yet. A group gives its hosts a color and shared defaults.")
+                .into_any_element()
+        } else {
+            div()
+                .grid()
+                // Group cards are narrower than host cards (180px against 270px).
+                .grid_cols(((cols * 3).div_ceil(2)).clamp(1, 8) as u16)
+                .gap(px(GAP))
+                .children(groups.iter().map(|g| {
+                    let id = g.id;
+                    let on = filter == Some(id);
+                    div()
+                        .id(SharedString::from(format!("group-card-{}", g.id.0)))
+                        .flex()
+                        .flex_col()
+                        // No overflow_hidden: in a Taffy grid it lets the item
+                        // shrink to nothing. The strip rounds its own corners.
+                        .rounded(theme::RADIUS_LG)
+                        .border_1()
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(theme::card_selected()).border_color(theme::accent()))
+                        .when(!on, |d| {
+                            d.bg(theme::card()).border_color(theme::line()).hover(|s| s.shadow(theme::shadow_hover()))
+                        })
+                        .child(div().h(px(2.)).flex_none().rounded_t(theme::RADIUS_LG).bg(theme::group_color(g.color)))
+                        .child(
+                            div()
+                                .px(theme::SPACE_4)
+                                .py(px(13.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .font_family(theme::DISPLAY)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(15.))
+                                        .text_color(theme::ink())
+                                        .truncate()
+                                        .child(SharedString::from(g.display_name().to_string())),
+                                )
+                                .child(
+                                    div()
+                                        .text_meta()
+                                        .text_color(theme::ink_muted())
+                                        .child(SharedString::from(host_count(data.group_hosts(g.id).len()))),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // Picking the filtered group again shows all hosts.
+                            this.group_filter = if this.group_filter == Some(id) { None } else { Some(id) };
+                            cx.notify()
+                        }))
+                }))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div().flex().items_center().justify_between().child(section_label("Groups")).child(
+                    div()
+                        .id("manage-groups")
+                        .text_meta()
+                        .text_color(theme::accent())
+                        .cursor_pointer()
+                        .py(px(6.))
+                        .child("Manage groups")
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_groups(filter, cx))),
+                ),
+            )
+            .child(cards)
     }
 }
 
