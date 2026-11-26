@@ -2955,8 +2955,10 @@ dependencies = [
  "holonet-vault",
  "jiff",
  "regex",
+ "serde_json",
  "tokio",
  "unicode-segmentation",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
 ]
 
@@ -2976,6 +2978,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "holonet-model",
+ "rand 0.10.4",
  "russh",
  "thiserror 2.0.21",
  "tokio",

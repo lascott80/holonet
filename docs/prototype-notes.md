@@ -800,3 +800,69 @@ Every keystroke's search plus a frame stays under 16 ms. The time is spent readi
 fmt, clippy `-D warnings`, the unit tests and the WSL integration tests pass.
 
 **Milestone 3 is done.** Carried forward, not tested here: a drop after sleep from a remote server (phase 7).
+
+## Milestone 4, phase 0: spikes (25 Nov 2026)
+
+The spike programs stay in the tree until the phases that replace them land, then go in phase 9:
+- `crates/holonet-ssh/examples/m4_keygen.rs`, `m4_jump.rs`
+- `crates/holonet-app/examples/m4_tailscale.rs`, `m4_lock.rs`, `m4_hello.rs`
+
+### (a) Windows Hello: signatures repeat, so the vault can have a Hello key slot
+`m4_hello` opens an ordinary window as a stand-in for Holonet's. It then creates a Hello key credential with `KeyCredentialManager::RequestCreateAsync` (`windows` 0.62, plain calls without a window handle), signs the same 32-byte challenge twice, compares the signatures, and deletes the credential.
+
+| Step | Result |
+| --- | --- |
+| `IsSupportedAsync` | true |
+| Create | Success after 4.4 s (the owner's Hello check) |
+| Sign 1 | Success after 0.5 s with no new prompt: Hello reused the check just made |
+| Sign 2 | Success after 3.3 s, with a prompt |
+| Signatures | 256 bytes each (RSA 2048), **identical** |
+| Prompt placement | All three prompts opened in front, without the "Credential Dialog Xaml Host" workaround |
+
+- Microsoft's documentation describes these signatures as RSA-PSS, which would normally differ every time. On this PC they repeat, which matches KeePassXC's experience. So the **Hello key slot** design from the plan goes ahead: wrap the data key under SHA-256 of the signature over a random challenge stored in the slot.
+- Phase 1 tests the slot with a fake signer. Phase 8 confirms live that a signature made in a new process, after `OpenAsync`, matches the one made when the slot was created. If it ever does not, the password slot still opens the vault, and Hello is set up again.
+- The focus workaround is kept in reserve and not built unless phase 8 shows a prompt behind the window.
+
+### (b) Windows lock and unlock: a message-only window hears them
+`m4_lock` runs its own thread with a message loop. It registers two windows with `WTSRegisterSessionNotification`: a message-only window (`HWND_MESSAGE`) and a hidden ordinary one. The owner pressed Win L and unlocked about 10 s later:
+
+```
+28.9 s  message-only  WTS_SESSION_LOCK (0x7)
+28.9 s  hidden window WTS_SESSION_LOCK (0x7)
+39.3 s  message-only  WTS_SESSION_UNLOCK (0x8)
+39.3 s  hidden window WTS_SESSION_UNLOCK (0x8)
+```
+
+The message-only window is enough. `platform::watch_system` gains it in phase 8, on a thread of its own, feeding the same channel as sleep and network changes.
+
+### (c) Key generation: fast in release, slow RSA in debug
+`m4_keygen` generates each type with `ssh-key` 0.7.0-rc.12 (re-exported by russh 0.65.4, with `rand` 0.10). It encrypts each key with a passphrase (bcrypt-pbkdf, AES-256-CTR), writes it as OpenSSH text, and reads it back with `decode_secret_key`. The round trip matched every time.
+
+| Key | Generate, release | Generate, debug | Encrypt and encode, release | Decode, release |
+| --- | --- | --- | --- | --- |
+| Ed25519 | 0.1 ms | 0.4 ms | 95 ms | 88 ms |
+| ECDSA P-256 | 0.4 ms | 4.7 ms | 89 ms | 88 ms |
+| RSA 4096 (3 runs) | 205–409 ms | 3.4–14.6 s | 86–88 ms | 87–105 ms |
+
+- RSA generation time varies a lot, because it is a prime search. Generation runs off the UI thread with a progress state. The RSA crates get `opt-level = 3` in the dev profile so debug builds stay usable.
+- About 90 ms of every encrypt or decode is bcrypt-pbkdf's work factor. That cost falls on each connect with a passphrase-protected key, which is acceptable.
+
+### (d) Tailscale LocalAPI: works over the pipe, no admin
+`m4_tailscale` opens `\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled` and sends `GET /localapi/v0/status` (headers `Host: local-tailscaled.sock`, `Sec-Tailscale: localapi`).
+
+- **With Tokio's named-pipe client** it got `200 OK`, BackendState "Running", this PC's own addresses and the peer count. The round trip took 0.3–0.8 ms for 21 KB, as a normal user, with or without the identification-level impersonation flag.
+- **`std::fs::OpenOptions`** failed on the same path with "path not found" (os error 3), with or without the flag. `holonet-net` uses Tokio's client.
+- Tailscale 1.104.7 is installed and native ARM64. When Tailscale is stopped the pipe is missing, which reads as "not running"; phase 3 checks that live.
+
+### (e) Jump host: `direct-tcpip` plus `connect_stream` works
+`m4_jump` signs in to the WSL server, opens `channel_open_direct_tcpip` from it to `127.0.0.1:2222`, and runs a second `client::connect_stream` session over `Channel::into_stream()`. Both host keys are checked against `.dev/known_hosts`, each with its own address.
+
+| Case | Result |
+| --- | --- |
+| Through the jump host to itself | Both keys matched; signed in to the jump host in 222 ms, then the target in 454 ms. `$SSH_CONNECTION` differed between the two sessions |
+| Closing | Disconnecting the inner session left the outer one open, then the outer one closed |
+| Target port closed | "Failed to open channel (ConnectFailed)" from the jump host. Phase 7 words this as "bastion could not reach app-01:22" |
+| Target name not in Known hosts (`localhost`) | "Unknown server key": stopped, nothing trusted |
+
+### (f) WSL on this PC's Tailscale address: not reachable
+A TCP connection to this PC's own Tailscale IPv4 address on port 2222 was refused. WSL runs in NAT mode, and only `localhost` is forwarded into it. So the WSL test server cannot stand in for "a host on the tailnet" without a change. How phase 6 tests the fallback is an open question for the owner, recorded in the plan once decided.

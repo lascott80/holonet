@@ -57,10 +57,10 @@ As before, no control is shown before its milestone lands.
 - `jump_chain(host)` returns the hops in order and refuses a loop.
 
 ### `holonet-vault`
-- A **Windows Hello key slot** beside the password slot, if phase 0 shows Hello signatures repeat on this PC:
+- A **Windows Hello key slot** beside the password slot. Phase 0 showed Hello signatures repeat on this PC, so this is the design:
   - Holonet creates a Hello key credential named for the vault, signs a fixed random challenge stored in the slot, and uses the SHA-256 of the signature to wrap the data key (the KeePassXC approach).
   - Turning Hello off removes the slot. The password slot always stays.
-- **If signatures do not repeat** (owner decision): no slot in the file. The vault password unlocks once per app start, and the data key, wrapped under a Hello-derived key, stays in memory, so every unlock after an auto-lock uses Hello. This is how KeePassXC does it.
+- **If signatures ever stop repeating** (the owner's fallback): no slot in the file. The vault password unlocks once per app start, and the data key, wrapped under a Hello-derived key, stays in memory, so every unlock after an auto-lock uses Hello. This is how KeePassXC does it.
 
 ### `holonet-ssh`
 - **Key generation:** Ed25519, ECDSA P-256 and RSA 4096 with `ssh-key` (re-exported by russh), encrypted with bcrypt-pbkdf when a passphrase is given. Runs off the UI thread.
@@ -95,7 +95,7 @@ Each phase ends with a commit and a check.
 
 | # | Phase | Exit check |
 | --- | --- | --- |
-| 0 | **Spikes:** (a) Windows Hello from GPUI: create a key credential, sign the same challenge twice and compare, and check that the prompt opens in front on ARM; (b) Windows lock and unlock events from a message-only window; (c) RSA 4096 generation time, debug and release; (d) Tailscale LocalAPI over the pipe from Rust; (e) a jump host through WSL sshd to itself; (f) whether WSL sshd answers on this PC's Tailscale address | Notes record each result; Hello's outcome picks the vault design above |
+| 0 | **Spikes** *(done; Hello signatures repeat, so the vault gets a Hello key slot; WSL cannot be reached on this PC's Tailscale address)*: (a) Windows Hello from GPUI: create a key credential, sign the same challenge twice and compare, and check that the prompt opens in front on ARM; (b) Windows lock and unlock events from a message-only window; (c) RSA 4096 generation time, debug and release; (d) Tailscale LocalAPI over the pipe from Rust; (e) a jump host through WSL sshd to itself; (f) whether WSL sshd answers on this PC's Tailscale address | Notes record each result; Hello's outcome picks the vault design above |
 | 1 | **Model and vault:** the new fields, identities, passphrase migration, Hello slot or in-memory wrap, lock settings | A milestone 3 vault opens and migrates; unit tests cover jump loops and the Hello slot round trip (with a fake signer) |
 | 2 | **SSH:** key generation, `.ppk` import, jump-host connect, install public key, connect to a chosen address | WSL tests: sign in with each generated key type, through a jump host, and after install on host |
 | 3 | **`holonet-net`:** Tailscale status, route planning, the no-route check | Unit tests for planning; live check with Tailscale running and stopped |

@@ -14,5 +14,7 @@ thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
+# Milestone 4 phase 0 spike (examples/m4_keygen.rs).
+rand = "0.10"
 holonet-model = { path = "../holonet-model" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
