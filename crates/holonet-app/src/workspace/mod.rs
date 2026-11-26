@@ -228,6 +228,14 @@ impl Workspace {
         });
     }
 
+    /// Ask the app to open an SFTP tab (deferred, as [`Self::connect`]).
+    pub(crate) fn open_files(&mut self, id: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let app = self.app.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |app, cx| app.open_files(id, Vec::new(), window, cx));
+        });
+    }
+
     fn open_change_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = cx.new(|cx| TextField::new(cx, "").password());
         let new = cx.new(|cx| TextField::new(cx, "").password());

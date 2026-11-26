@@ -1,6 +1,7 @@
 //! New-tab host picker: a small searchable list of saved hosts under the "+"
 //! button (milestone 3 owner decision 3). Enter connects the highlighted host
-//! in a new tab; Esc closes. The command palette (milestone 7) replaces it.
+//! in a new tab, Ctrl Enter or a row's SFTP button opens an SFTP tab; Esc
+//! closes. The command palette (milestone 7) replaces it.
 
 use gpui::{
     App, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render, SharedString, Subscription, Window, actions,
@@ -11,7 +12,7 @@ use holonet_model::{HostId, VaultData};
 use crate::theme::{self, TypeStyles};
 use crate::ui::{Button, TextField, TextFieldEvent};
 
-actions!(host_picker, [Up, Down]);
+actions!(host_picker, [Up, Down, OpenFiles]);
 
 const CONTEXT: &str = "HostPicker";
 /// Rows shown before the list scrolls.
@@ -19,11 +20,17 @@ const VISIBLE_ROWS: f32 = 8.0;
 const ROW_HEIGHT: f32 = 52.0;
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("up", Up, Some(CONTEXT)), KeyBinding::new("down", Down, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("up", Up, Some(CONTEXT)),
+        KeyBinding::new("down", Down, Some(CONTEXT)),
+        KeyBinding::new("ctrl-enter", OpenFiles, Some(CONTEXT)),
+    ]);
 }
 
 pub enum HostPickerEvent {
     Connect(HostId),
+    /// An SFTP tab for the host.
+    OpenFiles(HostId),
     NewHost,
     Dismiss,
 }
@@ -95,6 +102,12 @@ impl HostPicker {
         }
     }
 
+    fn confirm_files(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self.matches(cx).get(self.highlighted) {
+            cx.emit(HostPickerEvent::OpenFiles(entry.id));
+        }
+    }
+
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let count = self.matches(cx).len();
         if count > 0 {
@@ -146,14 +159,42 @@ impl Render for HostPicker {
                         .flex_none()
                         .px(theme::SPACE_3)
                         .flex()
-                        .flex_col()
-                        .justify_center()
+                        .items_center()
+                        .gap(theme::SPACE_2)
                         .rounded(theme::RADIUS_SM)
                         .cursor_pointer()
                         .when(i == highlighted, |d| d.bg(theme::raised()))
                         .hover(|s| s.bg(theme::raised()))
-                        .child(div().text_body().text_color(theme::ink()).child(e.name))
-                        .child(div().text_mono_small().text_color(theme::ink_muted()).child(e.target))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().text_body().text_color(theme::ink()).truncate().child(e.name))
+                                .child(
+                                    div().text_mono_small().text_color(theme::ink_muted()).truncate().child(e.target),
+                                ),
+                        )
+                        // An SFTP tab instead of a terminal.
+                        .child(
+                            div()
+                                .id(("picker-sftp", i))
+                                .flex_none()
+                                .px(theme::SPACE_2)
+                                .py(theme::SPACE_1)
+                                .rounded(theme::RADIUS_SM)
+                                .border_1()
+                                .border_color(theme::line())
+                                .text_meta()
+                                .text_color(theme::ink_muted())
+                                .hover(|s| s.bg(theme::card()).text_color(theme::ink()))
+                                .child("SFTP")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(HostPickerEvent::OpenFiles(id))
+                                })),
+                        )
                         .on_click(cx.listener(move |_, _, _, cx| cx.emit(HostPickerEvent::Connect(id))))
                 }))
                 .into_any_element()
@@ -163,6 +204,7 @@ impl Render for HostPicker {
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &Up, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &Down, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &OpenFiles, _, cx| this.confirm_files(cx)))
             .w(px(380.))
             .p(theme::SPACE_2)
             .flex()
@@ -175,5 +217,14 @@ impl Render for HostPicker {
             .shadow(theme::shadow_dialog())
             .when(!empty_vault, |d| d.child(self.search.clone()))
             .child(body)
+            .when(!empty_vault, |d| {
+                d.child(
+                    div()
+                        .px(theme::SPACE_2)
+                        .text_meta()
+                        .text_color(theme::ink_muted())
+                        .child("Enter opens a terminal. Ctrl Enter opens SFTP."),
+                )
+            })
     }
 }

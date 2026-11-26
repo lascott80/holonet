@@ -1523,3 +1523,46 @@ New modules in `holonet-files`, still without a window.
 - **A race in the first version of the pause test:** a 64 MB upload finishes in about 0.2 s, so it sometimes completed before the pause landed. Two runs failed this way when the tests ran in parallel. The files are now larger (192 MB and 128 MB), the pause comes at the first progress report, and three full runs then passed. The failed runs left two temp folders here, which were removed. The server's home folder was clean after every run.
 
 fmt, clippy, and the unit tests (`holonet-files` 15, the others as before) pass.
+
+## Milestone 5, phase 4: the SFTP tab (25 Nov 2026)
+
+An SFTP tab is a tab with one pane in Files mode. It reuses the terminal pane's whole connection path: routes, jump hosts, host key checks, sign-in prompts, the failed states and reconnect.
+
+**`session.rs`:**
+- `Pane::new` takes a `PaneMode` (Terminal or Files) and the remembered secrets.
+- After sign-in, a Files pane opens SFTP (`Remote::open`) instead of a shell.
+- The first connection makes a `FilesView`. Reconnects hand the same view the new `Remote`, so both sides keep their folders.
+- **There is no shell to report a dropped connection,** so `watch_lost` waits on the new `Session::closed()` in `holonet-ssh`. That polls `is_closed()` every 250 ms and returns the lost reason, or `None` for a close on purpose. On a loss, the view drops its `Remote` and the pane runs the usual `on_lost` and reconnect.
+- A Files pane shows "Connected" where a terminal shows its size, and "SFTP" in the status bar in place of the terminal type.
+
+**`app.rs` and `tab.rs`:**
+- Tab creation moved into `open_tab(id, (mode, remembered))`. `connect` opens a terminal; `open_files` opens SFTP.
+- `Tab::is_files` gives the title bar its folder icon (`TabKind::Sftp`).
+- It hides Split and Find, and Split, Find and their shortcuts do nothing in an SFTP tab.
+
+**Entry points:**
+- The host detail has "Open SFTP" under Connect.
+- A terminal tab's header has "Open SFTP here". It opens the host the active pane shows, with that pane's typed secrets for each hop, so nothing is asked again.
+- In the host picker, each row has an SFTP button, and Ctrl Enter opens the highlighted host. A hint under the list says so.
+
+**`files_view.rs`** (phase 4 version):
+- Two panes: "This PC" and the host.
+  - This PC starts in the host's last local folder or the user profile.
+  - The host starts in its "Default SFTP folder" (through `realpath`, falling back to home if it cannot be used) or home.
+- Each pane has a header and plain rows with an icon, a name and a size.
+- `entry_icon` picks the icon for each kind and extension. Seven new file icons from the same Lucide set: file, link, archive, code, text, config and lock.
+- Browsing, selection and dragging come in phase 5.
+
+**Check (WSL server, release build):**
+
+| Test | Result |
+| --- | --- |
+| Open SFTP from behind-a's detail (through jump-a, Default SFTP folder `/tmp`) | Connected; status bar "Through jump-a … SFTP"; the host side listed `/tmp` |
+| Drop the connection: `kill -9` both hops' sshd session processes | Reconnected by itself within about a second, with new server processes; still in `/tmp` |
+| "Open SFTP here" from a wsl-a terminal | A second tab with the folder icon opened without asking for the password; home listed |
+| Picker: Ctrl Shift T, type "wsl-b", Ctrl Enter | An SFTP tab for wsl-b |
+
+- **Killing only the `[priv]` sshd processes** left the unprivileged session processes running, and the connection stayed up. Killing the `holotest` ones dropped it.
+- **The reconnecting state was too brief to capture** here; it is the milestone 3 view with the files view under it.
+
+fmt, clippy and all workspace tests pass.

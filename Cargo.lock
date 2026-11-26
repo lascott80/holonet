@@ -2977,6 +2977,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "gpui",
+ "holonet-files",
  "holonet-model",
  "holonet-net",
  "holonet-ssh",

@@ -140,7 +140,16 @@ struct FindBar {
 
 /// The tab wants another pane (the app creates it: it knows hosts and settings).
 pub enum TabEvent {
-    Split { axis: Axis, host: Option<HostId> },
+    Split {
+        axis: Axis,
+        host: Option<HostId>,
+    },
+    /// "Open SFTP here": an SFTP tab for the active pane's host, with its
+    /// typed secrets.
+    OpenFiles {
+        host: HostId,
+        remembered: crate::session::Remembered,
+    },
 }
 
 pub struct Tab {
@@ -262,6 +271,11 @@ impl Tab {
         self.active.read(cx).name()
     }
 
+    /// An SFTP tab: one Files pane, no splits, no Find.
+    pub fn is_files(&self, cx: &App) -> bool {
+        self.active.read(cx).is_files()
+    }
+
     pub fn state(&self, cx: &App) -> TabState {
         self.active.read(cx).tab_state()
     }
@@ -273,6 +287,9 @@ impl Tab {
     /// Ctrl Shift F or the Find button: open the bar (and focus its field),
     /// or close it.
     pub fn toggle_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_files(cx) {
+            return;
+        }
         if self.find.is_some() {
             self.close_find(window, cx);
             return;
@@ -667,6 +684,7 @@ impl Render for Tab {
             (p.name(), p.target_line(), p.status_bar())
         };
         let can_split = self.can_split();
+        let files = self.is_files(cx);
         let body = self.render_node(&self.root, Vec::new(), cx);
         div()
             .size_full()
@@ -715,7 +733,7 @@ impl Render for Tab {
                             .flex_wrap()
                             .items_center()
                             .gap(theme::SPACE_2)
-                            .when(!can_split, |d| {
+                            .when(!can_split && !files, |d| {
                                 d.child(
                                     div()
                                         .text_meta()
@@ -723,29 +741,48 @@ impl Render for Tab {
                                         .child(format!("A tab holds up to {MAX_PANES} panes.")),
                                 )
                             })
-                            .child(self.split_control(Axis::Right, can_split, cx))
-                            .child(self.split_control(Axis::Down, can_split, cx))
-                            .child({
-                                // A toggle: the accent border while the bar is open.
-                                let on = self.find.is_some();
-                                div()
-                                    .id("find-toggle")
-                                    .h(theme::CONTROL)
-                                    .px(px(14.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(theme::SPACE_2)
-                                    .rounded(theme::RADIUS_MD)
-                                    .border_1()
-                                    .border_color(if on { theme::accent() } else { theme::line() })
-                                    .bg(theme::card())
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme::raised()))
-                                    .text_body()
-                                    .text_color(theme::ink())
-                                    .child(icon("search", px(16.), theme::ink_muted()))
-                                    .child("Find")
-                                    .on_click(cx.listener(|this, _, window, cx| this.toggle_find(window, cx)))
+                            // Terminal.dc.html: "Open SFTP here" for the active pane's host.
+                            .when(!files, |d| {
+                                d.child(Button::secondary("open-sftp-here", "Open SFTP here").icon("folder").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        let (host, remembered) = {
+                                            let p = this.active.read(cx);
+                                            (p.host.id, p.remembered())
+                                        };
+                                        cx.emit(TabEvent::OpenFiles { host, remembered });
+                                    }),
+                                ))
+                            })
+                            .when(!files, |d| {
+                                d.child(self.split_control(Axis::Right, can_split, cx)).child(self.split_control(
+                                    Axis::Down,
+                                    can_split,
+                                    cx,
+                                ))
+                            })
+                            .when(!files, |d| {
+                                d.child({
+                                    // A toggle: the accent border while the bar is open.
+                                    let on = self.find.is_some();
+                                    div()
+                                        .id("find-toggle")
+                                        .h(theme::CONTROL)
+                                        .px(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme::SPACE_2)
+                                        .rounded(theme::RADIUS_MD)
+                                        .border_1()
+                                        .border_color(if on { theme::accent() } else { theme::line() })
+                                        .bg(theme::card())
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::raised()))
+                                        .text_body()
+                                        .text_color(theme::ink())
+                                        .child(icon("search", px(16.), theme::ink_muted()))
+                                        .child("Find")
+                                        .on_click(cx.listener(|this, _, window, cx| this.toggle_find(window, cx)))
+                                })
                             }),
                     ),
             )

@@ -89,7 +89,7 @@ Each phase ends with a commit and a check.
 | 1 | **Model and settings** *(done)*: the new fields, the host form's "Default SFTP folder", Settings' SFTP section | A milestone 4 vault opens; Settings saves the three SFTP rows |
 | 2 | **`holonet-files` operations** *(done)*: remote and local listing, rename, delete, mkdir, chmod | WSL tests for each, and the Recycle Bin on this PC |
 | 3 | **Transfer engine** *(done)*: queue, folders, at-once limit, conflicts, pause, resume, retry, progress | Tests, including resume after killing the connection mid-file |
-| 4 | **SFTP tab:** tab kind, Open SFTP from the host detail, the terminal header and the picker, connecting and reconnecting | Open SFTP to the WSL server and through a jump host; drop and reconnect |
+| 4 | **SFTP tab** *(done)*: tab kind, Open SFTP from the host detail, the terminal header and the picker, connecting and reconnecting | Open SFTP to the WSL server and through a jump host; drop and reconnect |
 | 5 | **File panes:** listing, breadcrumbs, filter, selection, links, hidden files, copy path, drag between panes and from Explorer | Browse both sides; drag queues a transfer |
 | 6 | **Queue panel and conflicts:** progress, pause, resume, retry, finished items, the conflict popup and its Settings default | A folder of mixed files both ways with conflicts; pause and resume; a dropped connection resumes |
 | 7 | **Rename, delete, permissions and new folder popups**, and Refresh | Each on both sides; delete lands in the Recycle Bin locally |

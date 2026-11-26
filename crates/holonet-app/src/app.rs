@@ -27,7 +27,7 @@ use holonet_ssh::{PresentedKey, classify};
 use holonet_vault::UnlockedVault;
 
 use crate::host_picker::{HostPicker, HostPickerEvent};
-use crate::session::{KeyCheck, Limits, Pane, SessionEvent};
+use crate::session::{KeyCheck, Limits, Pane, PaneMode, Remembered, SessionEvent};
 use crate::shell::{TabInfo, TabKind, TitleBar};
 use crate::tab::{Axis, Tab, TabEvent};
 use crate::terminal::GridSize;
@@ -308,6 +308,7 @@ impl HolonetApp {
         &mut self,
         id: HostId,
         size: GridSize,
+        opening: (PaneMode, Remembered),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Pane>> {
@@ -327,7 +328,7 @@ impl HolonetApp {
             fallback_wait: data.settings.connection.fallback_wait.duration(),
         };
         let jumps = crate::hops::jumps(data, &host);
-        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, window, cx));
+        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, opening, window, cx));
         cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_pane(pane, window, cx),
             SessionEvent::ReviewKnownHost => {
@@ -377,20 +378,33 @@ impl HolonetApp {
             self.select(Some(index), window, cx);
             return;
         }
+        self.open_tab(id, (PaneMode::Terminal, Vec::new()), window, cx);
+    }
+
+    /// Open an SFTP tab for a saved host (Open SFTP, Open SFTP here, the
+    /// picker). `remembered` carries a terminal's typed secrets.
+    pub fn open_files(&mut self, id: HostId, remembered: Remembered, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(id, (PaneMode::Files, remembered), window, cx);
+    }
+
+    fn open_tab(&mut self, id: HostId, opening: (PaneMode, Remembered), window: &mut Window, cx: &mut Context<Self>) {
         // Estimate the terminal size from the window.
         let viewport = window.viewport_size();
         let size = GridSize {
             cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
             rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
         };
-        let Some(pane) = self.new_pane(id, size, window, cx) else { return };
+        let Some(pane) = self.new_pane(id, size, opening, window, cx) else { return };
         let app = cx.entity().downgrade();
         let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
         cx.observe(&tab, |_, _, cx| cx.notify()).detach();
-        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| {
-            let TabEvent::Split { axis, host } = event;
-            this.split(tab, *axis, *host, window, cx);
+        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| match event {
+            TabEvent::Split { axis, host } => this.split(tab, *axis, *host, window, cx),
+            TabEvent::OpenFiles { host, remembered } => {
+                let (host, remembered) = (*host, remembered.clone());
+                this.open_files(host, remembered, window, cx);
+            }
         })
         .detach();
         self.tabs.push(tab);
@@ -406,7 +420,8 @@ impl HolonetApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !tab.read(cx).can_split() {
+        // An SFTP tab is one view; it does not split.
+        if !tab.read(cx).can_split() || tab.read(cx).is_files(cx) {
             return;
         }
         let active = tab.read(cx).active_pane().clone();
@@ -419,7 +434,9 @@ impl HolonetApp {
             Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
             Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
         };
-        let Some(pane) = self.new_pane(host.unwrap_or(same), size, window, cx) else { return };
+        let Some(pane) = self.new_pane(host.unwrap_or(same), size, (PaneMode::Terminal, Vec::new()), window, cx) else {
+            return;
+        };
         tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
         cx.notify();
     }
@@ -501,6 +518,13 @@ impl HolonetApp {
                     // Deferred: connecting reads the workspace, which may be mid-update.
                     let app = cx.entity();
                     window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.connect(id, window, cx)));
+                }
+                HostPickerEvent::OpenFiles(id) => {
+                    let id = *id;
+                    let app = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| app.open_files(id, Vec::new(), window, cx))
+                    });
                 }
                 HostPickerEvent::NewHost => {
                     this.show_vault(window, cx);
@@ -592,7 +616,7 @@ impl Render for HolonetApp {
                     TabInfo {
                         id: SharedString::from(format!("session-{i}")).into(),
                         name: t.name(cx),
-                        kind: TabKind::Terminal,
+                        kind: if t.is_files(cx) { TabKind::Sftp } else { TabKind::Terminal },
                         state: t.state(cx),
                         color: theme::no_group(),
                         active: self.active == Some(i),

@@ -523,6 +523,13 @@ impl Workspace {
                     .full_width()
                     .on_click(cx.listener(move |this, _, window, cx| this.connect(id, window, cx))),
             )
+            // Main.dc.html: Open SFTP beside the connect action.
+            .child(
+                Button::secondary("open-sftp", "Open SFTP")
+                    .icon("folder")
+                    .full_width()
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_files(id, window, cx))),
+            )
             .child(
                 div()
                     .flex()

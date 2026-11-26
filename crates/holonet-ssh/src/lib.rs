@@ -185,6 +185,24 @@ impl Session {
         chain_reason(&self.lost_watches())
     }
 
+    /// Wait for the connection to end: the reason if it was lost, `None`
+    /// if it was closed on purpose ([`Session::close`]). For sessions without
+    /// a shell (SFTP), which have no channel of their own to watch.
+    pub async fn closed(&self) -> Option<LostReason> {
+        while !self.handle.is_closed() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let watches = self.lost_watches();
+        // The reason can be recorded a moment after the handle closes.
+        for _ in 0..12 {
+            if let Some(reason) = chain_reason(&watches) {
+                return Some(reason);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        None
+    }
+
     /// Open a PTY and a login shell. The shell runs on a Tokio task until it
     /// exits or [`ShellInput::Close`] is sent.
     pub async fn open_shell(&self, size: PtySize) -> Result<Shell> {
