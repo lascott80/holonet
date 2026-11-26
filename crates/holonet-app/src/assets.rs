@@ -17,9 +17,17 @@ macro_rules! icons {
 
 icons![
     "globe",
+    "file",
+    "file-link",
+    "file-archive",
+    "file-code",
+    "file-text",
+    "file-config",
+    "file-lock",
     "hosts",
     "terminal",
     "folder",
+    "folder-plus",
     "key",
     "settings",
     "forwarding",

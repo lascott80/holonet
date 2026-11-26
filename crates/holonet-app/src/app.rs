@@ -27,12 +27,12 @@ use holonet_ssh::{PresentedKey, classify};
 use holonet_vault::UnlockedVault;
 
 use crate::host_picker::{HostPicker, HostPickerEvent};
-use crate::session::{KeyCheck, Limits, Pane, SessionEvent};
+use crate::session::{KeyCheck, Limits, Pane, PaneMode, Remembered, SessionEvent};
 use crate::shell::{TabInfo, TabKind, TitleBar};
 use crate::tab::{Axis, Tab, TabEvent};
 use crate::terminal::GridSize;
 use crate::theme;
-use crate::ui::icon;
+use crate::ui::{Button, ButtonKind, dialog, dialog_buttons, icon, modal};
 use crate::vault_screens::{CreateVault, LockReason, Locked};
 use crate::workspace::{Page, Workspace};
 
@@ -75,6 +75,8 @@ pub struct HolonetApp {
     active: Option<usize>,
     /// The new-tab host picker, while open.
     picker: Option<Entity<HostPicker>>,
+    /// An SFTP tab waiting for "Close anyway?" (transfers still running).
+    closing: Option<Entity<Tab>>,
     /// Where the "+" button was drawn, to place the picker under it.
     plus_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Horizontal scroll of the tab strip, so the active tab stays in view.
@@ -131,6 +133,7 @@ impl HolonetApp {
             tabs: Vec::new(),
             active: None,
             picker: None,
+            closing: None,
             plus_bounds: Rc::new(Cell::new(Bounds::default())),
             tab_scroll: ScrollHandle::new(),
             edit_origin: None,
@@ -265,6 +268,14 @@ impl HolonetApp {
         }
     }
 
+    /// SFTP settings changed in Settings: every SFTP tab follows.
+    pub fn apply_sftp_settings(&mut self, settings: &holonet_model::SftpSettings, cx: &mut Context<Self>) {
+        let panes: Vec<Entity<Pane>> = self.tabs.iter().flat_map(|t| t.read(cx).panes()).collect();
+        for pane in panes {
+            pane.update(cx, |p, cx| p.set_sftp_settings(settings, cx));
+        }
+    }
+
     /// Settings, Connection, "Reconnect after sleep or network change".
     /// While locked the vault cannot be read; reconnecting stays on.
     pub fn reconnect_enabled(&self, cx: &App) -> bool {
@@ -308,6 +319,7 @@ impl HolonetApp {
         &mut self,
         id: HostId,
         size: GridSize,
+        opening: (PaneMode, Remembered),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Pane>> {
@@ -325,9 +337,10 @@ impl HolonetApp {
             keep_alive: data.settings.connection.keep_alive_for(&host),
             terminal: data.settings.terminal.clone(),
             fallback_wait: data.settings.connection.fallback_wait.duration(),
+            sftp: data.settings.sftp.clone(),
         };
         let jumps = crate::hops::jumps(data, &host);
-        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, window, cx));
+        let pane = cx.new(|cx| Pane::new(app, host, key, jumps, runtime, limits, size, opening, window, cx));
         cx.subscribe_in(&pane, window, |this, pane, event: &SessionEvent, window, cx| match event {
             SessionEvent::Close => this.close_pane(pane, window, cx),
             SessionEvent::ReviewKnownHost => {
@@ -372,25 +385,39 @@ impl HolonetApp {
                 keep_alive: data.settings.connection.keep_alive_for(&host),
                 terminal: data.settings.terminal.clone(),
                 fallback_wait: data.settings.connection.fallback_wait.duration(),
+                sftp: data.settings.sftp.clone(),
             };
             pane.update(cx, |p, cx| p.retry_with(host, key, jumps, limits, cx));
             self.select(Some(index), window, cx);
             return;
         }
+        self.open_tab(id, (PaneMode::Terminal, Vec::new()), window, cx);
+    }
+
+    /// Open an SFTP tab for a saved host (Open SFTP, Open SFTP here, the
+    /// picker). `remembered` carries a terminal's typed secrets.
+    pub fn open_files(&mut self, id: HostId, remembered: Remembered, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(id, (PaneMode::Files, remembered), window, cx);
+    }
+
+    fn open_tab(&mut self, id: HostId, opening: (PaneMode, Remembered), window: &mut Window, cx: &mut Context<Self>) {
         // Estimate the terminal size from the window.
         let viewport = window.viewport_size();
         let size = GridSize {
             cols: ((f32::from(viewport.width) - 56. - 16. - 32.) / 7.8).max(20.) as usize,
             rows: ((f32::from(viewport.height) - 44. - 60. - 16. - 40. - 40. - 28.) / 20.8).max(5.) as usize,
         };
-        let Some(pane) = self.new_pane(id, size, window, cx) else { return };
+        let Some(pane) = self.new_pane(id, size, opening, window, cx) else { return };
         let app = cx.entity().downgrade();
         let tab = cx.new(|cx| Tab::new(app, pane, cx));
         // The title bar shows each tab's name and state dot.
         cx.observe(&tab, |_, _, cx| cx.notify()).detach();
-        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| {
-            let TabEvent::Split { axis, host } = event;
-            this.split(tab, *axis, *host, window, cx);
+        cx.subscribe_in(&tab, window, |this, tab, event: &TabEvent, window, cx| match event {
+            TabEvent::Split { axis, host } => this.split(tab, *axis, *host, window, cx),
+            TabEvent::OpenFiles { host, remembered } => {
+                let (host, remembered) = (*host, remembered.clone());
+                this.open_files(host, remembered, window, cx);
+            }
         })
         .detach();
         self.tabs.push(tab);
@@ -406,7 +433,8 @@ impl HolonetApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !tab.read(cx).can_split() {
+        // An SFTP tab is one view; it does not split.
+        if !tab.read(cx).can_split() || tab.read(cx).is_files(cx) {
             return;
         }
         let active = tab.read(cx).active_pane().clone();
@@ -419,7 +447,9 @@ impl HolonetApp {
             Axis::Right => GridSize { cols: (size.cols / 2).max(20), rows: size.rows },
             Axis::Down => GridSize { cols: size.cols, rows: (size.rows / 2).max(5) },
         };
-        let Some(pane) = self.new_pane(host.unwrap_or(same), size, window, cx) else { return };
+        let Some(pane) = self.new_pane(host.unwrap_or(same), size, (PaneMode::Terminal, Vec::new()), window, cx) else {
+            return;
+        };
         tab.update(cx, |t, cx| t.split_active(axis, pane, window, cx));
         cx.notify();
     }
@@ -428,10 +458,32 @@ impl HolonetApp {
         self.active.and_then(|i| self.tabs.get(i)).cloned()
     }
 
+    /// Transfers that closing this tab would stop (SFTP tabs).
+    fn running_transfers(tab: &Entity<Tab>, cx: &App) -> usize {
+        tab.read(cx).panes().iter().map(|p| p.read(cx).unfinished_transfers(cx)).sum()
+    }
+
+    /// Ask "Close anyway?" when the tab still has transfers; true if asked.
+    fn ask_before_closing(&mut self, tab: &Entity<Tab>, cx: &mut Context<Self>) -> bool {
+        if Self::running_transfers(tab, cx) == 0 {
+            return false;
+        }
+        self.closing = Some(tab.clone());
+        cx.notify();
+        true
+    }
+
     /// Close one pane; its tab closes with its last pane.
     fn close_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|t| t.read(cx).contains(pane)) else { return };
-        pane.update(cx, |p, _| p.disconnect());
+        // An SFTP tab is its one pane.
+        if self.ask_before_closing(&self.tabs[index].clone(), cx) {
+            return;
+        }
+        pane.update(cx, |p, cx| {
+            p.stop_transfers(cx);
+            p.disconnect()
+        });
         let tab = self.tabs[index].clone();
         if tab.update(cx, |t, cx| t.remove(pane, window, cx)) {
             self.close_tab_at(index, window, cx);
@@ -440,14 +492,27 @@ impl HolonetApp {
         }
     }
 
-    /// Close a whole tab and every pane in it.
+    /// Close a whole tab and every pane in it, asking first while an SFTP
+    /// tab still has transfers.
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(index).cloned()
+            && self.ask_before_closing(&tab, cx)
+        {
+            return;
+        }
+        self.close_tab_now(index, window, cx);
+    }
+
+    fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
         let tab = self.tabs.remove(index);
         for pane in tab.read(cx).panes() {
-            pane.update(cx, |p, _| p.disconnect());
+            pane.update(cx, |p, cx| {
+                p.stop_transfers(cx);
+                p.disconnect()
+            });
         }
         let next = match self.active {
             Some(a) if a == index => {
@@ -501,6 +566,13 @@ impl HolonetApp {
                     // Deferred: connecting reads the workspace, which may be mid-update.
                     let app = cx.entity();
                     window.defer(cx, move |window, cx| app.update(cx, |app, cx| app.connect(id, window, cx)));
+                }
+                HostPickerEvent::OpenFiles(id) => {
+                    let id = *id;
+                    let app = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| app.open_files(id, Vec::new(), window, cx))
+                    });
                 }
                 HostPickerEvent::NewHost => {
                     this.show_vault(window, cx);
@@ -592,7 +664,7 @@ impl Render for HolonetApp {
                     TabInfo {
                         id: SharedString::from(format!("session-{i}")).into(),
                         name: t.name(cx),
-                        kind: TabKind::Terminal,
+                        kind: if t.is_files(cx) { TabKind::Sftp } else { TabKind::Terminal },
                         state: t.state(cx),
                         color: theme::no_group(),
                         active: self.active == Some(i),
@@ -643,6 +715,53 @@ impl Render for HolonetApp {
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(picker),
                 )
+        });
+        // "n transfers are still running. Close anyway?"
+        let closing = self.closing.clone().filter(|_| unlocked).map(|tab| {
+            let n = Self::running_transfers(&tab, cx);
+            let title = if n == 1 {
+                "1 transfer is still running".to_string()
+            } else {
+                format!("{n} transfers are still running")
+            };
+            let keep = cx.listener(|this, _, _, cx| {
+                this.closing = None;
+                cx.notify();
+            });
+            modal(
+                "close-sftp-tab",
+                px(460.),
+                dialog(
+                    true,
+                    title,
+                    format!(
+                        "Closing {} stops {}, and the queue goes with the tab. Close anyway?",
+                        tab.read(cx).name(cx),
+                        if n == 1 { "it" } else { "them" }
+                    ),
+                )
+                .child(dialog_buttons([
+                    Button::secondary("close-keep", "Keep the tab").on_click(keep),
+                    Button::new("close-anyway", "Close tab", ButtonKind::DestructiveFill).on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.closing = None;
+                            if let Some(index) = this.tabs.iter().position(|t| *t == tab) {
+                                this.close_tab_now(index, window, cx);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                ])),
+                {
+                    let app = cx.entity().downgrade();
+                    move |_, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.closing = None;
+                            cx.notify();
+                        });
+                    }
+                },
+            )
         });
         let (keys, clicks, moves) = (self.last_input.clone(), self.last_input.clone(), self.last_input.clone());
         div()
@@ -701,5 +820,6 @@ impl Render for HolonetApp {
             .child(title_bar)
             .child(div().flex_1().min_h_0().relative().child(body))
             .children(picker)
+            .children(closing)
     }
 }

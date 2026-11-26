@@ -1,11 +1,14 @@
 //! `holonet --gallery`: every shared control in every state, inside the app
 //! shell, for checking against docs/design (milestone 2, phase 3; the
-//! Keychain controls from milestone 4).
+//! Keychain controls from milestone 4, the SFTP screen's from milestone 5).
 
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, px};
 
 use crate::shell::{NavEntry, SideNav, TabInfo, TabKind, TabState, TitleBar};
 use crate::theme::{self, TypeStyles};
+use crate::ui::files::{
+    FileRow, breadcrumbs, check_box, file_header, file_row, nav_button, permissions_grid, progress_bar, selection_bar,
+};
 use crate::ui::{
     Button, ButtonKind, CalloutKind, Checkbox, Segmented, Select, SelectEvent, Tag, TextField, TextFieldEvent, callout,
     code_box, dialog, dialog_buttons, field, fieldset, group_square, key_values, modal, section_label,
@@ -39,6 +42,9 @@ pub struct Gallery {
     /// Keychain section: the selected table row and the import picks.
     kc_row: usize,
     picks: [bool; 2],
+    /// Files section: the selected rows and the permissions grid.
+    file_picks: [bool; 5],
+    mode_bits: [bool; 9],
     log: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -104,6 +110,8 @@ impl Gallery {
             active_tab: None,
             kc_row: 0,
             picks: [true, false],
+            file_picks: [false, true, true, false, false],
+            mode_bits: [true, true, true, true, false, true, false, false, false],
             log: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -445,6 +453,183 @@ impl Render for Gallery {
                 )
         };
 
+        let files = {
+            let rows: [(&'static str, gpui::Rgba, &str, &str, &str, &str); 5] = [
+                ("folder", theme::accent(), "assets", "", "22 Nov 2026", "rwxr-xr-x"),
+                ("folder", theme::group_violet(), "current", "", "21 Nov 2026", "rwxrwxrwx"),
+                ("file-code", theme::group_mint(), "index.html", "18.4 KB", "24 Nov 2026", "rw-r--r--"),
+                ("file-archive", theme::ink_soft(), "backup-2026-11.tar.gz", "1.2 GB", "1 Nov 2026", "rw-r-----"),
+                ("file-lock", theme::ink_muted(), ".env", "312 B", "12 Oct 2026", "rw-------"),
+            ];
+            let count = self.file_picks.iter().filter(|p| **p).count();
+            let all = count == rows.len();
+            let crumbs = ["/", "…", "www", "site", "releases"].map(SharedString::from).to_vec();
+            let on_crumb: crate::ui::IndexHandler = {
+                let entity = entity.clone();
+                std::rc::Rc::new(move |i, _, cx| entity.update(cx, |g, cx| g.note(format!("crumb {i}"), cx)))
+            };
+            let action = |id: &'static str, label: &'static str| {
+                let entity = entity.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    entity.update(cx, |g, cx| g.note(format!("{id}: {label}"), cx))
+                }
+            };
+            let actions = vec![
+                Button::primary("g-download", "← Download")
+                    .compact()
+                    .on_click(action("g-download", "Download"))
+                    .into_any_element(),
+                Button::secondary("g-rename", "Rename")
+                    .compact()
+                    .disabled(count != 1)
+                    .on_click(action("g-rename", "Rename"))
+                    .into_any_element(),
+                Button::secondary("g-permissions", "Permissions")
+                    .compact()
+                    .on_click(action("g-permissions", "Permissions"))
+                    .into_any_element(),
+                Button::secondary("g-copy-path", "Copy path")
+                    .compact()
+                    .on_click(action("g-copy-path", "Copy path"))
+                    .into_any_element(),
+                Button::new("g-delete", "Delete", ButtonKind::DestructiveOutline)
+                    .compact()
+                    .on_click(action("g-delete", "Delete"))
+                    .into_any_element(),
+                nav_button("g-clear".into(), "close", true, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |g, cx| {
+                            g.file_picks = [false; 5];
+                            cx.notify()
+                        })
+                    }
+                })
+                .into_any_element(),
+            ];
+            let select_all = div()
+                .id("g-files-all")
+                .cursor_pointer()
+                .child(check_box(all))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |g, cx| {
+                            g.file_picks = [!all; 5];
+                            cx.notify()
+                        })
+                    }
+                })
+                .into_any_element();
+            let list = rows.iter().enumerate().map(|(i, (glyph, color, name, size, modified, mode))| {
+                let entity = entity.clone();
+                file_row(
+                    ("g-file", i),
+                    FileRow {
+                        glyph,
+                        color: *color,
+                        name: SharedString::from(name.to_string()),
+                        size: SharedString::from(size.to_string()),
+                        modified: SharedString::from(modified.to_string()),
+                        permissions: Some(SharedString::from(mode.to_string())),
+                        selected: self.file_picks[i],
+                        checkable: true,
+                    },
+                )
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |g, cx| {
+                        g.file_picks[i] = !g.file_picks[i];
+                        cx.notify()
+                    })
+                })
+            });
+            let pane = div()
+                .flex()
+                .flex_col()
+                .bg(theme::ground())
+                .border_1()
+                .border_color(theme::line())
+                .rounded(theme::RADIUS_MD)
+                .overflow_hidden()
+                .child(div().h(px(2.)).bg(theme::group_violet()))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::SPACE_1)
+                        .px(px(10.))
+                        .py(theme::SPACE_2)
+                        .border_b_1()
+                        .border_color(theme::line())
+                        .child(nav_button("g-back".into(), "chevron-left", true, action("g-back", "Back")))
+                        .child(nav_button("g-up".into(), "chevron-up", true, action("g-up", "Up")))
+                        .child(nav_button("g-refresh".into(), "refresh", false, |_, _, _| {}))
+                        .child(nav_button(
+                            "g-new-folder".into(),
+                            "folder-plus",
+                            true,
+                            action("g-new-folder", "New folder"),
+                        ))
+                        .child(breadcrumbs("g", crumbs, on_crumb)),
+                )
+                .when(count > 0, |d| d.child(selection_bar(count, actions)))
+                .child(file_header(true, Some(select_all)))
+                .children(list)
+                .child(
+                    div()
+                        .m(theme::SPACE_2)
+                        .p(px(14.))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme::accent())
+                        .rounded(theme::RADIUS_MD)
+                        .bg(theme::card())
+                        .text_body_strong()
+                        .text_color(theme::accent())
+                        .flex()
+                        .justify_center()
+                        .child("Drop to upload into /srv/www/site/releases"),
+                );
+            let bar = |label: &'static str, percent: u8, color: gpui::Rgba| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(progress_bar(percent, color))
+                    .child(div().text_meta().text_color(theme::ink_muted()).child(label))
+            };
+            let bars = div()
+                .grid()
+                .grid_cols(2)
+                .gap(theme::SPACE_4)
+                .p(theme::SPACE_4)
+                .bg(theme::card())
+                .rounded(theme::RADIUS_LG)
+                .child(bar("Upload 62% · 48 MB/s · 12 s left", 62, theme::accent()))
+                .child(bar("Download 35% · 21 MB/s · 1 min left", 35, theme::group_violet()))
+                .child(bar("Paused at 40%", 40, theme::ink_faint()))
+                .child(bar("Waiting to reconnect at 88%", 88, theme::ink_faint()));
+            let on_bit: crate::ui::IndexHandler = {
+                let entity = entity.clone();
+                std::rc::Rc::new(move |i, _, cx| {
+                    entity.update(cx, |g, cx| {
+                        g.mode_bits[i] = !g.mode_bits[i];
+                        cx.notify()
+                    })
+                })
+            };
+            div().flex().flex_col().gap(theme::SPACE_4).child(pane).child(bars).child(
+                div()
+                    .w(px(460.))
+                    .p(theme::SPACE_5)
+                    .bg(theme::card())
+                    .rounded(theme::RADIUS_2XL)
+                    .border_1()
+                    .border_color(theme::line_strong())
+                    .child(permissions_grid(self.mode_bits, on_bit)),
+            )
+        };
+
         let log = div()
             .text_mono_small()
             .text_color(theme::ink_dim())
@@ -479,6 +664,7 @@ impl Render for Gallery {
                 .child(Self::section("Display", display))
                 .child(Self::section("Dialogs", dialogs))
                 .child(Self::section("Keychain", keychain))
+                .child(Self::section("Files", files))
                 .child(Self::section("Events", log)),
         );
 

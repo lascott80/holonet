@@ -13,6 +13,8 @@ holonet-model = { version = "0.1.0", path = "../holonet-model" }
 # rand 0.10 is the generator ssh-key 0.7 (inside russh) takes for key generation.
 rand = "0.10"
 russh = "0.65.4"
+# SFTP (milestone 5).
+russh-sftp = { version = "4.0.0", features = ["raw-string"] }
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 

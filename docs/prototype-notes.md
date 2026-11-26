@@ -1355,3 +1355,411 @@ Carried forward, not tested:
 - A jump host reached over Tailscale.
 - Chains of more than one jump host, live.
 - An identity whose key was deleted opens its form with the first key selected. This is the same issue fixed above for hosts; recorded for milestone 5.
+
+## Milestone 5, phase 0: spikes (25 Nov 2026)
+
+The plan is `docs/milestone-5-plan.md`. **Owner decisions:** dropping files from Explorer, New folder and Refresh are in scope, and each SFTP tab has its own connection (reusing a terminal's typed secrets for "Open SFTP here").
+
+The spike programs stay until phase 8: `crates/holonet-ssh/examples/m5_sftp.rs`, `crates/holonet-app/examples/m5_drag.rs`, `m5_local.rs`. `holonet-ssh` now depends on `russh-sftp` 4.0.0 with its `raw-string` feature, and `Session::open_sftp()` opens the subsystem (`request_subsystem(true, "sftp")`, then `SftpSession::new(channel.into_stream())`).
+
+### (a) `russh-sftp` 4.0.0 against the WSL server
+- **Version:** 4.0.0 is current. It is independent of russh (any stream), tested against russh 0.65.1, uses `jiff` 1.0 like Holonet, and pipelines 16 reads and 16 writes by default (`Config`).
+- **Without `raw-string`,** paths and names are `String`s, so a non-UTF-8 name cannot round-trip. With it, `SftpString` holds the bytes.
+
+| Check | Result |
+| --- | --- |
+| Open the subsystem | 40–300 ms (the first open after connecting is the slow one) |
+| List the home folder | 1–3 ms; attributes carry size, mode (type and permission bits) and mtime. **No user or group names** (SFTP v3 attributes only have numeric ids, and `russh-sftp`'s attributes left them empty here) |
+| 500 MB upload (`File`, 256 KB writes) | 1.8 s, **284 MB/s** (100 MB: 377 MB/s) |
+| 500 MB download | 3.0 s, **167 MB/s** (100 MB: 114 MB/s); contents matched |
+| Windows' OpenSSH `sftp` (`sftp.exe -b`), same 500 MB, same link | put 221 MB/s, get 63 MB/s (each including sign-in) |
+| Resumed upload: a third, closed, reopened with `WRITE` only, seek to the remote size, the rest | Matched |
+| Resumed download: half to a local file, then seek the remote file and append | Matched |
+| `set_metadata` permissions 0o640 | 664 → 640 |
+| Symbolic links | `symlink_metadata` says link; `metadata` follows (file or folder); `read_link` gives the target; `read_dir` reports links as links (not their targets' type), so the pane must `stat` a link to know whether it opens as a folder |
+| **`symlink` argument order** | OpenSSH's server takes `SSH_FXP_SYMLINK`'s paths **reversed** (a long-known OpenSSH quirk). Spec order created `~/small.txt` and `~/sub` as links on the test server; they were removed. Passing the target first worked |
+| `read_dir` of 5,000 files | 87 ms |
+| Non-UTF-8 name (`caf\xe9.txt`, made by the shell) | Listed with its raw bytes, shown lossily as "caf�.txt", and `stat` by the raw bytes works |
+
+Everything the spike made was removed from the server and this PC.
+
+### (b) GPUI drag and drop on Windows
+`m5_drag` shows two lists. Rows use `on_drag(value, preview)`, and the lists use `drag_over::<T>` for the outline and `on_drop::<T>`.
+
+| Check | Result |
+| --- | --- |
+| Row dragged from one list to the other (real mouse input) | Dropped, both directions; the preview follows the pointer and the target list outlines while the row is over it |
+| Row dropped back on its own list | Delivered, and ignored by the handler (the handler has to check the source) |
+| **Files and a folder dragged from Explorer onto "Host" (the owner)** | `on_drop::<ExternalPaths>` received three full paths (the folder as one path), and the list outlined during the drag. Short 8.3 names arrive as long paths |
+| Dragging out of the app to Explorer | Not tried: GPUI 0.2.2 has no drag source on Windows (no `DoDragDrop`) |
+
+### (c) Recycle Bin
+`SHFileOperationW` with `FO_DELETE | FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI` moved a file and a folder with a file inside to the Recycle Bin in 75 ms. Both left the folder, and both appeared in the Recycle Bin (`Shell.Application` namespace 10). The two test items were then removed from the Recycle Bin, and nothing else was touched. `windows-sys` gains `Win32_Storage_FileSystem` and `Win32_UI_Shell`.
+
+### (d) Drives and hidden files
+- `GetLogicalDrives` with `GetDriveTypeW` and `GetVolumeInformationW` listed `C:\` as fixed, "Local Disk", in 0.1 ms.
+- The profile folder holds 28 shown entries and 19 with the hidden or system attribute (`AppData` and its old junctions among them).
+- 16 entries start with a dot but have no hidden attribute (`.cargo`, `.ssh` and the like). **The local pane treats only the attribute as hidden** (Windows' own meaning), and the host's pane treats dot-names as hidden.
+
+fmt, clippy and the unit tests pass.
+
+## Milestone 5, phase 1: model and settings (25 Nov 2026)
+
+- **`holonet-model`:**
+  - `Host` gains `sftp_folder` ("Default SFTP folder"; `None` means the home folder) and `sftp_local_folder` (the folder on this PC last used for the host).
+    - The plan had a separate map for the second. On the host it goes when the host is deleted, and duplicates with it.
+  - `Settings` gains `sftp: SftpSettings`:
+    - `on_conflict` (Ask, Overwrite, Keep both)
+    - `at_once` (2, 4, 8, with `count()`)
+    - `show_hidden`
+    - The defaults are Ask, 2 and on, the values `Settings.dc.html` shows.
+  - A test loads a milestone 4 vault (schema 2, no SFTP fields) with these defaults and round-trips it.
+- **Host form, Connection:** "Default SFTP folder" (mono, placeholder "Home directory") beside Jump host, as `NewHost.dc.html` draws them. Empty saves `None`.
+- **Settings:**
+  - A new SFTP section with its own chip: "When a file already exists" and "Transfers at once" selects, and "Show hidden files".
+  - The help lines say what each does; the hidden-files line says hidden means the attribute on this PC and dot-names on hosts.
+
+**Checked live** (the phase 4 test vault):
+- The section showed Ask, 2 and ticked.
+- Changed to Keep both, 8 and unticked, and set behind-a's Default SFTP folder to `/tmp`.
+- After restarting Holonet, all four had kept their new values.
+
+fmt, clippy, and the unit tests (35, 16, 12, 7, 13 and 16) pass.
+
+## Milestone 5, phase 2: file operations (25 Nov 2026)
+
+**New crate `holonet-files`** (no window; depends on `holonet-ssh`):
+- `Entry`:
+  - name to show, and the raw name bytes
+  - `Kind`: Folder, File, `Link { folder, broken }`, Other
+  - size, modified, permission bits, uid, gid, hidden
+  - `symbolic_mode()` gives `-rwxr-x---`
+- `sort` puts folders and links to folders first, then names ignoring case.
+- `RemotePath` is bytes: `join`, `parent`, `file_name`, and `components` for breadcrumbs. Its `Display` is lossy.
+- `FileError` covers NotFound, PermissionDenied, AlreadyExists, Lost, TimedOut, and Other. Each has interface text, and each maps from `russh-sftp`'s status codes and from `std::io`.
+
+**`remote::Remote`** (over `Session::open_sftp`):
+- `home` (canonical `.`) and `canonicalize` (relative paths start at home)
+- `list`: a link is `stat`ed to learn whether it opens as a folder or is broken
+- `entry`, `exists`
+- `rename` and `create_folder`: both refuse to replace something
+- `remove`: recursive, never following links, returns the count
+- `set_mode`: permission bits only
+- `symlink` and `read_link`
+- **Symlink order:** OpenSSH-style servers are recognised by the `statvfs@openssh.com` extension (`fs_info` returns `Some`), and get the target first.
+- **Hidden** on a host means a leading dot.
+
+**`local`:**
+- `drives()` (with `Drive::display()`, as in "Local Disk (C:)") and `profile()`
+- `list`, `entry`, `rename`, `create_folder`
+- `recycle(paths)`: `SHFileOperationW` with undo, no Windows confirmation, and an error if anything was aborted
+- **Hidden** on this PC means the hidden or system attribute.
+
+**Tests:**
+- **Unit (7):**
+  - sorting
+  - remote paths, including non-UTF-8 bytes and breadcrumbs
+  - symbolic modes
+  - local list, rename, create and AlreadyExists
+  - hidden follows the attribute, not the dot
+  - drives include `C:\`
+  - Recycle Bin, gated by `HOLONET_TEST_RECYCLE=1` because it puts two items there. It ran once and passed, and its two items were then removed from the Recycle Bin.
+- **WSL (5),** `cargo test -p holonet-files --test wsl`:
+  - kinds, links to a folder, a file and nowhere, hidden files, sizes and modes
+  - folder create, rename and AlreadyExists, and recursive remove (7 items, with a link to `/etc` removed and not followed)
+  - `set_mode`, and a link made in the server's order, with the home folder checked for stray links (none)
+  - a non-UTF-8 name listed by its bytes and renamed by them
+  - NotFound, PermissionDenied (`/root`), and relative canonicalisation
+  - All passed on the first run. Each test uses its own folder and removes it, and the test account's home folder was left as it was.
+
+fmt, clippy, and the unit tests pass (`holonet-files` 7, the others as before).
+
+## Milestone 5, phase 3: transfer engine (25 Nov 2026)
+
+New modules in `holonet-files`, still without a window.
+
+**`format`:** sizes, rates and time left as drawn ("940 B", "48.2 MB", "4.2 MB/s", "4 s left", "3 min left").
+
+**`plan`:** `plan_upload` and `plan_download` expand the selected items into the folders to create and the files to copy.
+- **Conflicts** are the selected items whose names already exist at the destination; `conflicts()` lists them for the popup. `resolve(choice)` applies the choice to all of them:
+  - **Overwrite** replaces files and merges folders.
+  - **Keep both** takes the first free name: "index (2).html", "site (1)", ".bashrc (1)".
+  - **Skip** drops those items and lists them as skipped.
+- **Links:** a link to a file is copied as the file; a link to a folder is skipped with its reason. There are no loops, and Windows cannot make the link anyway.
+- **Names Windows cannot use** are skipped on download with their reason: reserved characters, a trailing dot or space, or `CON`/`COM1`-style names.
+- `create_folders` makes them parents first, reusing existing ones. `jobs()` gives the files to queue.
+
+**`transfer`:** `upload` and `download` copy one file in 256 KB chunks, checking a pause or cancel flag between chunks.
+- **Downloads** write to `name.holonet-part` and rename it over the target when complete.
+- **Resume:**
+  - A resumed download appends to its part file.
+  - A resumed upload continues from the host's size.
+  - Either happens only if the source still matches the `Stamp` (size and modification time) taken when the copy first started. Otherwise it fails with "The source changed since the transfer started."
+- **At the end:** the sizes must match, and the modification time is carried over.
+- **Telling a refusal from a lost connection:** SFTP file handles report both as plain I/O errors. `classify` asks the server for `realpath(".")` with a 5 s limit. No answer means the connection went; an answer means a refusal, shown with the server's message.
+
+**`engine`:**
+- `Queue` is the plain state:
+  - start order up to the limit
+  - the summary ("2 active · 1 paused · 2 queued", "1 waiting to reconnect · 1 failed", "Idle")
+  - a rate smoothed over samples at least 0.25 s apart, and "64% · 4.2 MB/s · 4 s left"
+- `Engine` runs it on Tokio:
+  - `add`, `pause`, `resume`, `retry` (from nothing), `remove` (cancels an active copy and deletes its part file), `clear_finished`, `set_at_once`
+  - `set_remote`; `snapshot` and `summary` for the interface
+  - events: `Changed`, at most every 100 ms per active copy, and `ConnectionLost`
+- **A copy that loses the connection is Interrupted, not failed.** The engine then stops starting copies until `set_remote` gives it a new connection, which queues interrupted copies again.
+
+**Tests:**
+- **Unit (8 new, 15 in the crate):** formatting, Keep both names, Windows-unsafe names, conflict resolution paths, queue order and summary, the rate and progress text, part paths.
+- **WSL** (`cargo test -p holonet-files --release --test transfer`, 3 tests):
+
+| Test | Result |
+| --- | --- |
+| A folder (with an empty folder and a nested one) and a file uploaded where both already exist | Conflicts listed; Keep both made `site (1)` and `notes (1).txt`; Overwrite merged `site` (kept `old.txt`) and replaced `notes.txt`; Skip sent nothing and listed two skipped; the folder downloaded back matched byte for byte, empty folder included, no part file left |
+| Pause and resume a 192 MB upload | Paused part-way ("1 paused"), resumed, and matched |
+| Change the source while paused | Failed with "The source changed since the transfer started."; Retry started over and matched the new contents |
+| **Kill the connection mid-download** (`kill -9` the connection's own sshd process from a second connection) | Interrupted, `ConnectionLost`, "1 waiting to reconnect". The part file kept the bytes so far; handed the second connection, the copy resumed from exactly those bytes and matched. Three runs killed it at 26, 40 and 53 MB of 96 MB |
+
+- **A race in the first version of the pause test:** a 64 MB upload finishes in about 0.2 s, so it sometimes completed before the pause landed. Two runs failed this way when the tests ran in parallel. The files are now larger (192 MB and 128 MB), the pause comes at the first progress report, and three full runs then passed. The failed runs left two temp folders here, which were removed. The server's home folder was clean after every run.
+
+fmt, clippy, and the unit tests (`holonet-files` 15, the others as before) pass.
+
+## Milestone 5, phase 4: the SFTP tab (25 Nov 2026)
+
+An SFTP tab is a tab with one pane in Files mode. It reuses the terminal pane's whole connection path: routes, jump hosts, host key checks, sign-in prompts, the failed states and reconnect.
+
+**`session.rs`:**
+- `Pane::new` takes a `PaneMode` (Terminal or Files) and the remembered secrets.
+- After sign-in, a Files pane opens SFTP (`Remote::open`) instead of a shell.
+- The first connection makes a `FilesView`. Reconnects hand the same view the new `Remote`, so both sides keep their folders.
+- **There is no shell to report a dropped connection,** so `watch_lost` waits on the new `Session::closed()` in `holonet-ssh`. That polls `is_closed()` every 250 ms and returns the lost reason, or `None` for a close on purpose. On a loss, the view drops its `Remote` and the pane runs the usual `on_lost` and reconnect.
+- A Files pane shows "Connected" where a terminal shows its size, and "SFTP" in the status bar in place of the terminal type.
+
+**`app.rs` and `tab.rs`:**
+- Tab creation moved into `open_tab(id, (mode, remembered))`. `connect` opens a terminal; `open_files` opens SFTP.
+- `Tab::is_files` gives the title bar its folder icon (`TabKind::Sftp`).
+- It hides Split and Find, and Split, Find and their shortcuts do nothing in an SFTP tab.
+
+**Entry points:**
+- The host detail has "Open SFTP" under Connect.
+- A terminal tab's header has "Open SFTP here". It opens the host the active pane shows, with that pane's typed secrets for each hop, so nothing is asked again.
+- In the host picker, each row has an SFTP button, and Ctrl Enter opens the highlighted host. A hint under the list says so.
+
+**`files_view.rs`** (phase 4 version):
+- Two panes: "This PC" and the host.
+  - This PC starts in the host's last local folder or the user profile.
+  - The host starts in its "Default SFTP folder" (through `realpath`, falling back to home if it cannot be used) or home.
+- Each pane has a header and plain rows with an icon, a name and a size.
+- `entry_icon` picks the icon for each kind and extension. Seven new file icons from the same Lucide set: file, link, archive, code, text, config and lock.
+- Browsing, selection and dragging come in phase 5.
+
+**Check (WSL server, release build):**
+
+| Test | Result |
+| --- | --- |
+| Open SFTP from behind-a's detail (through jump-a, Default SFTP folder `/tmp`) | Connected; status bar "Through jump-a … SFTP"; the host side listed `/tmp` |
+| Drop the connection: `kill -9` both hops' sshd session processes | Reconnected by itself within about a second, with new server processes; still in `/tmp` |
+| "Open SFTP here" from a wsl-a terminal | A second tab with the folder icon opened without asking for the password; home listed |
+| Picker: Ctrl Shift T, type "wsl-b", Ctrl Enter | An SFTP tab for wsl-b |
+
+- **Killing only the `[priv]` sshd processes** left the unprivileged session processes running, and the connection stayed up. Killing the `holotest` ones dropped it.
+- **The reconnecting state was too brief to capture** here; it is the milestone 3 view with the files view under it.
+
+fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 5: file panes (25 Nov 2026)
+
+`files_view.rs` now draws Sftp.dc.html's two panes and a first transfers strip.
+
+**Each side:**
+- **Places:**
+  - "This PC" lists the drives; opening one goes to its root.
+  - A folder on this PC, or a folder on the host.
+- **Header and navigation:**
+  - The header has the title and a Filter box. `TextField` gained `compact()` (36 px) and `leading_icon()` for it.
+  - Back, Up and Refresh. Refresh is in phase 7's list, but costs nothing here.
+  - Breadcrumbs. A long path keeps the first crumb and the last three; "…" opens the folder before those.
+  - The Bookmarks button drawn there has no milestone yet, so it is left out.
+- **Columns:** Name, Size, Modified ("24 Nov 2026 16:02" here, "24 Nov 2026" on the host), and Permissions on the host. Folders come first.
+- **The list:** a `uniform_list`, so only visible rows are drawn. Listings load off the UI thread: this PC through `spawn_blocking`, the host through SFTP. An older answer is dropped when a newer load has started.
+- **States:**
+  - Loading.
+  - The server's message in amber ("Permission denied.").
+  - "This folder is empty."
+  - "Nothing here matches "…"".
+  - A folder of only hidden files says so and points at Settings.
+- **Hidden files:** Settings' switch applies to both sides, including open tabs: `HolonetApp::apply_sftp_settings` reaches each pane, as terminal settings already do. Transfers at once applies the same way.
+- **Links:** a link to a folder opens like a folder (violet folder icon). Other links show the link icon.
+- **The local folder** is saved on the host (`sftp_local_folder`) when it changes, so the next SFTP tab for that host starts there. Checked across app restarts.
+
+**Selection:**
+- A click toggles a row, Shift click adds the range from the last click, and the header box selects or clears every shown row. A filter drops selected rows it hides.
+- The action bar shows the count, then Upload → or ← Download to the other side's current folder, Copy path (one path per line), and Clear.
+- Rename, Permissions and Delete come in phase 7, so they are not shown yet.
+- **Double click opens the row the first click hit.** The first click selects the row, the action bar appears, and the rows move down by its height. Using the row now under the pointer, a test double click on `holonet-p5` opened `.ssh`, the row above. The pane's mouse-down handler now opens the remembered row instead.
+
+**Drag:**
+- A row drags the selection when it is part of it, otherwise itself. The chip under the pointer shows the name or "n items".
+- **Drop targets:**
+  - Dropping on the other pane uses its current folder.
+  - Dropping on a folder row uses that folder; the row highlights.
+  - The host's pane also takes `ExternalPaths` from Explorer.
+- A target outlines in dashed accent, and "Drop to upload into /…" floats over the bottom of the pane. The first version put that banner above the list, which moved the rows mid-drag, so a drop meant for a folder row landed on the pane.
+- **Transfers:** plan (`plan_upload` or `plan_download`), apply Settings' conflict choice, create folders, queue on the tab's `Engine`.
+  - Until phase 6's conflict popup, "Ask" skips names that already exist.
+  - Skipped items and failures show in the transfers strip ("Skipped 2 items, such as link-to-folder: Links to folders are not copied.").
+  - Both panes refresh 0.4 s after transfers finish.
+- **The transfers strip** shows "Transfers", the engine's summary, or the drawn empty text. Phase 6 adds the rows and their controls.
+
+**Reconnecting:** an SFTP tab's reconnect footnote now reads "Both folders are kept. Transfers continue after reconnecting." The host side keeps its listing, and Refresh and drops are disabled until the connection is back.
+
+**Check (WSL server, release build, throwaway folders `%LOCALAPPDATA%\Temp\holonet-p5` and `~/holonet-p5`, both removed afterwards):**
+
+| Test | Result |
+| --- | --- |
+| Browse with the filter and double clicks to the test folder, with hidden files switched on in Settings while the tab was open | Both sides followed the switch; AppData, then Local, Temp and the folder opened |
+| Restart the app and open SFTP again | This PC started in the test folder |
+| Drag a folder (with a subfolder) and a file to the host's pane | Banner and outline shown; `site/`, `site/css/a.css`, `site/index.html` and `deploy.sh` arrived; the host's list refreshed |
+| Drag a host file onto the local `site` folder row | Landed in `site\notes.txt` |
+| A name that exists, with Settings on Keep both | `notes (1).txt` on the host |
+| ← Download of six items: an empty folder, a folder link, a broken link, a folder and two files that exist here | `existing\` (empty), `site (1)\` with its contents, `deploy (1).sh` and `notes (1).txt`; "Skipped 2 items, such as link-to-folder: …" |
+| Open `link-to-folder` on the host, then Back | Entered the link's folder, then returned |
+| Shift click from the first row to the last, then Copy path | Six rows selected, the header box checked, and the clipboard held the six host paths |
+| "This PC" crumb | Local Disk (C:) listed; Up disabled |
+| Kill the connection's server processes | Reconnecting banner over both panes with their folders kept; reconnected in about a second |
+| A file dragged from another app (a WinForms `DoDragDrop` with a file list, Explorer's format) onto the host's pane | Dashed outline while over it; the file arrived on the host |
+
+fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 6: queue panel and conflicts (25 Nov 2026)
+
+**The queue panel** (Sftp.dc.html, TransferRow.md) replaces phase 5's strip.
+- **Header:** "Transfers", the engine's summary ("1 active", "1 paused", "1 waiting to reconnect", "1 failed", "Idle"), the last note, and "Show finished (n)" / "Hide finished (n)" once anything has finished.
+- **Rows** are a `uniform_list`, so a folder of thousands of files stays smooth. Up to 4.5 rows show before the list scrolls. Each row has the name and route ("This PC → wsl-a"), a 4 px bar and its text, and a remove button.
+- **Each state:**
+  - Active: accent bar for uploads, violet for downloads; "64% · 4.2 MB/s · 4 s left"; Pause.
+  - Paused: "Paused at n%"; Resume.
+  - Queued: "Queued".
+  - Interrupted: "Waiting to reconnect at n%". It resumes by itself when the tab reconnects.
+  - Failed: amber bar and "Failed: …"; Retry.
+  - Finished: "Uploaded to wsl-a · 3.0 GB" or "Downloaded to This PC · 9 B".
+- The view keeps a snapshot of the engine's jobs, taken on each engine event, so drawing does not lock the queue.
+
+**Conflicts:**
+- A transfer is planned first. If any top-level names already exist and Settings says Ask, the plan waits in the conflict popup.
+- **The popup:** "mixed already exists" or "n items already exist", "Uploading to /… on wsl-a." or "Downloading to this PC.", the list of names, then Overwrite, Keep both, Skip and Cancel all, and the drawn help line. The backdrop cancels.
+- **Overwrite and Keep both in Settings** go straight to the queue, as phase 5 did.
+- The popup is placed inside the SFTP tab, so other tabs stay usable.
+- **Layout:** the card needs a definite width (460 px). With `w_full` inside the modal, Taffy sized the wrapped text and the `flex_1` buttons from their content: the note ran out of the card and the buttons overlapped. This is milestone 4's Settings lesson again. The design's wrapping row of four buttons became three in a row with Cancel all under them.
+
+**Check (WSL server, release build, Settings set to Ask; throwaway folders `%LOCALAPPDATA%\Temp\holonet-p6` and `~/holonet-p6`, removed afterwards):**
+- **The test folder:** `mixed/` had five small files, `sub/deep.txt` and a 3 GB `big.bin`.
+- **The host's copy:** an older `small1.txt` and a `remote-only.txt`.
+
+| Test | Result |
+| --- | --- |
+| Drag `mixed` to the host | Popup "mixed already exists", "Uploading to /home/holotest/holonet-p6 on wsl-a."; Overwrite merged: `small1.txt` replaced, `remote-only.txt` kept, `sub/` and the rest added. big.bin went at about 450 MB/s and finished before Pause could be clicked |
+| Drag the host's `mixed` back to this PC | Popup "Downloading to this PC."; Keep both made `mixed (1)` with all nine items |
+| Pause during that download | "Paused at 10%"; Resume continued (about 210–350 MB/s) |
+| Kill the connection's server processes mid-download | "1 waiting to reconnect", "Waiting to reconnect at 30%"; the tab reconnected and the copy carried on from there to the end. 3,221,225,472 bytes and no part file left |
+| Show finished | Fifteen finished rows with direction and size; Hide finished folds them |
+| Pause a download, append to the host's file, Resume | "Failed: The source changed since the transfer started." in amber; Retry started over and fetched 3,221,225,480 bytes |
+
+**Still to come:** closing an SFTP tab with transfers still running should ask "n transfers are still running. Close anyway?" (milestone 5 plan, "States to design"). It is added to phase 7.
+
+fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 7: rename, delete, permissions and new folder (25 Nov 2026)
+
+**Where they open:**
+- The action bar has, in the design's order: Upload or Download, Rename (one item only), Permissions (host only), Copy path, Delete (amber outline), and Clear.
+- Each pane's navigation row has New folder after Refresh. The icon is `folder-plus`, the folder icon with the `plus` cross; New folder is not drawn in the design.
+- Each is disabled when it cannot act: "This PC" itself, or the host while reconnecting.
+
+**The popups** are drawn from Sftp.dc.html. They share a 460 px card (the phase 6 width lesson) and open inside the SFTP tab.
+- **Rename and New folder:**
+  - "Rename on wsl-a" or "New folder on This PC", with a mono name field. Enter applies it and Escape cancels.
+  - **The note under the field** says "Renames a.txt" or "Creates it in C:\…".
+  - **Problems, shown in amber as you type:**
+    - "Enter a name without a slash."
+    - "Windows cannot use this name." (this PC: `\`, reserved characters, `CON`-style names).
+    - "Something with this name already exists in this folder."
+- **Delete:**
+  - A warning card: "Delete 2 items from This PC?" or "… from wsl-a?".
+  - The note: "These are moved to the Recycle Bin on this PC." or "Files deleted over SFTP do not go to a recycle bin. This cannot be undone."
+  - The names, then Cancel and the amber Delete.
+  - On the host, folders go with their contents.
+- **Permissions (host only):**
+  - "Permissions for y.sh" with its path, or "for n items" with "The same permissions are applied to every selected item."
+  - The Read / Write / Run grid for Owner, Group and Everyone else, the octal and symbolic values, and Cancel / Apply.
+  - The grid starts from the first item's mode. Applying sets the nine bits on every selected item and keeps each item's setuid, setgid and sticky bits.
+  - **The drawn Owner and Group fields are left out.** SFTP v3 only gives numeric ids, and the plan's default is to set the mode only.
+- **While waiting:** the work runs off the UI thread and the buttons are disabled. A refusal shows in the popup in amber, and the popup stays open. Success closes it, clears the selection, refreshes the side, and puts a note in the transfers header ("Changed the permissions of 1 item.").
+
+**Closing an SFTP tab with transfers** (plan, "States to design"):
+- The tab's ×, Ctrl Shift W and closing its pane now ask first, in a warning dialog: "1 transfer is still running" / "n transfers are still running", "Closing wsl-a stops it, and the queue goes with the tab. Close anyway?", with Keep the tab and Close tab.
+- Paused, queued and interrupted transfers count too.
+- **Close tab** removes every unfinished job before disconnecting. The engine cancels active copies, and a cancelled download's part file is deleted when the copy stops.
+
+**Check (WSL server, release build, throwaway folders, removed afterwards):**
+
+| Test | Result |
+| --- | --- |
+| New folder on this PC: `a.txt`, then `bad:name`, then `made here` + Enter | "Something with this name already exists in this folder.", then "Windows cannot use this name.", then the folder was created |
+| Rename `a.txt` to `renamed.txt` on this PC | Renamed |
+| Delete `made here` and `b.txt` on this PC | Both in the Recycle Bin, original location the test folder. Those two `$R`/`$I` entries were then removed by path |
+| New folder `newdir` on the host | Created |
+| Rename `x.txt` to `x2.txt` on the host | Renamed |
+| Permissions on `y.sh`: 644 → owner and group run, others no read | Grid showed 750 `rwxr-x---`; `stat` on the server: 750 |
+| Delete `d/` (with `d/e/z`) and `newdir/` on the host | Both gone |
+| Download a 3 GB file, then click the tab's × | "1 transfer is still running"; Keep the tab kept it |
+| Pause it at 73%, then Ctrl Shift W, then Close tab | Asked again (paused counts); the tab closed and the 2.3 GB part file was deleted |
+
+**A test-harness problem, not Holonet's:** the phase 5 Shift click test left Shift held down in Windows. The unlock field then got "CORRECT HORSE BATTERYWSL_A", and the next runs looked like a broken unlock. Releasing the key with `keybd_event` fixed it.
+
+fmt, clippy and all workspace tests pass.
+
+## Milestone 5, phase 8: wrap-up (26 Nov 2026)
+
+**Removed:**
+- The phase 0 spikes: `holonet-ssh`'s `m5_sftp` and `holonet-app`'s `m5_drag` and `m5_local` examples. `holonet-app` has no examples left.
+- The `Win32_Storage_FileSystem` and `Win32_UI_Shell` features of `holonet-app`'s `windows-sys`, which only `m5_local` used. The Recycle Bin code lives in `holonet-files`.
+
+**Gallery:**
+- The SFTP screen's controls moved into `ui/files.rs`, which the SFTP tab uses too:
+  - `check_box`, `nav_button`, `breadcrumbs`
+  - `file_header` and `file_row` with `FileRow`
+  - `selection_bar`, `progress_bar` and `permissions_grid`
+- `--gallery` has a Files section:
+  - a host-side pane with Back, Up, a disabled Refresh, New folder and collapsed breadcrumbs (`/ › … › www › site › releases`)
+  - the selection bar for two selected rows, with Rename disabled
+  - five rows (folder, linked folder, code, archive, lock file) that toggle when clicked, and the select-all box
+  - the drop banner
+  - the four progress bar states (upload, download, paused, waiting to reconnect)
+  - the permissions grid, whose boxes toggle and update `750 rwxr-x---`
+
+**Done check, from a clean profile** (release build, a new vault file in an empty folder, the WSL test server):
+
+| Done item | Result |
+| --- | --- |
+| Open an SFTP tab from a host and browse this PC and the host side by side | Created the vault, added done-a (127.0.0.1:2222, password asked). Open SFTP in the host detail: the first-connection key prompt, Trust and connect, the password prompt, then This PC in the profile folder and the host in its home folder |
+| Open SFTP from a terminal connected to the host | A terminal tab to done-a, then Open SFTP here: a new SFTP tab, connected with no prompts. This PC opened in the folder last used for done-a |
+| Drag files and folders between the panes; the queue shows progress, rate and time left and runs several at once | A local `site` folder (two pages, four 300 MB files) dragged onto the host pane: "2 active · 2 queued", each row with percent, about 225 MB/s and time left. A 2 GB file dragged from the host onto the local `downloads` folder row went into that folder. Hashes matched on both sides |
+| Drop from Explorer onto the host's pane | A file dragged from a WinForms `DoDragDrop` source (Explorer's file-list format): dashed outline while over the pane, then the file was on the host. The first two tries moved the pointer too fast for OLE to register the drag; a slower drag worked |
+| A transfer that meets existing files asks once | `site` already existed on the host: "site already exists", one choice for the transfer. Overwrite merged the folders: the host's own `conf/` and `run.sh` stayed, and `index.html` was replaced |
+| Pause, resume and retry | Paused a download at 8%: "Paused at 8%". Changed the file on the host, then Resume: "Failed: The source changed since the transfer started." Retry started it again, and it finished with a matching hash |
+| A transfer interrupted by a dropped connection resumes after reconnecting | Killed the server's session 1.2 s into a 2 GB download: "Waiting to reconnect at 16%", the banner "The connection was lost. Trying again in 1 s.", then reconnected by itself, with no prompts, and continued from 16%. The finished file's hash matched |
+| Rename, delete and copy the path on both sides; permissions on the host | This PC: Copy path gave `C:\Users\…\holonet-done5\downloads`. Rename to `dl` worked. Delete moved `dl` to the Recycle Bin (its `$R`/`$I` entry was then removed). Host: Copy path gave `/home/holotest/done5/big.bin`. Rename to `big2.bin` worked. Permissions 644 → 600, and `stat` reported 600. Deleting `site` and `big2.bin` said "Deleted 12 files and folders." |
+
+fmt, clippy `-D warnings`, the unit tests (35, 15, 3, 16, 12, 7 and 16) and the WSL integration tests (13 for `holonet-ssh`, 5 for `holonet-files`) pass.
+
+The test folders on both sides, the throwaway vault and the Recycle Bin entry were removed. The test account's home has only its usual files.
+
+**Milestone 5 is done.**
+
+Carried forward, not tested or not built:
+- **Closing the window** (not a tab) while transfers run does not ask first.
+- **The drop banner** names the pane's folder even while the pointer is over a folder row, where the drop actually goes.
+- **The host's selection bar** wraps onto two lines at this window width (the design's bar wraps too).
+- **An identity whose key was deleted** opens its form with the first key selected (from milestone 4).
+- **Dragging out of the app to Explorer**: GPUI 0.2.2 has no drag source on Windows.

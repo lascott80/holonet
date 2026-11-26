@@ -453,7 +453,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-lite 2.6.1",
- "gloo-timers",
+ "gloo-timers 0.3.0",
  "kv-log-macro",
  "log",
  "memchr",
@@ -1572,6 +1572,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2491,6 +2505,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-timers"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4460540da666acdb5722b2a62ac47d18f627fcfc0c728d04dc7226b3f6d40a7"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "glow"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +2977,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "gpui",
+ "holonet-files",
  "holonet-model",
  "holonet-net",
  "holonet-ssh",
@@ -2960,6 +2987,19 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "windows 0.62.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "holonet-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "holonet-model",
+ "holonet-ssh",
+ "russh",
+ "thiserror 2.0.21",
+ "tokio",
  "windows-sys 0.59.0",
 ]
 
@@ -2992,6 +3032,7 @@ dependencies = [
  "holonet-model",
  "rand 0.10.4",
  "russh",
+ "russh-sftp",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -3436,10 +3477,12 @@ dependencies = [
  "jiff-core",
  "jiff-static",
  "jiff-tzdb-platform",
+ "js-sys",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -5404,6 +5447,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "russh-sftp"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b8067d56cde438de09db20be974be92118b85d671c7f50ea3b37cf9011760f0"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytes",
+ "dashmap",
+ "gloo-timers 0.4.1",
+ "jiff",
+ "log",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "russh-util"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5776,6 +5839,16 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -6730,6 +6803,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

@@ -8,6 +8,10 @@
 //! waits for the answer, so the network side and the interface never block
 //! each other.
 //!
+//! A pane in Files mode ([`PaneMode::Files`]) connects the same way, then
+//! opens SFTP instead of a shell and shows a [`FilesView`]; a watcher on the
+//! session notices a dropped connection, since there is no shell to.
+//!
 //! A host behind jump hosts connects through them ([`crate::hops`]). Each hop
 //! has its own prompts, sign-in state and host key check, and a failure says
 //! which hop it belongs to.
@@ -28,6 +32,7 @@ use holonet_ssh::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::HolonetApp;
+use crate::files_view::FilesView;
 use crate::hops::{self, Hop, RouteEvent, Routed};
 use crate::host_form::describe_error;
 use crate::shell::TabState;
@@ -61,8 +66,24 @@ enum UiRequest {
 enum Done {
     /// The route plan allowed no attempt (Tailscale is needed but off).
     Plan(PlanProblem),
-    Connect(Box<Result<(Session, Shell), ConnectError>>),
+    Connect(Box<Result<(Session, Opened), ConnectError>>),
 }
+
+/// What a signed-in session opened for the pane.
+enum Opened {
+    Shell(Shell),
+    Files(holonet_files::remote::Remote),
+}
+
+/// A terminal, or the SFTP screen (milestone 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneMode {
+    Terminal,
+    Files,
+}
+
+/// Each hop's typed secret, kept from another pane ("Open SFTP here").
+pub type Remembered = Vec<Option<(bool, Secret)>>;
 
 /// "the jump host x" at the start of a sentence.
 fn upper_first(text: &str) -> String {
@@ -286,6 +307,12 @@ pub struct Pane {
     plan_notes: Vec<PlanNote>,
     tried: Vec<(Via, String)>,
     key: Option<StoredKey>,
+    mode: PaneMode,
+    /// The SFTP screen, made at the first connection and kept across
+    /// reconnects (it keeps its folders).
+    files: Option<Entity<FilesView>>,
+    /// Waits for the session to end (Files mode).
+    lost_watch: Option<tokio::task::JoinHandle<()>>,
     /// The jump hosts in front of this host, first hop first, or why the
     /// chain cannot be used.
     jumps: Vec<Hop>,
@@ -333,6 +360,8 @@ pub struct Limits {
     pub terminal: holonet_model::TerminalSettings,
     /// How long Automatic waits on the primary address (Settings, Connection).
     pub fallback_wait: Duration,
+    /// Settings, SFTP (Files mode).
+    pub sftp: holonet_model::SftpSettings,
 }
 
 impl Pane {
@@ -340,6 +369,14 @@ impl Pane {
     pub fn set_terminal_settings(&mut self, settings: &holonet_model::TerminalSettings, cx: &mut Context<Self>) {
         self.limits.terminal = settings.clone();
         self.terminal.update(cx, |t, cx| t.set_settings(settings.clone(), cx));
+    }
+
+    /// Settings, SFTP changed: the files view follows.
+    pub fn set_sftp_settings(&mut self, settings: &holonet_model::SftpSettings, cx: &mut Context<Self>) {
+        self.limits.sftp = settings.clone();
+        if let Some(files) = self.files.clone() {
+            files.update(cx, |f, cx| f.set_settings(settings.clone(), cx));
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // GPUI context plus the connection's inputs
@@ -351,9 +388,11 @@ impl Pane {
         runtime: tokio::runtime::Handle,
         limits: Limits,
         size: GridSize,
+        opening: (PaneMode, Remembered),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (mode, remembered) = opening;
         let terminal = cx.new(|cx| {
             let mut t = TerminalView::new(window, cx);
             t.apply_settings(&limits.terminal, window, cx);
@@ -385,7 +424,13 @@ impl Pane {
             plan_notes: Vec::new(),
             tried: Vec::new(),
             key,
-            signs: (0..=jumps.len()).map(|_| SignIn::default()).collect(),
+            mode,
+            files: None,
+            lost_watch: None,
+            // A secret typed in the pane this one was opened from.
+            signs: (0..=jumps.len())
+                .map(|i| SignIn { remembered: remembered.get(i).cloned().flatten(), ..SignIn::default() })
+                .collect(),
             failed_hop: jumps.len(),
             jumps,
             jump_problem,
@@ -425,8 +470,67 @@ impl Pane {
         }
     }
 
+    /// Transfers in this pane's SFTP view that closing it would stop.
+    pub fn unfinished_transfers(&self, cx: &gpui::App) -> usize {
+        self.files.as_ref().map_or(0, |f| f.read(cx).unfinished())
+    }
+
+    /// Closing: stop this pane's transfers (before [`Self::disconnect`]).
+    pub fn stop_transfers(&mut self, cx: &mut Context<Self>) {
+        if let Some(files) = self.files.clone() {
+            files.update(cx, |f, _| f.stop_all());
+        }
+    }
+
+    pub fn is_files(&self) -> bool {
+        self.mode == PaneMode::Files
+    }
+
+    /// Each hop's typed secret, for a pane opened from this one.
+    pub fn remembered(&self) -> Remembered {
+        self.signs.iter().map(|s| s.remembered.clone()).collect()
+    }
+
+    /// The SFTP view, or the terminal: what the pane shows once connected.
+    fn body(&self) -> AnyElement {
+        match &self.files {
+            Some(files) if self.mode == PaneMode::Files => files.clone().into_any_element(),
+            _ => self.terminal.clone().into_any_element(),
+        }
+    }
+
+    /// Notice the connection dropping (Files mode has no shell to say so).
+    fn watch_lost(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else { return };
+        if let Some(old) = self.lost_watch.take() {
+            old.abort();
+        }
+        let (tx, rx) = oneshot::channel();
+        self.lost_watch = Some(self.runtime.spawn(async move {
+            if let Some(reason) = session.closed().await {
+                let _ = tx.send(reason);
+            }
+        }));
+        let attempt = self.attempt;
+        cx.spawn(async move |this, cx| {
+            let Ok(reason) = rx.await else { return };
+            let _ = this.update(cx, |pane, cx| {
+                if pane.attempt != attempt {
+                    return;
+                }
+                if let Some(files) = pane.files.clone() {
+                    files.update(cx, |f, cx| f.set_remote(None, cx));
+                }
+                pane.on_lost(reason, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.state {
+            State::Connected | State::Ended(_) if self.mode == PaneMode::Files => window.focus(&self.focus_handle),
             State::Connected | State::Ended(_) => self.terminal.read(cx).focus(window),
             State::Secret { field, .. } => field.read(cx).focus(window),
             _ => window.focus(&self.focus_handle),
@@ -806,6 +910,7 @@ impl Pane {
         let size = self.terminal.read(cx).grid_size();
         let (done_tx, done_rx) = oneshot::channel::<Done>();
         let route_host = self.route_host().clone();
+        let mode = self.mode;
         let (route_override, fallback_wait, jumps) = (self.route_override, self.limits.fallback_wait, self.jumps.len());
         let ui = tx;
         self.runtime.spawn(async move {
@@ -821,10 +926,20 @@ impl Pane {
                 Routed::Plan(problem) => Done::Plan(problem),
                 Routed::Connect(result) => match *result {
                     Err(e) => Done::Connect(Box::new(Err(e))),
+                    Ok(session) if mode == PaneMode::Files => {
+                        let files = holonet_files::remote::Remote::open(&session).await;
+                        Done::Connect(Box::new(match files {
+                            Ok(remote) => Ok((session, Opened::Files(remote))),
+                            Err(e) => {
+                                let _ = session.close().await;
+                                Err(ConnectError::Protocol(e.to_string()))
+                            }
+                        }))
+                    }
                     Ok(session) => {
                         let shell = session.open_shell(PtySize::cells(size.cols as u16, size.rows as u16)).await;
                         Done::Connect(Box::new(match shell {
-                            Ok(shell) => Ok((session, shell)),
+                            Ok(shell) => Ok((session, Opened::Shell(shell))),
                             Err(e) => {
                                 let _ = session.close().await;
                                 Err(ConnectError::Protocol(format!("{e:#}")))
@@ -1040,11 +1155,14 @@ impl Pane {
         cx.notify();
     }
 
-    fn finish(&mut self, result: Result<(Session, Shell), ConnectError>, cx: &mut Context<Self>) {
+    fn finish(&mut self, result: Result<(Session, Opened), ConnectError>, cx: &mut Context<Self>) {
         match result {
-            Ok((session, shell)) => {
-                if self.reconnect.take().is_some() {
+            Ok((session, opened)) => {
+                let reconnected = self.reconnect.take().is_some();
+                if reconnected {
                     self.reconnect_task = None;
+                }
+                if reconnected && self.mode == PaneMode::Terminal {
                     let time = jiff::Timestamp::now()
                         .to_zoned_datetime(jiff::tz::TimeZone::system())
                         .strftime("%H:%M")
@@ -1060,7 +1178,23 @@ impl Pane {
                     false,
                 );
                 self.session = Some(Arc::new(session));
-                self.terminal.update(cx, |t, cx| t.attach(shell, cx));
+                match opened {
+                    Opened::Shell(shell) => self.terminal.update(cx, |t, cx| t.attach(shell, cx)),
+                    Opened::Files(remote) => {
+                        let files = match self.files.clone() {
+                            Some(files) => files,
+                            None => {
+                                let (host, runtime) = (self.host.clone(), self.runtime.clone());
+                                let (app, settings) = (self.app.clone(), self.limits.sftp.clone());
+                                let files = cx.new(|cx| FilesView::new(&host, runtime, app, settings, cx));
+                                self.files = Some(files.clone());
+                                files
+                            }
+                        };
+                        files.update(cx, |f, cx| f.set_remote(Some(Arc::new(remote)), cx));
+                        self.watch_lost(cx);
+                    }
+                }
                 self.state = State::Connected;
                 self.focus_pending = true;
                 // Each hop's typed secret is remembered for reconnecting, and
@@ -1316,6 +1450,9 @@ impl Pane {
 
     /// Close the connection (on tab close).
     pub fn disconnect(&mut self) {
+        if let Some(watch) = self.lost_watch.take() {
+            watch.abort();
+        }
         if let Some(session) = self.session.take() {
             self.runtime.spawn(async move {
                 let _ = session.close().await;
@@ -1489,7 +1626,7 @@ impl Pane {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionEvent::Close))),
                     ),
             )
-            .child(div().flex_1().min_h_0().opacity(0.75).child(self.terminal.clone()))
+            .child(div().flex_1().min_h_0().opacity(0.75).child(self.body()))
             .child(
                 div()
                     .flex_none()
@@ -1497,7 +1634,11 @@ impl Pane {
                     .py(theme::SPACE_2)
                     .text_meta()
                     .text_color(theme::ink_muted())
-                    .child("Scrollback is kept. The shell session itself restarts after reconnecting."),
+                    .child(if self.mode == PaneMode::Files {
+                        "Both folders are kept. Transfers continue after reconnecting."
+                    } else {
+                        "Scrollback is kept. The shell session itself restarts after reconnecting."
+                    }),
             )
             .into_any_element()
     }
@@ -1905,7 +2046,7 @@ impl Pane {
             .child(div().text_color(color).child(word))
             .children(items.into_iter().map(|i| div().child(i)))
             .child(div().flex_1())
-            .child("xterm-256color · UTF-8")
+            .child(if self.mode == PaneMode::Files { "SFTP" } else { "xterm-256color · UTF-8" })
     }
 }
 
@@ -1924,6 +2065,7 @@ impl Render for Pane {
         let size = self.terminal.read(cx).grid_size();
         let state_word: SharedString = match &self.state {
             _ if self.reconnect.is_some() => "Reconnecting".into(),
+            State::Connected if self.mode == PaneMode::Files => "Connected".into(),
             State::Connected => format!("{} × {}", size.cols, size.rows).into(),
             State::Connecting | State::HostKey { .. } | State::Secret { .. } => "Connecting".into(),
             State::KeyChanged { .. } => "Host key changed".into(),
@@ -1952,12 +2094,12 @@ impl Render for Pane {
                 let kind = *kind;
                 self.failed_view(&kind, &title, &body, cx)
             }
-            State::Connected => self.terminal.clone().into_any_element(),
+            State::Connected => self.body(),
             State::Ended(reason) => div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().opacity(0.75).child(self.terminal.clone()))
+                .child(div().flex_1().min_h_0().opacity(0.75).child(self.body()))
                 .child(
                     div()
                         .flex()

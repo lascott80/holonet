@@ -37,6 +37,7 @@ pub use hostkey::{KeyStatus, PresentedKey, classify, fingerprint};
 pub use keys::{
     GeneratedKey, KeyFileError, KeyInfo, KeyKind, algorithm_label, convert_ppk, generate_key, inspect_private_key,
 };
+pub use russh_sftp;
 
 /// Output chunks buffered before the reader applies back-pressure.
 const OUTPUT_BUFFER: usize = 256;
@@ -107,6 +108,13 @@ impl Session {
     }
 
     /// Run a command and collect its output (Install on host).
+    /// Open the `sftp` subsystem on a new channel of this session.
+    pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
+    }
+
     pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command).await?;
@@ -175,6 +183,24 @@ impl Session {
     /// A lost jump host is reported first: it is the cause.
     pub fn lost_reason(&self) -> Option<LostReason> {
         chain_reason(&self.lost_watches())
+    }
+
+    /// Wait for the connection to end: the reason if it was lost, `None`
+    /// if it was closed on purpose ([`Session::close`]). For sessions without
+    /// a shell (SFTP), which have no channel of their own to watch.
+    pub async fn closed(&self) -> Option<LostReason> {
+        while !self.handle.is_closed() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let watches = self.lost_watches();
+        // The reason can be recorded a moment after the handle closes.
+        for _ in 0..12 {
+            if let Some(reason) = chain_reason(&watches) {
+                return Some(reason);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        None
     }
 
     /// Open a PTY and a login shell. The shell runs on a Tokio task until it

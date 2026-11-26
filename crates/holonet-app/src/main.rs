@@ -14,6 +14,7 @@
 mod app;
 mod assets;
 mod boxdraw;
+mod files_view;
 mod font_check;
 mod gallery;
 mod hello;
