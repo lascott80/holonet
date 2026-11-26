@@ -1938,3 +1938,52 @@ fmt, clippy `-D warnings` and all workspace tests pass (`holonet-model`: 22).
 fmt, clippy `-D warnings` and all workspace tests pass.
 
 The gallery gets the swatches and group cards in phase 9 with the other milestone 6 controls.
+
+## Milestone 6, phase 3: forwarding engine (26 Nov 2026)
+
+**`holonet-ssh::forward`**, with `Session::forward(ForwardSpec) -> Result<Forward, ForwardError>`:
+- **Specs:**
+  - `ForwardSpec::Local { bind_address, port, destination, destination_port }`
+  - `Remote { … }` (port 0 lets the host choose)
+  - `Dynamic { bind_address, port }`
+  - An empty bind address means 127.0.0.1.
+- **Binding is done before `forward` returns,** so these come back at once as `ForwardError`s with interface text:
+  - "Port 5432 is already in use on this PC."
+  - Windows' reserved ranges or a missing address: "This PC would not open port … on …: …"
+  - "The host refused to forward port 80."
+  - "The connection to the host was lost."
+- **A task serves connections until the `Forward` is stopped or dropped, or the session is lost.** The session is checked every 500 ms.
+- **`ForwardStatus`:**
+  - `Active { port, open, total, last_error }` while it runs, where `port` is the one actually bound, also for port 0
+  - `Failed(ConnectionLost)` or `Stopped` at the end
+  - `Forward::watch()` follows it
+- **A connection that cannot be made does not stop the forward.** Its reason becomes `last_error`, for example:
+  - "127.0.0.1:18199: the host could not connect to it"
+  - "127.0.0.1:52011 on this PC: nothing is listening there"
+  - "localhost:18198: the host could not connect to it"
+- **Stopping** closes the listener and every open connection. For a remote forward it also sends `cancel-tcpip-forward`.
+- **Remote forwards:**
+  - The session keeps a route table (`forward::Routes`), shared with its handler.
+  - The handler's `server_channel_open_forwarded_tcpip` accepts channels for ports in the table and rejects others with `ConnectFailed`.
+  - Each accepted channel is joined to its destination on this PC.
+- **SOCKS5:**
+  - RFC 1928 CONNECT with no authentication; IPv4, IPv6 and domain names, which the host resolves.
+  - Other commands get reply 7 (not supported), other address types 8.
+  - Failed opens map `ConnectFailed` to reply 5 (refused) and `AdministrativelyProhibited` to 2.
+  - Handshake errors are the client's and are not reported.
+- **`Session` now holds its russh handle in an `Arc`** so forward tasks can open channels after `forward` returns. Jump-hosted sessions forward through their own (innermost) session.
+- **Forward failures** have their own wording ("the host could not connect to it"), separate from the jump-host wording used when connecting.
+
+**Tests** (`tests/forward.rs`, WSL; each starts Python's web server on the host's 127.0.0.1 on its own port and removes it):
+
+| Test | Checks |
+| --- | --- |
+| `local_forward_reaches_a_host_service` | Port 0 binds and reports its port. A download works. Status counts `total: 1, open: 0` afterwards. A closed destination leaves the forward running with the reason. `stop()` ends with `Stopped` and the port can be bound again |
+| `a_port_in_use_is_reported` | Local and Dynamic on a port this test holds: `PortInUse` with its text. A bind address this PC lacks (192.0.2.1): `Bind` |
+| `remote_forward_reaches_this_pc` | Port 0: the host's choice is reported. The host's curl gets "hello from this PC". Port 80: `Refused(80)`. A closed destination on this PC: the reason. After `stop()` the host's curl gets nothing (000) |
+| `dynamic_forward_is_a_socks_proxy` | A SOCKS5 CONNECT to `localhost` (resolved by the host) reaches its web server. A closed port gets reply 5 and the reason; `total: 2` |
+| `a_lost_connection_ends_the_forward` | `kill -9 $PPID` on the host: `Failed(ConnectionLost)` with "The connection to the host was lost.", the port is closed, and a new forward on that session is refused at once |
+
+All five passed on four runs in a row (about 2.7 s each). The existing WSL tests (13) still pass with the new handler. The host's home has only its usual files afterwards.
+
+fmt and clippy `-D warnings` pass.

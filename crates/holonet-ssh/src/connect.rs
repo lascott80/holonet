@@ -178,6 +178,8 @@ pub(crate) struct Handler {
     rejected: Arc<Mutex<bool>>,
     /// Why the connection ended, once it has.
     lost: Arc<Mutex<Option<LostReason>>>,
+    /// Where the host's `forwarded-tcpip` channels go (remote forwards).
+    routes: crate::forward::Routes,
 }
 
 /// Why an established connection ended without the shell exiting.
@@ -267,6 +269,28 @@ impl client::Handler for Handler {
             client::DisconnectReason::Error(e) => Err(e),
         }
     }
+
+    /// A connection to a port the host listens on for a remote forward.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // The channel is accepted first; `accept` then joins it to this PC.
+        // If the forward stopped in between, the channel just closes.
+        if self.routes.has(connected_port) {
+            reply.accept().await;
+            let _ = self.routes.accept(connected_port, channel);
+        } else {
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) type Handle = client::Handle<Handler>;
@@ -277,6 +301,7 @@ pub(crate) struct Connected {
     pub info: SessionInfo,
     pub lost: Arc<Mutex<Option<LostReason>>>,
     pub via: Option<Box<crate::Session>>,
+    pub routes: crate::forward::Routes,
 }
 
 /// Connect (through the jump host, if any), run the handshake with the host
@@ -326,6 +351,7 @@ where
     let lost = Arc::new(Mutex::new(None));
     let info = Arc::new(Mutex::new(SessionInfo::default()));
     let rejected = Arc::new(Mutex::new(false));
+    let routes = crate::forward::Routes::default();
     let handler = Handler {
         host: opts.host.clone(),
         port: opts.port,
@@ -333,6 +359,7 @@ where
         info: info.clone(),
         rejected: rejected.clone(),
         lost: lost.clone(),
+        routes: routes.clone(),
     };
     let mut handle = match client::connect_stream(config, stream, handler).await {
         Ok(handle) => handle,
@@ -342,7 +369,7 @@ where
     let method = sign_in(&mut handle, opts).await?;
     let mut info = info.lock().unwrap().clone();
     info.auth_method = method.to_string();
-    Ok(Connected { handle, info, lost, via: None })
+    Ok(Connected { handle, info, lost, via: None, routes })
 }
 
 async fn open_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, ConnectError> {
@@ -501,6 +528,7 @@ pub async fn probe(host: &str, port: u16, timeout: Duration) -> Result<Presented
         info: Arc::new(Mutex::new(SessionInfo::default())),
         rejected: Arc::new(Mutex::new(false)),
         lost: Arc::new(Mutex::new(None)),
+        routes: Default::default(),
     };
     let config = Arc::new(client::Config::default());
     let handshake = client::connect_stream(config, stream, handler);
