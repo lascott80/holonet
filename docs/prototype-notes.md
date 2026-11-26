@@ -2776,3 +2776,64 @@ The spike program `m7_update.rs` is gone, replaced by `updates.rs`. `serde_json`
 **Cleanup and checks:**
 - The test vault, the exported keys and the backup were removed. The test account's `authorized_keys` is its original 3 lines, mode 600, and nothing was left in `/tmp`.
 - fmt, clippy `-D warnings` and the workspace tests pass: `holonet-model` 29, `holonet-ssh` 8 unit tests, `holonet-app` 52.
+
+
+## Milestone 7 phase 9: release packaging
+
+**The icon:**
+- `crates/holonet-app/assets/app-icon/make_icon.py` (standard library only; there is no image library here) draws the globe mark from `globe.svg` in `accent` on a `card` tile with a `line` border.
+- It writes `holonet.ico` with sizes 16 to 256 as PNG entries, plus a 256px PNG preview.
+- Small sizes get a thicker stroke so the globe still reads.
+
+**Version details:**
+- `build.rs` writes a resource script and compiles it with the Windows SDK's `rc.exe`, then links the `.res` into the binary.
+  - It finds the newest SDK for this PC's processor, falling back to the x64 one. `RC` overrides it.
+  - The script uses numbers in place of `winver.h`'s names, so no include path is needed.
+- **The icon is resource 1:** GPUI 0.2.2 loads resource 1 for the window (`load_icon` in its Windows platform), so the same resource gives both the file icon and the window icon.
+- **Without the SDK:** the build still succeeds, with a warning. `release.yml` sets `HOLONET_REQUIRE_RC`, which makes that case an error instead.
+- **Details:** Holonet, version 0.1.0, "Copyright (c) 2026 the Holonet authors. MIT licence."
+
+**Licences:**
+- `LICENSE` (MIT, matching the workspace's `license = "MIT"`) is new at the root.
+- `scripts/package.py` makes `dist/holonet-<version>-windows-<arch>.zip` holding:
+  - `holonet.exe`
+  - `README.txt` (running it, the SmartScreen warning, where the vault and logs are, licences)
+  - `LICENSE.txt`
+  - `licenses/fonts/`: the three OFL texts, the fonts README and the Nerd Font NOTICE
+  - `licenses/THIRD-PARTY-LICENSES.txt`
+- **The crate list:**
+  - It comes from `cargo metadata --filter-platform <target>`, following only normal dependencies from `holonet-app`: 556 crates for ARM64.
+  - Each crate's LICENSE, COPYING and NOTICE files are included (about 5 MB of text).
+  - 31 crates ship no licence file. For those, the list gives their declared licence only.
+
+**`release.yml`:**
+- **Trigger:** a `v*` tag now runs it (the phase 0 branch trigger is gone).
+- **Version check:** it checks that the tag matches `holonet-app`'s version.
+- **Builds:** ARM64 on `windows-11-arm` and x64 on `windows-latest`, each packaged.
+- **The release:** an Ubuntu job attaches both zips and `SHA256SUMS.txt` to a draft release with `gh release create --draft`. A tag with a suffix makes a pre-release, which the update check never reports.
+
+**The history check** (every blob on every ref, 66 commits; the script printed no secret values):
+
+| Looked for | Found |
+| --- | --- |
+| `.dev` files, the test passwords and passphrases, the test key bodies | Never committed |
+| Private key blocks | Only the throwaway test fixtures and test constants |
+| Tailnet and LAN addresses, `ts.net` names, emails | Only examples and the designs' placeholders (100.64.0.x, 10.x, 192.168.1.40 and .51, `tail1234`, `deploy@…`) |
+| Personal names and paths | This PC's short Windows user name in one test string, and this PC's name in the showcase's canned prompt. Both were replaced in this phase; older commits keep them. |
+| Commit identities | The owner's name with GitHub's noreply address, and Claude's |
+
+- The owner was told about the leftovers and accepted them. The owner then made the repository public.
+- **Actions minutes:** while the repository was private, its Windows runners (counted at 2×) were using up the free minutes. One CI run was cancelled to save them. Public repositories run free.
+
+**The exit check:**
+- **The workflow:** the `v0.1.0-rc1` tag ran it with arm64, x64 and release all successful. It made a draft pre-release, "Holonet 0.1.0-rc1", with both zips (32 and 33 MB) and the checksums.
+- **The download:**
+  - The ARM64 zip's hash matched `SHA256SUMS.txt`.
+  - I added an internet mark to the exe (`Expand-Archive` does not carry the zip's mark over), then started it with `HOLONET_VAULT` set to a copy of the test vault.
+- **What ran:**
+  - It opened at Vault locked, with no console window.
+  - The window class has its icon, and the exe's version details read as above.
+  - It closed cleanly with WM_CLOSE.
+- **SmartScreen:** starting the exe through ShellExecute did not prompt. A double-click from Explorer may still warn once; README.txt explains that warning.
+- **Cleanup:** the download, the test vault copy and `dist/` were removed. No `%APPDATA%\Holonet` exists.
+- **Checks:** fmt, clippy `-D warnings` and the `holonet-app` tests (52) pass.

@@ -164,7 +164,7 @@ Each phase ends with a commit and a check.
 | 6 | **Command palette** *(done; checked over the vault view and a terminal)* and Ctrl Shift N and L | Every section's entries run; Ctrl Enter splits; the palette works over a terminal |
 | 7 | **Updates** *(done; checked against two public repositories as stand-ins, offline, and this private one)*: the check, the notice, the dot, About and updates | Against a test release: notice, dot, Later, a newer one shows again; offline says it could not reach GitHub |
 | 8 | **Earlier items** *(done; also the vault backup export; the caption X button was not testable with synthetic clicks)*: restore open sessions, Windows accent colour, private key export | Close with two tabs and a split, start again: they come back and reconnect; an exported key signs in with OpenSSH in WSL |
-| 9 | **Release packaging:** icon, version details, no console, licences, the zips, `release.yml`, and the history check before the repository goes public | A `v0.1.0-rc1` tag makes a draft release whose ARM64 zip, downloaded, runs here |
+| 9 | **Release packaging** *(done; the repository is public)*: icon, version details, no console, licences, the zips, `release.yml`, and the history check before the repository goes public | A `v0.1.0-rc1` tag makes a draft release whose ARM64 zip, downloaded, runs here |
 | 10 | **Wrap-up:** notes, `CLAUDE.md`, gallery, the done check from a clean profile, PR, then the `v0.1.0` release once the PRs are merged | Done check passes; the owner publishes 0.1.0 |
 
 ## States to design
