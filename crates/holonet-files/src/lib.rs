@@ -3,8 +3,12 @@
 //! same [`Entry`] so one file list can show either. The transfer engine
 //! (phase 3) builds on both.
 
+pub mod engine;
+pub mod format;
 pub mod local;
+pub mod plan;
 pub mod remote;
+pub mod transfer;
 
 use std::fmt;
 

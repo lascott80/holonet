@@ -1473,3 +1473,53 @@ fmt, clippy, and the unit tests (35, 16, 12, 7, 13 and 16) pass.
   - All passed on the first run. Each test uses its own folder and removes it, and the test account's home folder was left as it was.
 
 fmt, clippy, and the unit tests pass (`holonet-files` 7, the others as before).
+
+## Milestone 5, phase 3: transfer engine (25 Nov 2026)
+
+New modules in `holonet-files`, still without a window.
+
+**`format`:** sizes, rates and time left as drawn ("940 B", "48.2 MB", "4.2 MB/s", "4 s left", "3 min left").
+
+**`plan`:** `plan_upload` and `plan_download` expand the selected items into the folders to create and the files to copy.
+- **Conflicts** are the selected items whose names already exist at the destination; `conflicts()` lists them for the popup. `resolve(choice)` applies the choice to all of them:
+  - **Overwrite** replaces files and merges folders.
+  - **Keep both** takes the first free name: "index (2).html", "site (1)", ".bashrc (1)".
+  - **Skip** drops those items and lists them as skipped.
+- **Links:** a link to a file is copied as the file; a link to a folder is skipped with its reason. There are no loops, and Windows cannot make the link anyway.
+- **Names Windows cannot use** are skipped on download with their reason: reserved characters, a trailing dot or space, or `CON`/`COM1`-style names.
+- `create_folders` makes them parents first, reusing existing ones. `jobs()` gives the files to queue.
+
+**`transfer`:** `upload` and `download` copy one file in 256 KB chunks, checking a pause or cancel flag between chunks.
+- **Downloads** write to `name.holonet-part` and rename it over the target when complete.
+- **Resume:**
+  - A resumed download appends to its part file.
+  - A resumed upload continues from the host's size.
+  - Either happens only if the source still matches the `Stamp` (size and modification time) taken when the copy first started. Otherwise it fails with "The source changed since the transfer started."
+- **At the end:** the sizes must match, and the modification time is carried over.
+- **Telling a refusal from a lost connection:** SFTP file handles report both as plain I/O errors. `classify` asks the server for `realpath(".")` with a 5 s limit. No answer means the connection went; an answer means a refusal, shown with the server's message.
+
+**`engine`:**
+- `Queue` is the plain state:
+  - start order up to the limit
+  - the summary ("2 active · 1 paused · 2 queued", "1 waiting to reconnect · 1 failed", "Idle")
+  - a rate smoothed over samples at least 0.25 s apart, and "64% · 4.2 MB/s · 4 s left"
+- `Engine` runs it on Tokio:
+  - `add`, `pause`, `resume`, `retry` (from nothing), `remove` (cancels an active copy and deletes its part file), `clear_finished`, `set_at_once`
+  - `set_remote`; `snapshot` and `summary` for the interface
+  - events: `Changed`, at most every 100 ms per active copy, and `ConnectionLost`
+- **A copy that loses the connection is Interrupted, not failed.** The engine then stops starting copies until `set_remote` gives it a new connection, which queues interrupted copies again.
+
+**Tests:**
+- **Unit (8 new, 15 in the crate):** formatting, Keep both names, Windows-unsafe names, conflict resolution paths, queue order and summary, the rate and progress text, part paths.
+- **WSL** (`cargo test -p holonet-files --release --test transfer`, 3 tests):
+
+| Test | Result |
+| --- | --- |
+| A folder (with an empty folder and a nested one) and a file uploaded where both already exist | Conflicts listed; Keep both made `site (1)` and `notes (1).txt`; Overwrite merged `site` (kept `old.txt`) and replaced `notes.txt`; Skip sent nothing and listed two skipped; the folder downloaded back matched byte for byte, empty folder included, no part file left |
+| Pause and resume a 192 MB upload | Paused part-way ("1 paused"), resumed, and matched |
+| Change the source while paused | Failed with "The source changed since the transfer started."; Retry started over and matched the new contents |
+| **Kill the connection mid-download** (`kill -9` the connection's own sshd process from a second connection) | Interrupted, `ConnectionLost`, "1 waiting to reconnect". The part file kept the bytes so far; handed the second connection, the copy resumed from exactly those bytes and matched. Three runs killed it at 26, 40 and 53 MB of 96 MB |
+
+- **A race in the first version of the pause test:** a 64 MB upload finishes in about 0.2 s, so it sometimes completed before the pause landed. Two runs failed this way when the tests ran in parallel. The files are now larger (192 MB and 128 MB), the pause comes at the first progress report, and three full runs then passed. The failed runs left two temp folders here, which were removed. The server's home folder was clean after every run.
+
+fmt, clippy, and the unit tests (`holonet-files` 15, the others as before) pass.

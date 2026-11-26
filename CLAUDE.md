@@ -26,7 +26,7 @@ A Cargo workspace. Everything except `holonet-app` builds and tests without a wi
 | `holonet-ssh` | Connecting, host key checks, sign-in (password, keyboard-interactive, keys), PTY shells, keep-alive, telling a lost connection from a shell exit, jump hosts (`direct-tcpip`), key generation, `.ppk` conversion, and installing a public key. Forwarding and SFTP come later. | Built |
 | `holonet-net` | Tailscale status over its LocalAPI pipe, route checks, and the route plan (which addresses to try, and how long to wait). | Built |
 | `holonet-app` | The GPUI window, shared controls (`ui/`), vault screens with Hello unlock (`hello.rs`), Hosts, host form, Keychain, Known hosts, Settings, tabs and the host picker, split panes, connection states and reconnect, routes and jump chains (`hops.rs`), find, terminal rendering, and sleep, network and Windows lock events (`platform.rs`). | Built |
-| `holonet-files` | The two sides of the SFTP screen without a window: a host's files over SFTP (`remote`) and this PC's (`local`, with drives and the Recycle Bin), as one `Entry` type. The transfer engine joins in milestone 5. | In progress (milestone 5) |
+| `holonet-files` | The two sides of the SFTP screen without a window: a host's files over SFTP (`remote`) and this PC's (`local`, with drives and the Recycle Bin), as one `Entry` type; transfer planning and conflicts (`plan`), resumable copies (`transfer`) and the queue (`engine`). | In progress (milestone 5) |
 | `holonet-import` | OpenSSH `config` and `known_hosts` parsers. | Planned (milestone 7) |
 
 ## Building and testing
@@ -34,7 +34,7 @@ A Cargo workspace. Everything except `holonet-app` builds and tests without a wi
 - Toolchain pinned in `rust-toolchain.toml`. CI (`.github/workflows/ci.yml`) runs fmt, clippy `-D warnings` and the tests on `windows-11-arm` and `windows-latest`.
 - `cargo run -p holonet-app --release` starts the app with the vault at `%APPDATA%\Holonet\vault.holonet`. Set `HOLONET_VAULT` to another file when testing; never test against the owner's real vault.
 - Hidden modes: `--gallery` (every control, including the Keychain table, identity cards, import list and side panel), `--showcase [options]` (canned terminal output; options such as `light`, `bar`, `size=N` are listed in `main.rs`), `--fonts`, `--parse-bench`, `--find-bench`, `--stream-bench`.
-- Test server: sshd in WSL on port 2222, described in `docs/milestone-1-plan.md`. Its credentials live in `.dev/` (gitignored, never committed). `$env:HOLONET_TEST_SERVER = "1"; cargo test -p holonet-ssh` (and `-p holonet-files --test wsl`) runs the integration tests against it; `cargo run -p holonet-ssh --example shell -- all` drives it without a window. Both share `crates/holonet-ssh/tests/support/`.
+- Test server: sshd in WSL on port 2222, described in `docs/milestone-1-plan.md`. Its credentials live in `.dev/` (gitignored, never committed). `$env:HOLONET_TEST_SERVER = "1"; cargo test -p holonet-ssh` (and `-p holonet-files`, best with `--release` for its large transfers) runs the integration tests against it; `cargo run -p holonet-ssh --example shell -- all` drives it without a window. Both share `crates/holonet-ssh/tests/support/`.
 - Route tests: `cargo run -p holonet-net --example ts_relay --release` forwards this PC's Tailscale address to the WSL server, so a host's Tailscale address can point at it; `--example net_check` prints Tailscale's state and route checks.
 - Results and lessons from every phase are in `docs/prototype-notes.md`, including GPUI and Taffy pitfalls worth reading before UI work.
 
